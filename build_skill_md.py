@@ -25,12 +25,19 @@ S.append("""---
 name: fund-data
 description: 当任务需要写代码实际获取基金领域底层数据时使用——拉取基金全量清单(~2.8万只)、净值全史(单位/累计/复权/分红事件)、单基金一站式快照(pingzhongdata 436KB→20+数据集:规模变动/持有人结构/现任经理/重仓股+债/资产配置/同类排名/申赎状态/费率/货基标志)、季度前十大持仓、区间净值+每日申赎状态、批量实时净值(N只1请求)、蛋卷跨域备胎，零网络的本地计算:复权净值(分红再投)/区间收益/最大回撤/波动/夏普/卡玛/定投回测，以及L6跨域穿透:重仓股批量实时行情(腾讯N只1请求)+个股板块归属(东财slist当日缓存)+共现加权主题聚合,一键输出'这只基金主要是白酒约86%'式白话地图。请求预算制防封:单基金诊断≤2请求、当日磁盘缓存命中0请求、全市场筛选只走列表端点。仅在需要调用数据接口取数时使用：基金概念解释、投资观点讨论等无需取数的话题不要加载本skill。
 origin: custom
-version: 0.2.0
+version: 0.3.0
 ---
 
-# fund-data 基金底层数据工具包 V0.2.0
+# fund-data 基金底层数据工具包 V0.3.0
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透层。**V0.2.0（2026-11-06）：50/50 断言实测通过**（L1单元27 · L2端点smoke 10 · L3三源交叉验证4 · L4请求预算审计2 · L5降级演练7），全程 39 请求覆盖 8 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层。**V0.3.0（2026-11-06）：63/63 断言实测通过**（L1单元32 · L2端点smoke 17 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7），覆盖 11 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+
+**V0.3.0 新增：L7 宏观利率层（债基/理财叙事的数据地基）**
+- 中债官网曲线族（`cb_yield_curve`，40+ 条曲线：国债/企业债AAA~AA-/存单全评级/城投…，1请求=1曲线1年日频全期限，当日缓存）+ `credit_spread` 本地算差 + `cb_curve_tree` 全族 ID
+- 东财利率报表（坑P10 报表名全部从页面 bundle 逆向实测）：`treasury_yield_daily`（中美国债日频+期限利差）/ `shibor_history`（全期限全史）/ `benchmark_rate_history`（2004起基准利率调整+次日沪深涨跌）
+- `repo_rate_gc`（GC007 腾讯通道，DR007 交易所口径代理）+ `cn_treasury_realtime`（push2 国债 2/5/10/30Y 盘中）
+- 坑P8~P11 入册：中债 searchYc 参数黑洞/inlineStr xlsx/EM 报表名逆向/**中债 TLS 指纹墙（requests 稳挂 curl 稳过，通道=subprocess curl）**
+- 实测三源互证：中债 10Y 1.6038 ↔ 东财 1.6038（同口径分毫不差）↔ push2 盘中 1.5986
 
 **V0.2.0 新增：L6 跨域穿透层（R9 场景 04 就位）**
 - `penetrate(query)` 一键穿透：重仓股权重 × 腾讯批量行情（N只1请求不封IP）× 东财板块归属（当日缓存）→ 共现加权主题聚合 → `plain_text_map()` 白话输出
@@ -88,6 +95,9 @@ S.append("""## 端点路由速查（按需定位，不必通读）
 | L6 | `tencent_quote(codes)` | 重仓股批量实时行情（价/PE/PB/市值） | 腾讯(不封IP) | N只=1 |
 | L6 | `concept_blocks(stock)` | 个股板块标签（行业/概念/地域混合） | 东财 push2 | 1/股,当日缓存 |
 | L6 ⭐ | `penetrate(query)` | 一键穿透：权重×行情×板块→主题聚合→`plain_text_map()`白话地图 | 组合 | 冷启≤14,重跑2 |
+| L7 | `cb_yield_curve(curve,year)` / `cb_curve_series` / `credit_spread` | 中债曲线族（国债/企业债/存单AAA~A/城投…）年文件·单期限序列·信用利差本地算差 | 中债(curl通道) | 1/曲线/年,当日缓存 |
+| L7 | `treasury_yield_daily(days)` / `shibor_history(period)` / `benchmark_rate_history()` | 中美国债日频+利差 / SHIBOR全史 / 基准利率调整史(附次日沪深) | 东财 datacenter | 1 |
+| L7 | `repo_rate_gc()` / `cn_treasury_realtime()` | GC007回购(DR007代理) / 国债四期限盘中 | 腾讯+push2 | 1+4 |
 | 降级 | `fund_snapshot` 自动降级 | E2挂→E3+E4a+蛋卷分拆，source标注degraded | 组合 | ~N+2 |
 
 **坑区速查（全部 2026-11-05 实测，修复已内嵌）：**
@@ -102,6 +112,10 @@ S.append("""## 端点路由速查（按需定位，不必通读）
 | P5 已死端点 | fundgz 盘中估值404；蛋卷 growth 服务器错误 | 净值无跨域备胎，诚实报缺 |
 | P6 分红剥离 | unitMoney 事件在但金额被剥离（"分红：每10份派现金元"），拆分混入 | 复权主路径链接官方 equityReturn，unitMoney 仅回退 |
 | P7 序反转 | E3 新→旧 vs E2 旧→新，降级序列喂指标收益方向全反 | 降级快照反转 + 指标/定投入口升序断言 |
+| P8 searchYc黑洞 | 中债查询端点 POST 恒返[]，参数无文档 | 只走 downYearBzqx GET 直出年xlsx |
+| P9 inlineStr | 中债 xlsx 无 sharedStrings，值全在行内 | zipfile+regex 解析，零 pandas 依赖 |
+| P10 报表名 | 东财 datacenter 臆测名全 9501 | 从页面 bundle 逆向（国债/SHIBOR/基准利率三个名实测） |
+| P11 TLS指纹墙 | 中债掐 Python TLS（requests SSL EOF，curl 稳过） | _cb_request 走 subprocess curl，同入限流账本 |
 
 ## Prerequisites
 
@@ -136,6 +150,8 @@ S.append(code(sections["L5 本地计算层（零网络）"]))
 S.append("## L6 跨域穿透层（V0.2.0：重仓股 → 股票域 → 白话地图）\n")
 _l6_key = next(k for k in sections if k.startswith("L6"))
 S.append(code(sections[_l6_key]))
+S.append("## L7 宏观利率层（V0.3.0：中债曲线族 + 东财利率报表 + 腾讯回购代理）\n")
+S.append(code(sections[next(k for k in sections if k.startswith("L7"))]))
 
 S.append("""## 使用示例
 
@@ -157,6 +173,13 @@ fund_realtime_nav(["161725", "110022", "000198"])
 
 # L6 一键重仓穿透（R9 场景 04）
 print(plain_text_map(penetrate("161725")))   # → "这只基金主要是白酒（约 86%）"+持仓明细表
+
+# L7 宏观利率层（债基利率敏感度 / 理财波动地图）
+cb_yield_curve("treasury", year=2026)        # 中债国债曲线全年日频（3536点）
+credit_spread("AA", "3y")[-1]                # 3Y AA 信用利差（企业债−国债对齐算差）
+shibor_history("1年(1Y)", days=5)            # SHIBOR 1Y
+repo_rate_gc()                               # GC007（DR007 交易所口径代理）
+cn_treasury_realtime()                       # 国债 2/5/10/30Y 盘中
 ```
 
 ## When to Activate
@@ -167,9 +190,9 @@ print(plain_text_map(penetrate("161725")))   # → "这只基金主要是白酒�
 - 用户要定投回测/持有收益测算
 - 用户要基金档案（经理/规模变动/持有人结构/费率/申赎状态/风险等级）
 - 用户要批量基金净值刷新或全市场基金清单
-- 关键词：基金净值、复权、分红、回撤、夏普、卡玛、定投、回测、重仓、持仓穿透、白话地图、主题聚合、基金经理、基金规模、持有人结构、基金排名、货币基金、LOF、FOF、场外基金、天天基金、蛋卷
+- 关键词：基金净值、复权、分红、回撤、夏普、卡玛、定投、回测、重仓、持仓穿透、白话地图、主题聚合、基金经理、基金规模、持有人结构、基金排名、货币基金、LOF、FOF、场外基金、天天基金、蛋卷、国债收益率、收益率曲线、信用利差、SHIBOR、银行间利率、同业存单、回购利率、GC007、DR007、基准利率、LPR、中债曲线
 
-**不覆盖（明确边界）**：账户持仓/交易下单（用 ttskill）、港基专项、盘中实时估值（官方已下线，后续版本提供本地估算）、基金经理历任切分、全市场排名筛选 rankhandler、货基万份收益（均规划于下一版本）。
+**不覆盖（明确边界）**：账户持仓/交易下单（用 ttskill）、港基专项、盘中实时估值（官方已下线，后续版本提供本地估算）、基金经理历任切分、全市场排名筛选 rankhandler、货基万份收益、债券持仓明细 zqcc（均规划于下一版本）。
 """)
 
 out = SKILL_DIR / "SKILL.md"

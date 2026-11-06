@@ -1,8 +1,8 @@
 # fund-data
 
-基金领域底层数据工具包（V0.2.0）——对标 [a-stock-data](https://github.com/simonlin1212/a-stock-data) 的形态，为基金诊断/筛选/定投回测等应用层提供零 key、零登录的底层数据原语。
+基金领域底层数据工具包（V0.3.0）——对标 [a-stock-data](https://github.com/simonlin1212/a-stock-data) 的形态，为基金诊断/筛选/定投回测等应用层提供零 key、零登录的底层数据原语。
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透层。**50/50 分层断言实测通过（2026-11-06）**，全程 39 请求覆盖 8 个上游接口（探测期另发现 fundgz/蛋卷 growth 等已下线端点，见坑区 P5）。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算 + L6 跨域穿透 + L7 宏观利率层。**63/63 分层断言实测通过（2026-11-06）**，覆盖 11 个上游接口（探测期另发现 fundgz/蛋卷 growth 等已下线端点，见坑区 P5）。
 
 ## 核心设计
 
@@ -15,6 +15,7 @@
 | 全市场筛选 | 只允许列表端点翻页（1 请求 = 50 只全字段） |
 | 批量实时净值 | N 只 = 1 请求（移动端 FCodes 批量） |
 | 重仓穿透（L6） | 冷启动 ≤14；当日重跑 2 请求（板块标签当日缓存） |
+| 利率曲线（L7） | 1 请求=1 条曲线 1 年日频；当日缓存命中 0 请求 |
 
 所有请求走 `ttfund_get()` 统一入口：强制 HTTPS + 串行限流（1.5s+抖动）+ 会话复用 + 瞬态重试 + 请求计数（预算审计）。
 
@@ -45,7 +46,7 @@ m = fund_metrics(snap)                  # 复权口径：收益/回撤/波动/�
 dca = fund_dca_backtest(snap, amount=1000)
 ```
 
-## 功能一览（18 函数 / 8 上游接口）
+## 功能一览（27 函数 / 11 上游接口）
 
 | 层 | 函数 | 说明 |
 |---|---|---|
@@ -59,12 +60,15 @@ dca = fund_dca_backtest(snap, amount=1000)
 | 本地 | `holding_map()` | 重仓股穿透桥（零网络视图，深度分析对接 a-stock-data） |
 | L6 | `tencent_quote()` / `concept_blocks()` | 重仓股批量实时行情（腾讯，N只1请求）/ 个股板块标签（当日缓存） |
 | L6 ⭐ | `penetrate()` / `plain_text_map()` | 一键重仓穿透：权重×行情×板块 → 共现加权主题聚合 → 白话地图（"这只基金主要是白酒约86%"） |
+| L7 | `cb_yield_curve()` / `cb_curve_series()` / `credit_spread()` | 中债曲线族（40+条：国债/企业债AAA~AA-/存单全评级/城投）年文件·期限序列·信用利差本地算差 |
+| L7 | `treasury_yield_daily()` / `shibor_history()` / `benchmark_rate_history()` | 中美国债日频+期限利差 / SHIBOR全史 / 基准利率调整史（附次日沪深涨跌） |
+| L7 | `repo_rate_gc()` / `cn_treasury_realtime()` | GC007 回购（DR007 交易所代理）/ 国债 2/5/10/30Y 盘中实时 |
 
 ## 测试
 
 ```bash
-python3 test_fund_data.py --offline-only   # L1 单元：27 条，零网络
-python3 test_fund_data.py                  # 全链路 50 条（真数据，约 2 分钟）
+python3 test_fund_data.py --offline-only   # L1 单元：32 条，零网络
+python3 test_fund_data.py                  # 全链路 63 条（真数据，约 3 分钟）
 ```
 
 测试含三源交叉验证（E2↔E3↔E6 净值 4 位小数一致、E2↔E4a 持仓交集 10/10、本地复权收益 vs 官方 syl_1n）、请求预算审计、降级演练。
@@ -73,7 +77,7 @@ python3 test_fund_data.py                  # 全链路 50 条（真数据，约 
 
 ```
 fund_data.py        # 核心模块（可直接 import，含 L6 穿透层）
-test_fund_data.py   # 50 条分层回归测试
+test_fund_data.py   # 63 条分层回归测试
 build_skill_md.py   # 从模块自动组装 SKILL.md（保证内嵌代码逐字节一致，双写仓库+安装目录）
 SKILL.md            # Agent skill 文档（build 产物）：防封铁律/坑区/路由表/全量内嵌代码
 archive/            # 已并入主模块的原型存档
@@ -84,8 +88,9 @@ licai-replica/      # R9 参考页面存档（复刻对齐用素材，非本 ski
 
 ## 路线图
 
+- **V0.3.0（已交付）**：L7 宏观利率层——中债曲线族 40+ 条 + SHIBOR + 基准利率史 + GC007 + 国债盘中（债基/理财叙事数据地基；三源互证 10Y 分毫不差）
 - **V0.2.0（已交付）**：L6 跨域穿透层——`penetrate()` 一键重仓白话地图（R9 场景 04 数据层就位）
-- **下一版本**：全市场排名筛选（rankhandler）/ 货币基金专项（万份收益·7日年化）/ 历任经理切分（F10 jjjl）
+- **下一版本**：全市场排名筛选（rankhandler）/ 货币基金专项（万份收益·7日年化）/ 历任经理切分（F10 jjjl）/ 债券持仓明细（zqcc）
 - **再下一版**：盘中估算本地推演（替代已下线的 fundgz，持仓×实时行情）/ 回撤环境上下文（对接指数估值分位）
 
 不覆盖：账户持仓与交易下单（ttskill 领地）、港基、ETF 一级市场 PCF。

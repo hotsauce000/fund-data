@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-fund-data V0.2.0 — 基金底层数据工具包（天天基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透）
+fund-data V0.3.0 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤2 请求（1×pingzhongdata，0~1×lsjz）
@@ -26,13 +26,25 @@ fund-data V0.2.0 — 基金底层数据工具包（天天基金主源 + 蛋卷�
       → 复权引擎优先链接官方 equityReturn（已处理分红/拆分），unitMoney 解析仅作回退
   P7  E3 lsjz 返回**新→旧**序，E2 netWorthTrend 是**旧→新**序——降级快照必须反转，
       否则喂给指标计算收益方向全反（静默错，比静默空更危险）
+  P8  中债 searchYc POST 是参数黑洞（实测恒返回 []），downYearBzqx GET 直出全年
+      xlsx——只用下载端点，不碰查询端点；中债请求必须带 Referer
+  P9  中债 xlsx 的单元格是 inlineStr（无 sharedStrings），zipfile+regex 可解，
+      无需 pandas/openpyxl——行结构为 (日期, 期限码, 收益率) 三元组
+  P10 东财 datacenter 报表名必须从页面 bundle 逆向（臆测名全 9501）：
+      国债日频=RPTA_WEB_TREASURYYIELD / SHIBOR=RPT_IMP_INTRESTRATEN(filter CNY)
+      / 基准利率调整=RPT_ECONOMY_DEPOSIT_RATE；LPR 独立报表不存在(9501)
+  P11 中债 TLS 指纹墙：requests/urllib 稳定 SSL EOF，curl 稳定 200（A/B 实测
+      2026-11-06）——中债通道用 subprocess curl（_cb_request），仍计入限流与审计
 """
+import html as _html
+import io
 import json
 import re
 import time
 import random
 import urllib.error
 import urllib.request
+import zipfile
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -45,7 +57,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # ══════════════════════════════════════════════════════════════════
 # L1 前置层：限流入口 / 缓存目录 / 请求计数
@@ -828,12 +840,15 @@ def _tencent_prefix(code: str) -> str:
     """6 位代码 → 腾讯行情前缀（sh/sz/bj）。
 
     ⚠️ 92 北交所号段必须先于 9x 判断（920982→bj 而非 sh），错路由=腾讯静默返空。
+    ⚠️ 204xxx 沪市质押式回购（GC001~GC182，repo_rate_gc 依赖）必须走 sh，误判深市=返空。
     """
     c = str(code).lower().strip()
     if c.startswith(("sh", "sz", "bj")):
         return c
     if c.startswith("92") or c[:1] in ("4", "8"):
         return f"bj{c}"
+    if c.startswith("204"):                            # 沪市回购 GC 族（204007=GC007）
+        return f"sh{c}"
     if c in _SH_INDEX_Q or c[:1] in ("5", "6", "9"):
         return f"sh{c}"
     return f"sz{c}"
@@ -873,7 +888,7 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
             return float(v[i]) if v[i] else 0.0
 
         result[key[2:]] = {
-            "name": v[1], "price": f(3), "change_pct": f(32),
+            "name": v[1], "price": f(3), "last_close": f(4), "change_pct": f(32),
             "turnover_pct": f(38), "pe_ttm": f(39),
             "float_mcap_yi": f(44), "mcap_yi": f(45), "pb": f(46),
         }
@@ -1039,3 +1054,319 @@ def plain_text_map(p: dict) -> str:
         lines.append(f"⚠ {len(p['failed_stocks'])} 只未参与主题聚合"
                      f"（合计权重 {p.get('unclassified_weight_pct', 0):.1f}%）: {names}")
     return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════
+# L7 宏观利率层（V0.3.0）：中债曲线族 + 东财利率报表 + 腾讯回购代理
+# ══════════════════════════════════════════════════════════════════
+# 服务基金域分析：债基利率敏感度解释 / 理财波动地图 / 期限匹配 / 信用利差监控。
+# 三条通道：中债官网（曲线族主源，1请求=1条曲线1年日频）· 东财 datacenter
+# （SHIBOR/国债日频/基准利率，报表名见坑P10）· 腾讯（GC007 回购代理）。
+# 中债/东财均走 ttfund_get 统一限流；push2 实时走既有 em_get 股票域线。
+
+CB_BASE = "https://yield.chinabond.com.cn/cbweb-mn"
+CB_REFERER = "https://yield.chinabond.com.cn/cbweb-mn/yield_main?locale=zh_CN"
+
+
+def _cb_request(path: str, params: Optional[dict] = None, method: str = "GET",
+                timeout: int = 30) -> bytes:
+    """中债专用通道：subprocess curl（坑P11：中债 TLS 指纹墙——requests/urllib 稳定
+    SSL EOF，curl 稳定 200，A/B 实测 2026-11-06）。仍计入 ttfund 限流与审计账本。
+
+    参数拼接后整串进 curl（list 参数无 shell 注入面；ycDefId 入 URL 前过白名单校验）。
+    """
+    from urllib.parse import urlencode
+    url = f"{CB_BASE}{path}"
+    if params:
+        url += "?" + urlencode(params)
+    import subprocess
+    for attempt in (1, 2):                              # curl 也有瞬态，重试一次
+        wait = TT_MIN_INTERVAL - (time.time() - _tt_last_call[0])
+        if wait > 0:
+            time.sleep(wait + random.uniform(0.05, 0.3))
+        try:
+            TT_REQUEST_COUNT[0] += 1
+            TT_REQUEST_COUNT[1]["yield.chinabond.com.cn"] = \
+                TT_REQUEST_COUNT[1].get("yield.chinabond.com.cn", 0) + 1
+            cmd = ["curl", "-sS", "--max-time", str(timeout), "-X", method,
+                   "-H", "User-Agent: Mozilla/5.0", "-H", f"Referer: {CB_REFERER}",
+                   "-H", "Accept: */*", url]
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout + 10)
+            if proc.returncode == 0 and proc.stdout:
+                return proc.stdout
+            if attempt == 2:
+                raise RuntimeError(
+                    f"中债 curl 通道失败（rc={proc.returncode}，{len(proc.stdout)}B）: "
+                    f"{proc.stderr.decode('utf-8', 'ignore')[:120] or url[:100]}")
+            time.sleep(1.5)
+        finally:
+            _tt_last_call[0] = time.time()
+    raise RuntimeError("unreachable")
+
+# 关键曲线种子 ID（2026-11-06 实测从 queryTree 提取；cb_curve_tree() 可拉全族校准）
+_CB_CURVES = {
+    "treasury":      ("中债国债收益率曲线", "2c9081e50a2f9606010a3068cae70001"),
+    "enterprise_aaa": ("中债企业债收益率曲线(AAA)", "2c9081e50a2f9606010a309f4af50111"),
+    "enterprise_aa": ("中债企业债收益率曲线(AA)", "2c90818812b319130112c279222836c3"),
+    "ncd_aaa":       ("中债商业银行同业存单收益率曲线(AAA)", "8308218D1D030E0DE0540010E03EE6DA"),
+    "ncd_aa_plus":   ("中债商业银行同业存单收益率曲线(AA＋)", "8308218DB7D90E0DE0540010E03EE6DA"),
+    "ncd_aa":        ("中债商业银行同业存单收益率曲线(AA)", "8308218E52AF0E0DE0540010E03EE6DA"),
+    "ncd_a_plus":    ("中债商业银行同业存单收益率曲线(A＋)", "8308218F885B0E0DE0540010E03EE6DA"),
+    "ncd_a":         ("中债商业银行同业存单收益率曲线(A)", "8308219023310E0DE0540010E03EE6DA"),
+}
+
+
+def _term_years(term: str) -> Optional[float]:
+    """中债标准期限码 → 年：'0d'→0.0，'3m'→0.25，'2y'→2.0；无法解析返回 None。"""
+    t = str(term).strip().lower()
+    try:
+        if t.endswith("d"):
+            return round(float(t[:-1]) / 365, 6)
+        if t.endswith("m"):
+            return round(float(t[:-1]) / 12, 6)
+        if t.endswith("y"):
+            return float(t[:-1])
+    except ValueError:
+        pass
+    return None
+
+
+def _parse_cb_xlsx(content: bytes) -> list[dict]:
+    """中债 downYearBzqx 的 OOXML → [{date, term, term_years, yield_pct}]。
+
+    坑P9：单元格是 inlineStr（无 sharedStrings），zipfile+regex 直接解；
+    行结构 (日期, 期限码, 收益率) 三元组，表头行自然被日期正则排除。
+    """
+    z = zipfile.ZipFile(io.BytesIO(content))
+    sheet = z.read("xl/worksheets/sheet1.xml").decode("utf-8", "ignore")
+    pts = []
+    for row in re.findall(r"<row[^>]*>(.*?)</row>", sheet, re.S):
+        cells = [_html.unescape(c).strip()
+                 for c in re.findall(r"<t[^>]*>([^<]*)</t>", row)]
+        if len(cells) >= 3 and re.fullmatch(r"\d{4}/\d{2}/\d{2}", cells[0]):
+            try:
+                pts.append({"date": cells[0].replace("/", "-"), "term": cells[1],
+                            "term_years": _term_years(cells[1]),
+                            "yield_pct": float(cells[2])})
+            except ValueError:
+                continue                                    # 非数据行（空值等），跳过
+    return pts
+
+
+def _cb_curve_id(curve: str) -> tuple[str, str]:
+    """曲线键 → (名称, ycDefId)。种子表优先，miss 则拉曲线树按名称模糊匹配。"""
+    if curve in _CB_CURVES:
+        return _CB_CURVES[curve]
+    tree = cb_curve_tree()                                 # name → id（含全族 40+ 条）
+    hits = {n: i for n, i in tree.items() if curve in n}
+    if len(hits) == 1:
+        return next(iter(hits.items()))
+    raise ValueError(f"未知曲线 {curve!r}：请用 _CB_CURVES 键（{sorted(_CB_CURVES)}）"
+                     f"或曲线树中的完整名称；模糊命中 {len(hits)} 条不猜。")
+
+
+def cb_curve_tree(force_refresh: bool = False) -> dict[str, str]:
+    """中债曲线树全族 name→ycDefId（40+ 条：国债/国开/企业债AAA~AA-/城投/存单/ABS…）。
+
+    端点 POST /yc/queryTree；磁盘缓存 30 天（曲线族极少变化）。
+    """
+    if not force_refresh:
+        cached = _cache_read("cb_curve_tree.json", max_age_hours=30 * 24)
+        if cached is not None:
+            return cached
+    raw = _cb_request("/yc/queryTree", {"locale": "zh_CN"}, method="POST")
+    root = json.loads(raw)
+    if not isinstance(root, list):
+        root = root.get("data") or []
+    out: dict[str, str] = {}
+
+    def walk(nodes):
+        for n in nodes:
+            if isinstance(n, dict):
+                if n.get("children"):
+                    walk(n["children"])
+                elif n.get("id"):
+                    out[str(n.get("name", ""))] = n["id"]
+
+    walk(root)
+    if len(out) < 10:                                      # 正常 40+，骤降=结构变更
+        raise RuntimeError(f"中债曲线树仅 {len(out)} 条叶子，疑似结构变更，拒绝缓存")
+    _cache_write("cb_curve_tree.json", out)
+    return out
+
+
+def cb_yield_curve(curve: str = "treasury", year: Optional[int] = None,
+                   force_refresh: bool = False) -> dict:
+    """中债收益率曲线·年文件（坑P8：只走 downYearBzqx GET，不碰 searchYc）。
+
+    1 请求 = 1 条曲线 1 年的日频全期限（0d~50y）；当日磁盘缓存命中 0 请求。
+    返回 {curve, year, fetched_at, source, points: [{date, term, term_years, yield_pct}]}。
+    """
+    name, cid = _cb_curve_id(curve)
+    year = int(year or date.today().year)
+    rel = f"cb_curves/{cid}_{year}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
+        if cached is not None:
+            return cached
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", cid):       # 防 tree 数据异常拼入 URL
+        raise ValueError(f"曲线 ID 非法: {cid!r}（需 32 位十六进制）")
+    params = {"locale": "zh_CN", "year": str(year), "ycDefId": cid,
+              "qxll": "0,", "zblx": "txy", "dxbj": "0",
+              "workTime": date.today().isoformat(),
+              "wrjibile": "true", "wrjxCBFlag": ""}
+    content = _cb_request("/yc/downYearBzqx", params)
+    pts = _parse_cb_xlsx(content)
+    if not pts:
+        raise RuntimeError(f"中债 {name} {year} 年文件解析出 0 个数据点"
+                           f"（{len(r.content)} 字节）——参数或上游结构变更，拒绝静默空")
+    snap = {"curve": name, "year": year, "points": pts,
+            "fetched_at": datetime.now().isoformat(timespec="seconds"),
+            "source": "chinabond/downYearBzqx"}
+    _cache_write(rel, snap)
+    return snap
+
+
+def cb_curve_series(curve: str, term: str = "10y", year: Optional[int] = None) -> list[dict]:
+    """单期限时序：[{date, yield_pct}]（日期升序）。term 用中债期限码：'1y'/'3y'/'10y'…"""
+    snap = cb_yield_curve(curve, year)
+    rows = [p for p in snap["points"] if p["term"] == term]
+    if not rows:
+        raise ValueError(f"{snap['curve']} {snap['year']} 无期限 {term!r}，"
+                         f"可用: {sorted({p['term'] for p in snap['points']})[:12]}")
+    return [{"date": p["date"], "yield_pct": p["yield_pct"]} for p in rows]
+
+
+def credit_spread(rating: str = "AA", term: str = "3y",
+                  year: Optional[int] = None) -> list[dict]:
+    """信用利差 = 中债企业债(rating) − 国债，同日期同期限对齐后本地算差（2 请求/年/日缓存）。"""
+    corp = cb_yield_curve(f"enterprise_{rating.lower().replace('+', '_plus')}", year)
+    gov = cb_yield_curve("treasury", year)
+    g = {p["date"]: p["yield_pct"] for p in gov["points"] if p["term"] == term}
+    out = [{"date": p["date"], "spread_pct": round(p["yield_pct"] - g[p["date"]], 4)}
+           for p in corp["points"] if p["term"] == term and p["date"] in g]
+    if not out:
+        raise ValueError(f"企业债({rating}) 与国债在 {term} 无共同日期，无法算利差")
+    return out
+
+
+def _dc_query(report: str, sort_col: str, page_size: int = 60,
+              filter_str: str = "", pages: int = 1) -> list[dict]:
+    """东财 datacenter 宏观报表统一查询（走 ttfund_get 限流；坑P10：报表名需实测）。"""
+    rows: list[dict] = []
+    for pg in range(1, pages + 1):
+        params = {"reportName": report, "columns": "ALL", "pageSize": str(page_size),
+                  "pageNumber": str(pg), "sortColumns": sort_col, "sortTypes": "-1",
+                  "source": "WEB", "client": "WEB"}
+        if filter_str:
+            params["filter"] = filter_str
+        r = ttfund_get("https://datacenter-web.eastmoney.com/api/data/v1/get",
+                       params=params,
+                       headers={"Referer": "https://data.eastmoney.com/cjsj/"})
+        r.raise_for_status()
+        d = r.json()
+        if not d.get("success", False):
+            raise RuntimeError(f"东财 {report} 查询失败: {d.get('message')}")
+        batch = (d.get("result") or {}).get("data") or []
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+    return rows
+
+
+_EM_TSY_FIELDS = {"EMM00588704": "cn_2y", "EMM00166462": "cn_5y",
+                  "EMM00166466": "cn_10y", "EMM00166469": "cn_30y",
+                  "EMG00001306": "us_2y", "EMG00001308": "us_5y",
+                  "EMG00001310": "us_10y", "EMG00001312": "us_30y"}
+
+
+def treasury_yield_daily(days: int = 30) -> list[dict]:
+    """国债收益率·日频（东财 RPTA_WEB_TREASURYYIELD，中债口径）：中美 2/5/10/30Y+期限利差。"""
+    rows = _dc_query("RPTA_WEB_TREASURYYIELD", "SOLAR_DATE", page_size=min(days, 500))
+    out = []
+    for r in rows[:days]:
+        rec = {"date": str(r.get("SOLAR_DATE", ""))[:10]}
+        rec.update({v: r.get(k) for k, v in _EM_TSY_FIELDS.items()})
+        if all(rec.get(c) for c in ("cn_2y", "cn_10y")):
+            rec["cn_10y_2y"] = round(rec["cn_10y"] - rec["cn_2y"], 4)
+        out.append(rec)
+    if not out:
+        raise RuntimeError("东财国债日频返回空（RPTA_WEB_TREASURYYIELD），拒绝静默空")
+    return out
+
+
+def shibor_history(period: Optional[str] = None, days: int = 30) -> list[dict]:
+    """SHIBOR 历史（东财 RPT_IMP_INTRESTRATEN，filter CNY）。
+
+    period=None 返回全期限混合（含 REPORT_PERIOD 字段）；传 '隔夜(O/N)' / '1周(1W)' /
+    '3月(3M)' / '1年(1Y)' 等得单序列。另含 Chibor（中国银行同业拆借市场）。
+    """
+    flt = '(CURRENCY_CODE="CNY")'
+    if period:
+        flt += f'(REPORT_PERIOD="{period}")'
+    rows = _dc_query("RPT_IMP_INTRESTRATEN", "REPORT_DATE", page_size=min(days * 2, 500),
+                     filter_str=flt)
+    out = [{"date": str(r.get("REPORT_DATE", ""))[:10], "period": r.get("REPORT_PERIOD"),
+            "market": r.get("MARKET"), "rate_pct": r.get("IR_RATE"),
+            "change_pct": r.get("CHANGE_RATE")} for r in rows]
+    if not out:
+        raise RuntimeError(f"SHIBOR 查询返回空（period={period!r}），拒绝静默空")
+    if period:                                             # 单序列按日期去重（市场维度折叠）
+        seen, dedup = set(), []
+        for r in sorted(out, key=lambda x: x["date"], reverse=True):
+            if r["date"] not in seen:
+                seen.add(r["date"])
+                dedup.append(r)
+        return dedup
+    return out
+
+
+def benchmark_rate_history() -> list[dict]:
+    """存贷款基准利率历次调整（东财 RPT_ECONOMY_DEPOSIT_RATE，2004 至今）。
+
+    ⚠️ 这是**基准利率调整史**（活期/定期存款、短/中长期贷款），非 LPR 报价——
+    东财无 LPR 独立报表（实测 9501）。附每次调整次日沪深涨跌（NEXT_SH/SZ_RATE）。
+    """
+    rows = _dc_query("RPT_ECONOMY_DEPOSIT_RATE", "REPORT_DATE", page_size=100)
+    out = [{"report_date": str(r.get("REPORT_DATE", ""))[:10],
+            "deposit_demand": r.get("DEPOSIT_RATE_BB"),
+            "deposit_1y": r.get("DEPOSIT_RATE_BA"),
+            "loan_short": r.get("LOAN_RATE_SB"), "loan_1y": r.get("LOAN_RATE_SA"),
+            "next_sh_pct": r.get("NEXT_SH_RATE"), "next_sz_pct": r.get("NEXT_SZ_RATE")}
+           for r in rows]
+    if len(out) < 5:
+        raise RuntimeError(f"基准利率史仅 {len(out)} 条（正常 30+），疑似上游结构变更")
+    return out
+
+
+def repo_rate_gc() -> dict:
+    """GC007 交易所质押式回购利率（腾讯通道，1 请求）——DR007 的代理指标。
+
+    ⚠️ 口径：交易所 vs 银行间（DR007）。走势相关性高，绝对水平有差；
+    需要 DR007 本尊须等中国货币网（本网络环境被墙）或付费源。
+    """
+    q = tencent_quote(["204007"]).get("204007")
+    if not q or not q.get("price"):
+        raise RuntimeError("GC007(204007) 行情获取失败，拒绝静默空")
+    return {"date": datetime.now(_BJ_TZ).strftime("%Y-%m-%d"), "rate_pct": q["price"],
+            "change_pct": q.get("change_pct"), "prev_close": q.get("last_close"),
+            "proxy_for": "DR007", "source": "tencent/GC007-交易所口径"}
+
+
+def cn_treasury_realtime() -> dict:
+    """国债收益率实时盘中（东财 push2 全球债券行情：CN2Y/5Y/10Y/30Y，走 em_get 股票域线）。"""
+    out = {}
+    for term, sec in [("2y", "CN2Y"), ("5y", "CN5Y"), ("10y", "CN10Y"), ("30y", "CN30Y")]:
+        r = em_get("https://push2.eastmoney.com/api/qt/stock/get",
+                   params={"secid": f"171.{sec}", "fields": "f43,f58,f169,f170"},
+                   headers={"User-Agent": UA, "Referer": "https://quote.eastmoney.com/"})
+        r.raise_for_status()
+        d = r.json().get("data") or {}
+        if not d or not d.get("f43"):
+            raise RuntimeError(f"{sec} 实时行情为空（f43 缺失），拒绝静默空")
+        out[term] = {"yield_pct": d["f43"] / 10000,
+                     "change": (d.get("f169") or 0) / 10000,
+                     "change_pct": (d.get("f170") or 0) / 100}
+    out["source"] = "eastmoney/push2-globalbond"
+    out["time"] = datetime.now(_BJ_TZ).isoformat(timespec="seconds")
+    return out

@@ -8,6 +8,7 @@ fund-data V0.2 分层测试运行器（按测试计划 V1.0）
 import json
 import sys
 import traceback
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -108,8 +109,9 @@ def test_l1_offline():
 
     # ── L6 穿透层单元（零网络）：路由 / 标签清洗 / 注入拦截 ──
     cases = {"920982": "bj920982", "832982": "bj832982", "430047": "bj430047",
-             "600519": "sh600519", "000858": "sz000858", "000300": "sh000300"}
-    check("L1", "穿透-腾讯前缀路由(含92段先于9x)",
+             "600519": "sh600519", "000858": "sz000858", "000300": "sh000300",
+             "204007": "sh204007"}                       # 沪市回购 GC 族（repo_rate_gc 依赖）
+    check("L1", "穿透-腾讯前缀路由(92段先于9x+204回购)",
           all(fd._tencent_prefix(k) == v for k, v in cases.items()),
           " ".join(f"{k}→{fd._tencent_prefix(k)}" for k in cases))
     check("L1", "穿透-东财市场号(92北交→0)",
@@ -186,6 +188,41 @@ def test_l1_offline():
     finally:
         (fd.fund_holdings, fd.fund_snapshot, fd.tencent_quote, fd.concept_blocks) = _orig
 
+    # ── L7 宏观利率层单元（零网络：期限映射 / xlsx fixture 解析 / 未知曲线拒绝）──
+    import io as _io
+    import zipfile as _zf
+    check("L1", "利率-期限码映射",
+          fd._term_years("0d") == 0.0 and fd._term_years("3m") == 0.25
+          and fd._term_years("2y") == 2.0 and fd._term_years("9m") == 0.75
+          and fd._term_years("x") is None)
+    _buf = _io.BytesIO()
+    with _zf.ZipFile(_buf, "w") as z:
+        z.writestr("xl/worksheets/sheet1.xml",
+                   "<worksheet><sheetData>"
+                   "<row><c><is><t>日期</t></is></c><c><is><t>标准期限说明</t></is></c>"
+                   "<c><is><t>收益率(%)</t></is></c></row>"
+                   "<row><c><is><t>2026/11/05</t></is></c><c><is><t>10y</t></is></c>"
+                   "<c><is><t>1.6038</t></is></c></row>"
+                   "<row><c><is><t>2026/11/05</t></is></c><c><is><t>bad</t></is></c>"
+                   "<c><is><t>abc</t></is></c></row>"
+                   "</sheetData></worksheet>")
+    pts = fd._parse_cb_xlsx(_buf.getvalue())
+    check("L1", "利率-中债xlsx解析(inlineStr)",
+          len(pts) == 1 and pts[0]["date"] == "2026-11-05"
+          and pts[0]["yield_pct"] == 1.6038 and pts[0]["term_years"] == 10.0,
+          f"{pts}（坏行已跳过）")
+    _orig_tree = fd.cb_curve_tree                        # patch 掉网络依赖，保持离线纯度
+    fd.cb_curve_tree = lambda **k: {"中债国债收益率曲线": "fake_id"}
+    try:
+        expect_raise("L1", "利率-未知曲线拒绝(离线)",
+                     lambda: fd._cb_curve_id("不存在曲线xyz"), "未知曲线")
+        check("L1", "利率-种子表直取", fd._cb_curve_id("treasury")
+              == ("中债国债收益率曲线", "2c9081e50a2f9606010a3068cae70001"))
+        check("L1", "利率-树模糊唯一命中",
+              fd._cb_curve_id("国债收益率曲线") == ("中债国债收益率曲线", "fake_id"))
+    finally:
+        fd.cb_curve_tree = _orig_tree
+
 
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
 def test_l2_smoke():
@@ -231,6 +268,34 @@ def test_l2_smoke():
           and len(pen["detail"]) == 10 and not pen["failed_stocks"],
           f"Top1主题={pen['themes'][0]} 前十大权重{pen['topn_weight_pct']}%")
 
+    # ── L7 宏观利率层 smoke ──
+    curve = fd.cb_yield_curve("treasury", year=date.today().year)
+    latest_d = max(p["date"] for p in curve["points"])
+    y10 = [p["yield_pct"] for p in curve["points"] if p["term"] == "10y"]
+    check("L2", "L7 中债国债曲线年文件",
+          len(curve["points"]) > 200 and len(y10) > 100 and 0.5 < y10[-1] < 5,
+          f"{len(curve['points'])}点 最新{latest_d} 10Y={y10[-1]}%")
+    ncd = fd.cb_curve_series("ncd_aaa", "1y")
+    check("L2", "L7 存单AAA曲线1Y", len(ncd) > 100 and 0.5 < ncd[-1]["yield_pct"] < 5,
+          f"{len(ncd)}点 最新 {ncd[-1]['date']} {ncd[-1]['yield_pct']}%")
+    sp = fd.credit_spread("AA", "3y")
+    check("L2", "L7 信用利差AA-3Y", len(sp) > 100 and -1 < sp[-1]["spread_pct"] < 5,
+          f"{len(sp)}点 最新利差 {sp[-1]['spread_pct']}%")
+    sh = fd.shibor_history("1年(1Y)", days=5)
+    check("L2", "L7 SHIBOR 1Y", len(sh) >= 1 and 0.5 < sh[0]["rate_pct"] < 5,
+          f"{sh[0]['date']} {sh[0]['rate_pct']}%")
+    bm = fd.benchmark_rate_history()
+    check("L2", "L7 基准利率调整史", len(bm) >= 10 and bm[-1]["report_date"] < "2016-01-01",
+          f"{len(bm)}次 最早 {bm[-1]['report_date']}")
+    gc = fd.repo_rate_gc()
+    check("L2", "L7 GC007回购代理", 0.5 < gc["rate_pct"] < 8 and gc["proxy_for"] == "DR007",
+          f"GC007={gc['rate_pct']}% ({gc['source'][:20]})")
+    rt = fd.cn_treasury_realtime()
+    check("L2", "L7 国债实时四期限",
+          all(t in rt for t in ("2y", "5y", "10y", "30y"))
+          and rt["2y"]["yield_pct"] < rt["10y"]["yield_pct"] < rt["30y"]["yield_pct"],
+          f"2Y={rt['2y']['yield_pct']} 10Y={rt['10y']['yield_pct']} 30Y={rt['30y']['yield_pct']}")
+
 
 # ════════════════════ L3 交叉验证（三源互证）════════════════════
 def test_l3_cross():
@@ -264,6 +329,18 @@ def test_l3_cross():
     check("L3", "指标互证 复权收益 vs 官方syl_1n",
           official is not None and mine is not None and abs(mine - official) <= 0.6,
           f"本地{mine}% vs 官方{official}%")
+
+    # 十年期国债收益率三源互证：中债年文件 vs 东财日频 vs push2 实时
+    # （东财 zmgzsyl 页本身即中债口径 → 两源应近乎一致；push2 为盘中实时，宽容差）
+    cb = [p for p in fd.cb_yield_curve("treasury", year=date.today().year)["points"]
+          if p["term"] == "10y"]
+    cb_latest_date = max(p["date"] for p in cb)
+    cb_v = [p["yield_pct"] for p in cb if p["date"] == cb_latest_date][0]
+    em_v = fd.treasury_yield_daily(days=1)[0]["cn_10y"]
+    rt_v = fd.cn_treasury_realtime()["10y"]["yield_pct"]
+    check("L3", "10Y国债三源互证(中债↔东财↔push2)",
+          abs(cb_v - em_v) <= 0.05 and abs(rt_v - cb_v) <= 0.25,
+          f"中债{cb_v}({cb_latest_date}) / 东财{em_v} / 实时{rt_v}")
 
 
 # ════════════════════ L4 请求预算审计 ═════════════════════
