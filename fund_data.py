@@ -73,7 +73,11 @@ TT_MIN_INTERVAL = 1.5            # 东财/天天系最小请求间隔（秒）�
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
+# 坑P12：本 skill 全部端点是国内金融数据站——macOS 系统代理（VPN/Clash，requests 的
+# trust_env 会读 scproxy）转发这些域名只会引入抖动（实测 SSL EOF 间歇失败，curl 直连则稳）。
+# 故两条 Session 一律直连（不读系统代理/环境代理）。
 TT_SESSION = requests.Session()
+TT_SESSION.trust_env = False                          # 直连：绕过系统代理（坑P12）
 TT_SESSION.headers.update({"User-Agent": UA})
 TT_REQUEST_COUNT = [0, {}]       # [总请求数, {host: 次数}] — 预算审计用，ttfund_get 自增
 
@@ -935,6 +939,7 @@ def holding_map(snapshot: dict, topn: int = 10) -> dict:
 
 EM_MIN_INTERVAL = 1.0
 EM_SESSION = requests.Session()
+EM_SESSION.trust_env = False                          # 直连：绕过系统代理（坑P12）
 EM_SESSION.headers.update({"User-Agent": UA})
 EM_REQUEST_COUNT = [0]                              # 股票域东财请求计数（审计用）
 TENCENT_REQUEST_COUNT = [0]                         # 腾讯行情请求计数（审计用；腾讯不封不设限流）
@@ -947,10 +952,16 @@ def em_get(url: str, params: Optional[dict] = None,
     与 ttfund_get 分管不同子域（各自独立的节流线/熔断线），但同属东财风控面——
     em 线触发熔断时建议同时降低 tt 线频率（风控按 IP 不按子域精确区分）。
     """
-    _cbreak_check("em")
-    _cross_proc_throttle("em", EM_MIN_INTERVAL)
-    EM_REQUEST_COUNT[0] += 1
-    return EM_SESSION.get(url, params=params, headers=headers, timeout=timeout, **kwargs)
+    for attempt in (1, 2):                            # 瞬态抖动重试一次（与 ttfund_get 对齐）
+        _cbreak_check("em")
+        _cross_proc_throttle("em", EM_MIN_INTERVAL)
+        try:
+            EM_REQUEST_COUNT[0] += 1
+            return EM_SESSION.get(url, params=params, headers=headers, timeout=timeout, **kwargs)
+        except requests.RequestException:
+            if attempt == 2:
+                raise
+            time.sleep(2.0)
 
 
 _SH_INDEX_Q = {"000300", "000905", "000016", "000688", "000852", "000010"}
@@ -989,7 +1000,8 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
         req.add_header("User-Agent", "Mozilla/5.0")
         TENCENT_REQUEST_COUNT[0] += 1                # 审计账本：腾讯线与东财线并列可查
         try:
-            data = urllib.request.urlopen(req, timeout=10).read().decode("gbk")
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            data = opener.open(req, timeout=10).read().decode("gbk")   # 直连（坑P12）
             break
         except OSError:                            # 含 URLError（其子类）
             if attempt == 2:
