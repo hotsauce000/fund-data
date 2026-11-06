@@ -1,8 +1,8 @@
 # fund-data
 
-基金领域底层数据工具包（V0.1.2）——对标 [a-stock-data](https://github.com/simonlin1212/a-stock-data) 的形态，为基金诊断/筛选/定投回测等应用层提供零 key、零登录的底层数据原语。
+基金领域底层数据工具包（V0.2.0）——对标 [a-stock-data](https://github.com/simonlin1212/a-stock-data) 的形态，为基金诊断/筛选/定投回测等应用层提供零 key、零登录的底层数据原语。
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层。**38/38 分层断言实测通过（2026-11-05）**，全程 39 请求覆盖 6 个上游接口（探测期另发现 fundgz/蛋卷 growth 等已下线端点，见坑区 P5）。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透层。**48/48 分层断言实测通过（2026-11-06）**，全程 39 请求覆盖 8 个上游接口（探测期另发现 fundgz/蛋卷 growth 等已下线端点，见坑区 P5）。
 
 ## 核心设计
 
@@ -14,6 +14,7 @@
 | 同基金当日重复诊断 | **0 请求**（磁盘缓存命中） |
 | 全市场筛选 | 只允许列表端点翻页（1 请求 = 50 只全字段） |
 | 批量实时净值 | N 只 = 1 请求（移动端 FCodes 批量） |
+| 重仓穿透（L6） | 冷启动 ≤14；当日重跑 2 请求（板块标签当日缓存） |
 
 所有请求走 `ttfund_get()` 统一入口：强制 HTTPS + 串行限流（1.5s+抖动）+ 会话复用 + 瞬态重试 + 请求计数（预算审计）。
 
@@ -44,7 +45,7 @@ m = fund_metrics(snap)                  # 复权口径：收益/回撤/波动/�
 dca = fund_dca_backtest(snap, amount=1000)
 ```
 
-## 功能一览（13 函数 / 6 上游接口）
+## 功能一览（18 函数 / 8 上游接口）
 
 | 层 | 函数 | 说明 |
 |---|---|---|
@@ -55,7 +56,9 @@ dca = fund_dca_backtest(snap, amount=1000)
 | 端点 | `fund_detail_danjuan()` | 蛋卷跨域备胎（档案+持仓） |
 | 端点 | `fund_realtime_nav()` | E6 批量最新净值 |
 | 本地 | `adjusted_nav()` / `fund_metrics()` / `fund_dca_backtest()` | 复权净值（官方收益率链式）/ 全指标 / 定投回测 |
-| 本地 | `holding_map()` | 重仓股穿透桥 → 对接 a-stock-data |
+| 本地 | `holding_map()` | 重仓股穿透桥（零网络视图，深度分析对接 a-stock-data） |
+| L6 | `tencent_quote()` / `concept_blocks()` | 重仓股批量实时行情（腾讯，N只1请求）/ 个股板块标签（当日缓存） |
+| L6 ⭐ | `penetrate()` / `plain_text_map()` | 一键重仓穿透：权重×行情×板块 → 共现加权主题聚合 → 白话地图（"这只基金主要是白酒约86%"） |
 
 ## 测试
 
@@ -69,18 +72,20 @@ python3 test_fund_data.py                  # 全链路 38 条（真数据，约 
 ## 仓库结构
 
 ```
-fund_data.py        # 核心模块（可直接 import）
-test_fund_data.py   # 38 条分层回归测试
-build_skill_md.py   # 从模块自动组装 SKILL.md（保证内嵌代码逐字节一致）
+fund_data.py        # 核心模块（可直接 import，含 L6 穿透层）
+test_fund_data.py   # 48 条分层回归测试
+build_skill_md.py   # 从模块自动组装 SKILL.md（保证内嵌代码逐字节一致，双写仓库+安装目录）
 SKILL.md            # Agent skill 文档（build 产物）：防封铁律/坑区/路由表/全量内嵌代码
+archive/            # 已并入主模块的原型存档
 ```
 
 安装为 Agent skill：将 `SKILL.md`（及附带模块）放入 `~/.agents/skills/fund-data/`。
 
 ## 路线图
 
-- **V0.2**：全市场排名筛选（rankhandler）/ 货币基金专项（万份收益·7日年化）/ 历任经理切分（F10 jjjl）
-- **V0.3**：盘中估算本地推演（替代已下线的 fundgz，持仓×实时行情）/ 回撤环境上下文（对接指数估值分位）
+- **V0.2.0（已交付）**：L6 跨域穿透层——`penetrate()` 一键重仓白话地图（R9 场景 04 数据层就位）
+- **下一版本**：全市场排名筛选（rankhandler）/ 货币基金专项（万份收益·7日年化）/ 历任经理切分（F10 jjjl）
+- **再下一版**：盘中估算本地推演（替代已下线的 fundgz，持仓×实时行情）/ 回撤环境上下文（对接指数估值分位）
 
 不覆盖：账户持仓与交易下单（ttskill 领地）、港基、ETF 一级市场 PCF。
 

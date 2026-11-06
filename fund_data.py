@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-fund-data V0.1.2 — 基金底层数据工具包（天天基金主源 + 蛋卷备胎 + 本地计算）
+fund-data V0.2.0 — 基金底层数据工具包（天天基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤2 请求（1×pingzhongdata，0~1×lsjz）
@@ -31,6 +31,9 @@ import json
 import re
 import time
 import random
+import urllib.error
+import urllib.request
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -42,7 +45,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 
 # ══════════════════════════════════════════════════════════════════
 # L1 前置层：限流入口 / 缓存目录 / 请求计数
@@ -786,5 +789,253 @@ def holding_map(snapshot: dict, topn: int = 10) -> dict:
                   "  eastmoney_concept_blocks(code)     # 个股概念板块归属\n"
                   "  baostock_valuation_history(code,s,e) # 估值历史分位\n"
                   "  §6.7 sw_industry_as_of(...)        # 申万行业归属（历史口径）"),
-        "note": "股票代码属股票域，穿透分析请加载 a-stock-data skill 后调用其端点",
+        "note": "零网络桥接视图；一键穿透（含行情+板块+聚合）直接用本层 penetrate()",
     }
+
+
+# ══════════════════════════════════════════════════════════════════
+# L6 跨域穿透层：重仓股 → 股票域行情/板块（内嵌 a-stock-data 通道，V0.2.0）
+# ══════════════════════════════════════════════════════════════════
+# 通道来源与防封纪律均沿用 a-stock-data：腾讯批量行情（不封IP，1请求）+
+# 东财 push2 slist 板块归属（1请求/股，当日磁盘缓存）。push2 走独立限流线
+# EM_MIN_INTERVAL（与 ttfund_get 分管不同子域，峰值合计 ≈1.7 req/s，远低于风控阈值）。
+
+EM_MIN_INTERVAL = 1.0
+EM_SESSION = requests.Session()
+EM_SESSION.headers.update({"User-Agent": UA})
+_em_last_call = [0.0]
+EM_REQUEST_COUNT = [0]                              # 股票域东财请求计数（审计用）
+TENCENT_REQUEST_COUNT = [0]                         # 腾讯行情请求计数（审计用；腾讯不封不设限流）
+
+
+def em_get(url: str, params: Optional[dict] = None,
+           headers: Optional[dict] = None, timeout: int = 15, **kwargs):
+    """股票域东财统一入口（push2 系）：串行限流 + 会话复用（与 ttfund_get 独立计时）。"""
+    wait = EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
+    if wait > 0:
+        time.sleep(wait + random.uniform(0.1, 0.4))
+    try:
+        EM_REQUEST_COUNT[0] += 1
+        return EM_SESSION.get(url, params=params, headers=headers, timeout=timeout, **kwargs)
+    finally:
+        _em_last_call[0] = time.time()
+
+
+_SH_INDEX_Q = {"000300", "000905", "000016", "000688", "000852", "000010"}
+
+
+def _tencent_prefix(code: str) -> str:
+    """6 位代码 → 腾讯行情前缀（sh/sz/bj）。
+
+    ⚠️ 92 北交所号段必须先于 9x 判断（920982→bj 而非 sh），错路由=腾讯静默返空。
+    """
+    c = str(code).lower().strip()
+    if c.startswith(("sh", "sz", "bj")):
+        return c
+    if c.startswith("92") or c[:1] in ("4", "8"):
+        return f"bj{c}"
+    if c in _SH_INDEX_Q or c[:1] in ("5", "6", "9"):
+        return f"sh{c}"
+    return f"sz{c}"
+
+
+def tencent_quote(codes: list[str]) -> dict[str, dict]:
+    """腾讯批量实时行情（通道内嵌自 a-stock-data §1.2）：价/涨跌/换手/PE/PB/市值。
+
+    腾讯通道实测不封 IP，N 只 = 1 请求，是穿透层的行情主力。
+    返回 {纯6位代码: {...}}；非交易时段返回最后成交快照。
+    """
+    if not codes:
+        return {}
+    url = "https://qt.gtimg.cn/q=" + ",".join(_tencent_prefix(c) for c in codes)
+    data = None
+    for attempt in (1, 2):                            # 瞬态 SSL EOF/连接重试一次（实测网络抖动）
+        req = urllib.request.Request(url)
+        req.add_header("User-Agent", "Mozilla/5.0")
+        TENCENT_REQUEST_COUNT[0] += 1                # 审计账本：腾讯线与东财线并列可查
+        try:
+            data = urllib.request.urlopen(req, timeout=10).read().decode("gbk")
+            break
+        except (urllib.error.URLError, OSError):
+            if attempt == 2:
+                raise
+            time.sleep(1.0)
+    result = {}
+    for line in data.strip().split(";"):
+        if "=" not in line or '"' not in line:
+            continue
+        key = line.split("=")[0].split("_")[-1]
+        v = line.split('"')[1].split("~")
+        if len(v) < 53:
+            continue
+
+        def f(i):
+            return float(v[i]) if v[i] else 0.0
+
+        result[key[2:]] = {
+            "name": v[1], "price": f(3), "change_pct": f(32),
+            "turnover_pct": f(38), "pe_ttm": f(39),
+            "float_mcap_yi": f(44), "mcap_yi": f(45), "pb": f(46),
+        }
+    return result
+
+
+def em_market_code(code: str) -> int:
+    """东财 secid 市场号：沪=1，深/北=0（规则照抄 a-stock-data，勿用 startswith('6')）。
+
+    ⚠️ 92 北交所现行号段先于 9x 判断（V3.7.0 实测 920982 → m=0，与深市共用 0）。
+    """
+    c = str(code).lower()
+    if c.startswith("92") or c[:1] in ("4", "8"):     # 北交所：920 现行 + 4x/8x 老段
+        return 0
+    if c.startswith("sh") or c[:1] in ("5", "6", "9"):
+        return 1
+    return 0
+
+
+def concept_blocks(stock_code: str, use_cache: bool = True) -> list[str]:
+    """个股板块标签（通道内嵌自 a-stock-data §3.3 东财 slist，一次请求拿全）。
+
+    板块混合 行业/概念/地域（'白酒Ⅲ'/'酿酒概念'/'贵州板块'），名称自解释；
+    当日磁盘缓存 penetration/{code}.json（存原始标签，清洗规则演进不使缓存失效）。
+    """
+    if not re.fullmatch(r"\d{6}", str(stock_code)):
+        raise ValueError(f"股票代码格式错误: {stock_code!r}（需 6 位数字，防异常上游数据拼入缓存路径）")
+    rel = f"penetration/{stock_code}.json"
+    if use_cache:
+        cached = _cache_read(rel, max_age_hours=20)
+        if cached is not None:
+            return cached
+    params = {"fltt": "2", "invt": "2",
+              "secid": f"{em_market_code(stock_code)}.{stock_code}",
+              "spt": "3", "pi": "0", "pz": "200", "po": "1",
+              "fields": "f12,f14,f3,f128"}
+    r = em_get("https://push2.eastmoney.com/api/qt/slist/get", params=params,
+               headers={"User-Agent": UA, "Referer": "https://quote.eastmoney.com/"})
+    d = r.json()
+    diff = (d.get("data") or {}).get("diff") or {}
+    items = diff.values() if isinstance(diff, dict) else diff
+    tags = [it.get("f14", "") for it in items if it.get("f14")]
+    if not tags:
+        raise RuntimeError(f"{stock_code} 板块归属为空（secid 路由或风控），拒绝静默空")
+    _cache_write(rel, tags)
+    return tags
+
+
+# 噪声停用词：指数成分/交易机制/地域板块——不是"这只基金在押注什么"的信号。
+# ⚠️ 取舍边界：国企改革/央企/一带一路 对多数基金是壳噪声，但对相应主题基金
+# 恰是真实主题——本表按"通用穿透"取舍（宁滤勿噪），主题基金专用分析请自行调整。
+_TAG_STOP = re.compile(
+    r"概念|板块|融资融券|转融券|沪股通|深股通|MSCI|标普|标准普尔|富时|罗素|道琼斯"
+    r"|上证|深证|沪深|中证|国证|创业板|科创板|北交所|HS\d|SH\d|SZ\d|央视|QFII|RQFII"
+    r"|同花顺|东财|基金重仓|机构重仓|预盈预增|预亏预减|股权激励|回购|增持|壳资源"
+    r"|次新股|高送转|含可转债|B转H|AB股|GDR|老字号|国企改革|央企|国资|PPP|一带一路")
+_SUFFIX_ROMAN = re.compile(r"[ⅠⅡⅢⅣⅤ]$|I+$")
+
+
+def _clean_tag(tag: str):
+    """板块名 → 主题词；噪声返回 None。'白酒Ⅲ'→'白酒'，'计算机设备II'→'计算机设备'。
+
+    后缀剥离后长度 <2 的产物（如 'AI' 被 I+$ 剥成 'A'）也返回 None——单字符不构成主题词。
+    """
+    t = tag.strip()
+    if not t or len(t) < 2 or _TAG_STOP.search(t):
+        return None
+    cleaned = _SUFFIX_ROMAN.sub("", t).strip()
+    return cleaned if len(cleaned) >= 2 else None
+
+
+def penetrate(query: str, topn: int = 10) -> dict:
+    """重仓穿透主入口（R9 场景 04）：基金 → 重仓股权重 → 股票域行情+板块 → 白话地图。
+
+    请求预算：1(持仓 jjcc，每次现查——fund_holdings 无缓存) + 1(腾讯批量) + N(板块，当日缓存)
+    → 冷启动最多 ≈14 请求（含 snapshot/fund_list 缓存 miss）；当日重跑 = 2 请求（jjcc+腾讯）。
+    单股失败不中断整体：跳过该股的主题聚合，记入 failed_stocks（含 reason 与权重）。
+    """
+    hold = fund_holdings(query)
+    if not hold:
+        raise RuntimeError(f"{query} 无股票持仓记录（债基/货基？）——"
+                           f"股票穿透需要股票重仓；债券穿透请用 fund_snapshot().top_bonds")
+    latest = max((h["period"] or "" for h in hold))    # 防个别行 period=None 崩 max；按日期取最新
+    pool = [h for h in hold if h["period"] == latest][:topn]
+
+    failed_stocks: list[dict] = []                     # per-stock 降级名单（含权重）
+    picks = []
+    for h in pool:
+        if h.get("nav_pct") is None:                   # 权重解析失败（None 防 TypeError）
+            failed_stocks.append({"code": h["stock_code"], "name": h["stock_name"],
+                                  "weight": None, "reason": "占净值比缺失"})
+            continue
+        picks.append(h)
+    if not picks:
+        raise RuntimeError(f"{query} 最新报告期 {latest} 全部重仓股权重缺失，无法穿透")
+    weight_sum = sum(h["nav_pct"] for h in picks)
+
+    quotes = tencent_quote([h["stock_code"] for h in picks])   # 股票域行情（1 请求）
+
+    theme = defaultdict(float)                         # 主题词 → 累计净值权重
+    for h in picks:
+        try:
+            tags = concept_blocks(h["stock_code"])
+        except Exception as e:                         # 风控/解析失败：跳过该股主题，不中断
+            failed_stocks.append({"code": h["stock_code"], "name": h["stock_name"],
+                                  "weight": h["nav_pct"],
+                                  "reason": f"板块获取失败: {str(e)[:60]}"})
+            continue
+        # 🔴 每股先去重再累计：同一股票的 白酒Ⅱ/白酒Ⅲ 清洗后都是"白酒"，
+        #    不去重会把权重翻倍（实测白酒基金曾算出 259%）
+        uniq = {k for k in (_clean_tag(t) for t in tags) if k}
+        for key in uniq:
+            theme[key] += h["nav_pct"]
+
+    # 平局裁决必须确定：同权重时短词优先（"白酒"2字 胜 "食品饮料"4字，行业分级里
+    # 短词通常是更聚焦的主题），再按字典序——否则 set 遍历序受哈希随机化影响，
+    # 同一基金每次穿透 Top1 主题会在 白酒/食品饮料 间漂移（实测踩过）
+    top_themes = sorted(theme.items(), key=lambda x: (-x[1], len(x[0]), x[0]))[:6]
+    pe_list = sorted(q["pe_ttm"] for q in quotes.values() if q["pe_ttm"] > 0)
+    pe_med = None
+    if pe_list:                                        # 标准中位数：偶数取中间两值均值
+        n = len(pe_list)
+        pe_med = pe_list[n // 2] if n % 2 else (pe_list[n // 2 - 1] + pe_list[n // 2]) / 2
+
+    # 未参与主题聚合的权重 = 板块失败股权重 + 权重缺失股按 0 计（无从取数）
+    unclassified = round(sum(f["weight"] for f in failed_stocks if f["weight"]), 2)
+    detail = [{**h, "quote": quotes.get(h["stock_code"], {})} for h in picks]
+    return {
+        "fund": fund_snapshot(query)["name"],
+        "period": latest, "topn_weight_pct": round(weight_sum, 2),
+        "detail": detail,
+        "themes": [(k, round(v, 2)) for k, v in top_themes],
+        "pe_median_profitable": pe_med,                # 仅盈利股（PE>0）
+        "failed_stocks": failed_stocks,
+        "unclassified_weight_pct": unclassified,
+    }
+
+
+def plain_text_map(p: dict) -> str:
+    """穿透结果 → 白话地图文本（"这只基金主要是白酒约86%"）。"""
+    top = p["themes"][0] if p["themes"] and p["themes"][0][1] >= 5 else None
+    lines = [
+        f"《{p['fund']} 里装了什么》（{p['period']} 季报，前十大占净值 {p['topn_weight_pct']}%）",
+        "",
+        f"一句话：这只基金主要是{top[0]}（相关持仓权重约 {top[1]:.0f}%）。"
+        if top else "一句话：持仓分散，无明显单一主题。",
+        "",
+        f"{'股票':<12}{'权重':>7}{'现价':>9}{'今日':>8}{'PE':>9}{'PB':>7}",
+    ]
+    for h in p["detail"]:
+        q = h.get("quote") or {}
+        pe = q.get("pe_ttm", 0)
+        pe_txt = "亏损" if pe < 0 else f"{pe:.1f}"
+        lines.append(f"{h['stock_name']:<12}{h['nav_pct']:>6.1f}%{q.get('price', 0):>9.2f}"
+                     f"{q.get('change_pct', 0):>7.1f}%{pe_txt:>9}{q.get('pb', 0):>7.2f}")
+    if len(p["themes"]) > 1:
+        lines.append("\n主题词排行: " + "、".join(f"{k} {v:.0f}%" for k, v in p["themes"][:5]))
+    if p.get("pe_median_profitable"):
+        lines.append(f"盈利股 PE 中位数 {p['pe_median_profitable']:.1f} 倍"
+                     f"（已剔除亏损股；{'高于' if p['pe_median_profitable'] > 30 else '不高于'}30 倍参考线）")
+    if p.get("failed_stocks"):
+        names = "、".join(f["name"] for f in p["failed_stocks"])
+        lines.append(f"⚠ {len(p['failed_stocks'])} 只未参与主题聚合"
+                     f"（合计权重 {p.get('unclassified_weight_pct', 0):.1f}%）: {names}")
+    return "\n".join(lines)

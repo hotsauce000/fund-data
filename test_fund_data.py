@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-fund-data V0.1 分层测试运行器（按测试计划 V1.0）
+fund-data V0.2 分层测试运行器（按测试计划 V1.0）
   L1 单元（零网络）· L2 端点 smoke（结构断言）· L3 交叉验证（三源互证）
-  L4 请求预算审计 · L5 降级演练与坑回归
+  L4 请求预算审计 · L5 降级演练与坑回归 · L6 穿透层（确定性/降级/路由/清洗）
 用法: python3 test_fund_data.py [--offline-only]
 """
 import json
@@ -106,6 +106,82 @@ def test_l1_offline():
     finally:
         bad.unlink(missing_ok=True)
 
+    # ── L6 穿透层单元（零网络）：路由 / 标签清洗 / 注入拦截 ──
+    cases = {"920982": "bj920982", "832982": "bj832982", "430047": "bj430047",
+             "600519": "sh600519", "000858": "sz000858", "000300": "sh000300"}
+    check("L1", "穿透-腾讯前缀路由(含92段先于9x)",
+          all(fd._tencent_prefix(k) == v for k, v in cases.items()),
+          " ".join(f"{k}→{fd._tencent_prefix(k)}" for k in cases))
+    check("L1", "穿透-东财市场号(92北交→0)",
+          fd.em_market_code("920982") == 0 and fd.em_market_code("832982") == 0
+          and fd.em_market_code("600519") == 1 and fd.em_market_code("000858") == 0)
+    tag_cases = {"白酒Ⅲ": "白酒", "计算机设备II": "计算机设备", "食品饮料": "食品饮料",
+                 "贵州板块": None, "酿酒概念": None, "HS300_": None,
+                 "标准普尔": None, "融资融券": None}
+    check("L1", "穿透-标签清洗与停用词",
+          all(fd._clean_tag(k) == v for k, v in tag_cases.items()),
+          f"白酒Ⅲ→{fd._clean_tag('白酒Ⅲ')} 计算机设备II→{fd._clean_tag('计算机设备II')}")
+    expect_raise("L1", "穿透-代码注入拦截",
+                 lambda: fd.concept_blocks("60051')('x"), "格式错误")
+    check("L1", "穿透-单字符标签产物拒绝", fd._clean_tag("AI") is None,
+          "'AI' 被 I+$ 剥成单字符 'A' → None")
+
+    # ── 穿透确定性 + 降级路径（mock，零网络）──
+    _orig = (fd.fund_holdings, fd.fund_snapshot, fd.tencent_quote, fd.concept_blocks)
+    _mk_hold = lambda: [
+        {"period": "2026-09-30", "seq": i + 1, "stock_code": c, "stock_name": f"股{i}",
+         "nav_pct": 10.0, "shares_wan": 1, "value_wan": 1}
+        for i, c in enumerate(["600001", "600002", "600003", "600004"])]
+    fd.fund_holdings = lambda q, **k: _mk_hold()
+    fd.fund_snapshot = lambda q, **k: {"name": "测试基金"}
+    fd.tencent_quote = lambda cs: {c: {"name": c, "price": 1.0, "change_pct": 0.0,
+                                       "turnover_pct": 0.0, "pe_ttm": 10.0,
+                                       "float_mcap_yi": 1.0, "mcap_yi": 1.0, "pb": 1.0}
+                                   for c in cs}
+    try:
+        # 平局裁决钉子：等权重双主题（白酒/食品饮料 各40%），两种标签插入序 Top1 恒为短词
+        tops = []
+        for order in (["白酒", "食品饮料", "白酒Ⅲ"], ["食品饮料", "白酒"]):
+            fd.concept_blocks = lambda code, tags=order: tags
+            tops.append(fd.penetrate("161725")["themes"][0][0])
+        check("L1", "穿透-平局裁决确定性(短词胜)", all(t == "白酒" for t in tops),
+              f"两种插入序 Top1: {tops}")
+
+        # 单股板块失败 → failed_stocks 带权重、不中断、detail 保留
+        def _flaky(code, **k):
+            if code == "600003":
+                raise RuntimeError("mock 风控")
+            return ["白酒"]
+        fd.concept_blocks = _flaky
+        p = fd.penetrate("161725")
+        check("L1", "穿透-单股失败降级",
+              p["failed_stocks"] and p["failed_stocks"][0]["weight"] == 10.0
+              and p["unclassified_weight_pct"] == 10.0 and len(p["detail"]) == 4,
+              f"failed={p['failed_stocks'][0]['reason'][:20]} 未分类权重{p['unclassified_weight_pct']}%")
+
+        # nav_pct 缺失 → weight=None、不计入未分类权重
+        fd.fund_holdings = lambda q, **k: [
+            {"period": "2026-09-30", "seq": 1, "stock_code": "600001", "stock_name": "A",
+             "nav_pct": 10.0, "shares_wan": 1, "value_wan": 1},
+            {"period": "2026-09-30", "seq": 2, "stock_code": "600002", "stock_name": "B",
+             "nav_pct": None, "shares_wan": None, "value_wan": None}]
+        fd.concept_blocks = lambda code, **k: ["白酒"]
+        p = fd.penetrate("161725")
+        check("L1", "穿透-nav缺失降级",
+              p["failed_stocks"][0]["weight"] is None and len(p["detail"]) == 1
+              and p["unclassified_weight_pct"] == 0.0,
+              f"reason={p['failed_stocks'][0]['reason']}")
+
+        # 全部权重缺失 / 无股票持仓 → 显式报错
+        fd.fund_holdings = lambda q, **k: [
+            {"period": "2026-09-30", "seq": 1, "stock_code": "600001", "stock_name": "A",
+             "nav_pct": None, "shares_wan": None, "value_wan": None}]
+        expect_raise("L1", "穿透-全权重缺失报错", lambda: fd.penetrate("161725"), "全部重仓股权重缺失")
+        fd.fund_holdings = lambda q, **k: []
+        expect_raise("L1", "穿透-无股票持仓报错", lambda: fd.penetrate("161725"), "无股票持仓")
+    finally:
+        (fd.fund_holdings, fd.fund_snapshot, fd.tencent_quote, fd.concept_blocks) = _orig
+
 
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
 def test_l2_smoke():
@@ -144,6 +220,12 @@ def test_l2_smoke():
     rt = fd.fund_realtime_nav(["161725", "110022"])
     check("L2", "E6 批量净值-2只1请求", len(rt) == 2 and all(x["nav"] and x["nav"] > 0 for x in rt),
           f"{[x['code'] + '@' + str(x['nav']) for x in rt]}")
+
+    pen = fd.penetrate("161725")                      # L6 穿透链路（板块当日缓存命中）
+    check("L2", "L6 穿透-主题聚合白话地图",
+          pen["themes"] and pen["themes"][0][0] == "白酒" and pen["topn_weight_pct"] > 50
+          and len(pen["detail"]) == 10 and not pen["failed_stocks"],
+          f"Top1主题={pen['themes'][0]} 前十大权重{pen['topn_weight_pct']}%")
 
 
 # ════════════════════ L3 交叉验证（三源互证）════════════════════
