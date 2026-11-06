@@ -146,6 +146,10 @@ def test_l1_offline():
             tops.append(fd.penetrate("161725")["themes"][0][0])
         check("L1", "穿透-平局裁决确定性(短词胜)", all(t == "白酒" for t in tops),
               f"两种插入序 Top1: {tops}")
+        fd.concept_blocks = lambda code, **k: ["白酒", "食品饮料", "白酒Ⅲ"]
+        th = fd.penetrate("161725")["themes"][:2]
+        check("L1", "穿透-平局全序钉死", th == [("白酒", 40.0), ("食品饮料", 40.0)],
+              f"themes[:2]={th}（回归为仅按权重排序时必假）")
 
         # 单股板块失败 → failed_stocks 带权重、不中断、detail 保留
         def _flaky(code, **k):
@@ -345,7 +349,8 @@ def main():
         print(f"  {layer}: {p} pass / {f} fail")
     print(f"  合计: {R['pass']} pass / {R['fail']} fail")
     if not OFFLINE_ONLY:
-        print(f"  全程请求数: {fd.TT_REQUEST_COUNT[0]} → {fd.TT_REQUEST_COUNT[1]}")
+        print(f"  三线请求账本: 基金域东财 {fd.TT_REQUEST_COUNT[0]} {fd.TT_REQUEST_COUNT[1]}"
+              f" | 股票域东财 {fd.EM_REQUEST_COUNT[0]} | 腾讯 {fd.TENCENT_REQUEST_COUNT[0]}")
     sys.exit(1 if R["fail"] else 0)
 
 

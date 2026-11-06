@@ -30,7 +30,7 @@ version: 0.2.0
 
 # fund-data 基金底层数据工具包 V0.2.0
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透层。**V0.2.0（2026-11-06）：49/49 断言实测通过**（L1单元26 · L2端点smoke 10 · L3三源交叉验证4 · L4请求预算审计2 · L5降级演练7），全程 39 请求覆盖 8 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透层。**V0.2.0（2026-11-06）：50/50 断言实测通过**（L1单元27 · L2端点smoke 10 · L3三源交叉验证4 · L4请求预算审计2 · L5降级演练7），全程 39 请求覆盖 8 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
 
 **V0.2.0 新增：L6 跨域穿透层（R9 场景 04 就位）**
 - `penetrate(query)` 一键穿透：重仓股权重 × 腾讯批量行情（N只1请求不封IP）× 东财板块归属（当日缓存）→ 共现加权主题聚合 → `plain_text_map()` 白话输出
@@ -134,7 +134,8 @@ S.append(code(sections["V0.1 端点：fund_realtime_nav（E6 批量实时净值�
 S.append("## 本地计算层（零网络）\n")
 S.append(code(sections["L5 本地计算层（零网络）"]))
 S.append("## L6 跨域穿透层（V0.2.0：重仓股 → 股票域 → 白话地图）\n")
-S.append(code(sections["L6 跨域穿透层：重仓股 → 股票域行情/板块（内嵌 a-stock-data 通道，V0.2.0）"]))
+_l6_key = next(k for k in sections if k.startswith("L6"))
+S.append(code(sections[_l6_key]))
 
 S.append("""## 使用示例
 

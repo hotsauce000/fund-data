@@ -856,7 +856,7 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
         try:
             data = urllib.request.urlopen(req, timeout=10).read().decode("gbk")
             break
-        except (urllib.error.URLError, OSError):
+        except OSError:                            # 含 URLError（其子类）
             if attempt == 2:
                 raise
             time.sleep(1.0)
