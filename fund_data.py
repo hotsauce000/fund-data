@@ -39,6 +39,7 @@ fund-data V0.3.0 — 基金底层数据工具包（基金主源 + 蛋卷备胎 +
 import html as _html
 import io
 import json
+import os
 import re
 import time
 import random
@@ -57,7 +58,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 # ══════════════════════════════════════════════════════════════════
 # L1 前置层：限流入口 / 缓存目录 / 请求计数
@@ -68,29 +69,136 @@ SNAPSHOT_TTL_HOURS = 20          # 距上次抓取 20h 失效（滚动窗口，�
 FUND_LIST_TTL_DAYS = 30
 _BJ_TZ = timezone(timedelta(hours=8))   # E2 时间戳按北京时区解析，非东八区机器不漂移
 
-TT_MIN_INTERVAL = 1.5            # 东财/天天系最小请求间隔（秒）
+TT_MIN_INTERVAL = 1.5            # 东财/天天系最小请求间隔（秒）；批量场景建议调 2~3
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 TT_SESSION = requests.Session()
 TT_SESSION.headers.update({"User-Agent": UA})
-_tt_last_call = [0.0]
 TT_REQUEST_COUNT = [0, {}]       # [总请求数, {host: 次数}] — 预算审计用，ttfund_get 自增
+
+# ── F1：跨进程节流锁（fcntl + 磁盘时间戳）─────────────────────────────
+# 原实现的时间戳在进程内存里——licai-map 服务、AI 会话、手跑脚本各持一份限流器，
+# 合并速率 = 进程数 × 0.67req/s，双进程批量即可越 300req/5min 封禁线（审计 F1）。
+# 现改为磁盘时间戳 + 文件锁：同机所有进程强制串行，锁等待自动吸收间隔。
+try:
+    import fcntl  # macOS/Linux；Windows 缺此模块时降级为进程内节流
+except ImportError:
+    fcntl = None
+
+_CBREAK_COOLDOWN = 600           # F2：熔断冷却 10 分钟
+_CBREAK_TRIP = 3                 # 连续 3 次风控信号触发熔断
+_cbreak_state = {"tt": [0, 0.0], "em": [0, 0.0]}   # [连击数, 上次信号时刻]；>5min 衰减归一
+
+
+class RiskControlError(RuntimeError):
+    """403/429/风控页信号——与网络故障严格区分：绝不触发降级风暴（审计 F6），
+    直接上抛并计入熔断。它不是 requests.RequestException 子类，
+    fund_snapshot 的 except RequestException 不会误捕它。"""
+
+
+def _throttle_file(line: str) -> Path:
+    return FUND_CACHE_DIR / f".throttle_{line}"
+
+
+def _cbreak_file(line: str) -> Path:
+    return FUND_CACHE_DIR / f".cbreak_{line}"
+
+
+def _cross_proc_throttle(line: str, min_interval: float):
+    """F1 跨进程节流：flock 抢锁 → 读磁盘时间戳 → 睡足间隔 → 写回 → 放锁。
+
+    时间戳语义=放行时刻（非请求完成时刻）：慢响应下相邻请求**发起**间隔恒 ≥interval
+    （V0.3.0 是间隔+响应耗时，本版略松但仍在设计线内，见 ttfund_get docstring）。
+    """
+    if fcntl is None:                                 # Windows 降级：进程内保守节流
+        time.sleep(min_interval * random.uniform(0.8, 1.2))
+        return
+    lock_path = _throttle_file(line)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if not lock_path.exists():
+            lock_path.write_text("0")
+        with open(lock_path, "r+") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                last = float(f.read().strip() or 0)
+            except ValueError:
+                last = 0.0
+            wait = min_interval - (now - last)
+            if wait > 0:
+                time.sleep(wait + random.uniform(0.05, 0.3))
+            f.seek(0)
+            f.truncate()
+            f.write(f"{time.time():.6f}")
+    except (OSError, ImportError):
+        # Windows 无 fcntl / 锁文件异常 → 降级进程内保守节流（保持可用性优先）
+        time.sleep(min_interval * random.uniform(0.8, 1.2))
+
+
+def _cbreak_check(line: str):
+    """F2：熔断检查。冷却期内所有请求直接拒绝（不敲上游），报错给明确解除时间。"""
+    f = _cbreak_file(line)
+    if f.exists():
+        try:
+            until = float(f.read_text().strip() or 0)
+        except ValueError:
+            until = 0.0
+        if until > time.time():
+            remain = int(until - time.time())
+            raise RuntimeError(
+                f"东财[{line}] 熔断中（疑似触发风控已自动停机），冷却剩 {remain}s 至 "
+                f"{datetime.fromtimestamp(until).strftime('%H:%M:%S')}。"
+                f"这是保护机制——继续请求只会延长封禁；稍后再试或换网络。")
+        f.unlink(missing_ok=True)                     # 冷却期满自动复位
+        _cbreak_state[line] = [0, 0.0]
+
+
+def _cbreak_signal(line: str, why: str):
+    """F2：记录一次风控信号。连续 _CBREAK_TRIP 次（5 分钟窗口内）→ 落盘熔断并抛错。"""
+    cnt, last_ts = _cbreak_state.get(line, [0, 0.0])
+    cnt = 1 if (time.time() - last_ts) > 300 else cnt + 1   # 跨 5min 的孤立信号重新计
+    _cbreak_state[line] = [cnt, time.time()]
+    if cnt >= _CBREAK_TRIP:
+        until = time.time() + _CBREAK_COOLDOWN
+        try:
+            _cbreak_file(line).parent.mkdir(parents=True, exist_ok=True)
+            _cbreak_file(line).write_text(f"{until:.0f}")
+        except OSError:
+            pass
+        _cbreak_state[line] = [0, 0.0]
+        raise RiskControlError(
+            f"东财[{line}] 连续 {_CBREAK_TRIP} 次风控信号（最近: {why}），已自动熔断 "
+            f"{_CBREAK_COOLDOWN // 60} 分钟至 {datetime.fromtimestamp(until).strftime('%H:%M:%S')}。"
+            f"熔断期内所有东财请求直接拒绝（保护 IP）。")
+
+
+def assert_not_risk_control(resp, line: str = "tt", context: str = ""):
+    """F6 防线：调用方 raise_for_status **之前**先过这一道——403/429 转 RiskControlError。
+
+    用法：r = ttfund_get(...); assert_not_risk_control(r, "tt", "E2"); r.raise_for_status()
+    RiskControlError 不是 RequestException 子类 → fund_snapshot 的降级 except 不会误捕
+    → 杜绝"403 被当网络故障 → 降级 → 37 页 lsjz 风暴"（审计 F6 的恶性链）。
+    """
+    if resp.status_code in (403, 429):
+        _cbreak_signal(line, f"HTTP {resp.status_code} {context}")
+        raise RiskControlError(
+            f"HTTP {resp.status_code}（{context}）：疑似东财风控信号，"
+            f"已计入熔断计数。本错误不触发降级（防请求风暴），请降频稍后再试。")
+    _cbreak_state[line] = [0, 0.0]   # 成功响应清零连击（孤立 403 不跨时间累积误熔断）
 
 
 def ttfund_get(url: str, params: Optional[dict] = None,
                headers: Optional[dict] = None, timeout: int = 20, **kwargs):
-    """天天/东财/蛋卷统一请求入口：强制 HTTPS（坑P1）+ 串行限流 + 会话复用 + 瞬态重试1次。
-
-    所有 HTTP 端点必须经此函数，禁止裸 requests.get —— 既防封又给预算审计留计数。
+    """天天/东财/蛋卷统一请求入口：跨进程串行限流(F1) + 熔断(F2) + 强制 HTTPS（坑P1）
+    + 会话复用 + 瞬态重试1次（仅网络异常；HTTP 状态码在调用方经 assert_not_risk_control
+    分类——403/429 是风控信号，不重试、不降级、计熔断，见 F6）。
     """
-    # 坑P1：pingzhongdata 的 HTTP 静默返 0 字节。统一升级 HTTPS（其余东财端点 https 均可达）。
     if url.startswith("http://"):
         url = "https://" + url[len("http://"):]
-    for attempt in (1, 2):                            # 瞬态网络抖动（读超时/连接重置）重试一次
-        wait = TT_MIN_INTERVAL - (time.time() - _tt_last_call[0])
-        if wait > 0:
-            time.sleep(wait + random.uniform(0.05, 0.3))
+    for attempt in (1, 2):
+        _cbreak_check("tt")                             # F2：冷却期内直接拒绝
+        _cross_proc_throttle("tt", TT_MIN_INTERVAL)     # F1：跨进程节流（锁内睡间隔）
         try:
             TT_REQUEST_COUNT[0] += 1
             host = re.sub(r"^https?://", "", url).split("/")[0]
@@ -99,9 +207,7 @@ def ttfund_get(url: str, params: Optional[dict] = None,
         except requests.RequestException:
             if attempt == 2:
                 raise
-            time.sleep(2.0)                           # 抖一下再试最后一次
-        finally:
-            _tt_last_call[0] = time.time()
+            time.sleep(2.0)
 
 
 def _cache_read(rel: str, max_age_hours: Optional[float]) -> Optional[dict]:
@@ -119,10 +225,13 @@ def _cache_read(rel: str, max_age_hours: Optional[float]) -> Optional[dict]:
         return None                                    # 缓存损坏 → 视为 miss 重下
 
 
-def _cache_write(rel: str, payload: dict) -> None:
+def _cache_write(rel: str, payload: "dict | list") -> None:
+    """原子写（tmp+rename）：进程中断不留半截文件（G2；损坏兜底仍在 _cache_read）。"""
     p = FUND_CACHE_DIR / rel
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp = p.with_suffix(p.suffix + f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(p)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -146,6 +255,7 @@ def fund_list(force_refresh: bool = False) -> list[dict]:
         return _FUND_LIST_MEM
     url = "https://fund.eastmoney.com/js/fundcode_search.js"
     r = ttfund_get(url, headers={"Referer": "https://fund.eastmoney.com/"})
+    assert_not_risk_control(r, "tt", "E1 清单")
     r.raise_for_status()
     text = r.text
     brace = text.find("[")
@@ -361,6 +471,7 @@ def fund_snapshot(query: str, force_refresh: bool = False) -> dict:
     url = f"https://fund.eastmoney.com/pingzhongdata/{code}.js"
     try:
         r = ttfund_get(url, headers={"Referer": "https://fund.eastmoney.com/"})
+        assert_not_risk_control(r, "tt", "E2 快照")
         r.raise_for_status()
     except requests.RequestException as e:
         return _snapshot_degraded(code, reason=f"E2 网络失败: {e}")
@@ -419,11 +530,12 @@ def fund_snapshot(query: str, force_refresh: bool = False) -> dict:
     return snap
 
 
-def _snapshot_degraded(code: str, reason: str = "", years: float = 3.0) -> dict:
+def _snapshot_degraded(code: str, reason: str = "", years: float = 1.0) -> dict:
     """E2 失效时的分拆降级：E3 净值(近N年) + E4a 持仓 + 蛋卷 D1 档案。
 
     ⚠️ 降级快照不写缓存（下次调用会重试 E2 主端点）；数据集缺口显式列入 missing；
-    净值窗口默认近 3 年（E2 的全史拿不到，这是降级的代价，调用方知情）。
+    净值窗口默认近 1 年（F3：原 3 年=37 页连发，批量场景会形成请求风暴；
+    需要更长历史可显式传 years，单基金场景代价可接受）。
     """
     missing: list[str] = ["Data_* 系列（E2 整体不可用）"]
     start = (date.today() - timedelta(days=int(years * 365))).isoformat()
@@ -461,6 +573,7 @@ def _snapshot_degraded(code: str, reason: str = "", years: float = 3.0) -> dict:
         "rank_in_similar": None, "buy_redemption_status": None,
         "missing_datasets": missing,
         "note": f"降级快照：净值窗口近{years}年（非全史）；原因={reason}",
+        "window_years": years,
     }
 
 
@@ -496,6 +609,7 @@ def fund_nav_history(query: str, start: str = "", end: str = "",
                   "startDate": start, "endDate": end}
         r = ttfund_get("https://api.fund.eastmoney.com/f10/lsjz", params=params,
                        headers={"Referer": f"https://fundf10.eastmoney.com/jjjz_{code}.html"})
+        assert_not_risk_control(r, "tt", "E3 lsjz")
         r.raise_for_status()
         d = r.json()
         if d.get("ErrCode") not in (None, 0):
@@ -550,10 +664,15 @@ def fund_holdings(query: str, year: Optional[int] = None) -> list[dict]:
     列序（实测 2026-11）：0序号 1代码 2名称 3最新价 4涨跌幅 5资讯 6占净值% 7持股数(万股) 8市值(万元)
     """
     code = resolve_fund_code(query)
+    rel = f"holdings/{code}_{year or 'latest'}.json"      # F4：季报数据当日缓存（原每次现查）
+    cached = _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
+    if cached is not None:
+        return cached
     params = {"type": "jjcc", "code": code, "topline": "10",
               "year": str(year) if year else "", "month": ""}
     r = ttfund_get("https://fundf10.eastmoney.com/FundArchivesDatas.aspx", params=params,
                    headers={"Referer": f"https://fundf10.eastmoney.com/ccmx_{code}.html"})
+    assert_not_risk_control(r, "tt", "E4a jjcc")
     r.raise_for_status()
     m = re.search(r'content:"(.*)"\s*,\s*arryear', r.text, re.S) or \
         re.search(r'content:"(.*)"\s*}', r.text, re.S)
@@ -585,6 +704,7 @@ def fund_holdings(query: str, year: Optional[int] = None) -> list[dict]:
                             "nav_pct": _to_float(cells[6]),
                             "shares_wan": _to_float(cells[7]),
                             "value_wan": _to_float(cells[8])})
+    _cache_write(rel, out)
     return out
 
 
@@ -638,6 +758,7 @@ def fund_realtime_nav(codes: list[str]) -> list[dict]:
         params = {"pageIndex": 1, "pageSize": len(chunk), "plat": "Wap", "product": "EFund",
                   "Version": "6.2.8", "deviceid": "Wap", "FCodes": ",".join(chunk)}
         r = ttfund_get("https://fundmobapi.eastmoney.com/FundMNewApi/FundMNFinfo", params=params)
+        assert_not_risk_control(r, "tt", "E6 批量净值")
         r.raise_for_status()
         datas = (r.json() or {}).get("Datas") or []
         got = [x.get("FCODE") for x in datas if x.get("FCODE")]
@@ -815,22 +936,21 @@ def holding_map(snapshot: dict, topn: int = 10) -> dict:
 EM_MIN_INTERVAL = 1.0
 EM_SESSION = requests.Session()
 EM_SESSION.headers.update({"User-Agent": UA})
-_em_last_call = [0.0]
 EM_REQUEST_COUNT = [0]                              # 股票域东财请求计数（审计用）
 TENCENT_REQUEST_COUNT = [0]                         # 腾讯行情请求计数（审计用；腾讯不封不设限流）
 
 
 def em_get(url: str, params: Optional[dict] = None,
            headers: Optional[dict] = None, timeout: int = 15, **kwargs):
-    """股票域东财统一入口（push2 系）：串行限流 + 会话复用（与 ttfund_get 独立计时）。"""
-    wait = EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
-    if wait > 0:
-        time.sleep(wait + random.uniform(0.1, 0.4))
-    try:
-        EM_REQUEST_COUNT[0] += 1
-        return EM_SESSION.get(url, params=params, headers=headers, timeout=timeout, **kwargs)
-    finally:
-        _em_last_call[0] = time.time()
+    """股票域东财统一入口（push2 系）：跨进程串行限流(F1) + 熔断(F2) + 会话复用。
+
+    与 ttfund_get 分管不同子域（各自独立的节流线/熔断线），但同属东财风控面——
+    em 线触发熔断时建议同时降低 tt 线频率（风控按 IP 不按子域精确区分）。
+    """
+    _cbreak_check("em")
+    _cross_proc_throttle("em", EM_MIN_INTERVAL)
+    EM_REQUEST_COUNT[0] += 1
+    return EM_SESSION.get(url, params=params, headers=headers, timeout=timeout, **kwargs)
 
 
 _SH_INDEX_Q = {"000300", "000905", "000016", "000688", "000852", "000010"}
@@ -927,6 +1047,7 @@ def concept_blocks(stock_code: str, use_cache: bool = True) -> list[str]:
               "fields": "f12,f14,f3,f128"}
     r = em_get("https://push2.eastmoney.com/api/qt/slist/get", params=params,
                headers={"User-Agent": UA, "Referer": "https://quote.eastmoney.com/"})
+    assert_not_risk_control(r, "em", "push2 slist")
     d = r.json()
     diff = (d.get("data") or {}).get("diff") or {}
     items = diff.values() if isinstance(diff, dict) else diff
@@ -1081,35 +1202,30 @@ def _cb_request(path: str, params: Optional[dict] = None, method: str = "GET",
         url += "?" + urlencode(params)
     import subprocess
     for attempt in (1, 2):                              # curl 也有瞬态，重试一次
-        wait = TT_MIN_INTERVAL - (time.time() - _tt_last_call[0])
-        if wait > 0:
-            time.sleep(wait + random.uniform(0.05, 0.3))
+        _cross_proc_throttle("cb", TT_MIN_INTERVAL)    # F1：中债独立节流线（非东财域，不熔断）
+        TT_REQUEST_COUNT[0] += 1
+        TT_REQUEST_COUNT[1]["yield.chinabond.com.cn"] = \
+            TT_REQUEST_COUNT[1].get("yield.chinabond.com.cn", 0) + 1
+        cmd = ["curl", "-sS", "--max-time", str(timeout), "-X", method,
+               "-H", "User-Agent: Mozilla/5.0", "-H", f"Referer: {CB_REFERER}",
+               "-H", "Accept: */*", url]
         try:
-            TT_REQUEST_COUNT[0] += 1
-            TT_REQUEST_COUNT[1]["yield.chinabond.com.cn"] = \
-                TT_REQUEST_COUNT[1].get("yield.chinabond.com.cn", 0) + 1
-            cmd = ["curl", "-sS", "--max-time", str(timeout), "-X", method,
-                   "-H", "User-Agent: Mozilla/5.0", "-H", f"Referer: {CB_REFERER}",
-                   "-H", "Accept: */*", url]
-            try:
-                proc = subprocess.run(cmd, capture_output=True, timeout=timeout + 10)
-            except FileNotFoundError:
-                raise RuntimeError("中债通道需要系统 curl（TLS 指纹墙，requests 不可用，"
-                                   "见坑P11）——当前环境未安装 curl。")
-            except subprocess.TimeoutExpired:
-                if attempt == 2:
-                    raise RuntimeError(f"中债 curl 超时（>{timeout}s）: {url[:90]}")
-                time.sleep(1.5)
-                continue
-            if proc.returncode == 0 and proc.stdout:
-                return proc.stdout
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout + 10)
+        except FileNotFoundError:
+            raise RuntimeError("中债通道需要系统 curl（TLS 指纹墙，requests 不可用，"
+                               "见坑P11）——当前环境未安装 curl。")
+        except subprocess.TimeoutExpired:
             if attempt == 2:
-                raise RuntimeError(
-                    f"中债 curl 通道失败（rc={proc.returncode}，{len(proc.stdout)}B）: "
-                    f"{proc.stderr.decode('utf-8', 'ignore')[:120] or url[:100]}")
+                raise RuntimeError(f"中债 curl 超时（>{timeout}s）: {url[:90]}")
             time.sleep(1.5)
-        finally:
-            _tt_last_call[0] = time.time()
+            continue
+        if proc.returncode == 0 and proc.stdout:
+            return proc.stdout
+        if attempt == 2:
+            raise RuntimeError(
+                f"中债 curl 通道失败（rc={proc.returncode}，{len(proc.stdout)}B）: "
+                f"{proc.stderr.decode('utf-8', 'ignore')[:120] or url[:100]}")
+        time.sleep(1.5)
     raise RuntimeError("unreachable")
 
 # 关键曲线种子 ID（2026-11-06 实测从 queryTree 提取；cb_curve_tree() 可拉全族校准）
@@ -1270,8 +1386,16 @@ def credit_spread(rating: str = "AA", term: str = "3y",
 
 
 def _dc_query(report: str, sort_col: str, page_size: int = 60,
-              filter_str: str = "", pages: int = 1) -> list[dict]:
-    """东财 datacenter 宏观报表统一查询（走 ttfund_get 限流；坑P10：报表名需实测）。"""
+              filter_str: str = "", pages: int = 1,
+              cache_key: Optional[str] = None) -> list[dict]:
+    """东财 datacenter 宏观报表统一查询（走 ttfund_get 限流；坑P10：报表名需实测）。
+
+    F7：cache_key 非空时当日磁盘缓存（宏观日更数据，重复查询零请求）。
+    """
+    if cache_key:
+        cached = _cache_read(f"macro/{cache_key}.json", max_age_hours=SNAPSHOT_TTL_HOURS)
+        if cached is not None:
+            return cached
     rows: list[dict] = []
     for pg in range(1, pages + 1):
         params = {"reportName": report, "columns": "ALL", "pageSize": str(page_size),
@@ -1282,6 +1406,7 @@ def _dc_query(report: str, sort_col: str, page_size: int = 60,
         r = ttfund_get("https://datacenter-web.eastmoney.com/api/data/v1/get",
                        params=params,
                        headers={"Referer": "https://data.eastmoney.com/cjsj/"})
+        assert_not_risk_control(r, "tt", "L7 宏观")
         r.raise_for_status()
         d = r.json()
         if not d.get("success", False):
@@ -1290,6 +1415,8 @@ def _dc_query(report: str, sort_col: str, page_size: int = 60,
         rows.extend(batch)
         if len(batch) < page_size:
             break
+    if cache_key and rows:
+        _cache_write(f"macro/{cache_key}.json", rows)
     return rows
 
 
@@ -1304,7 +1431,8 @@ def treasury_yield_daily(days: int = 30) -> list[dict]:
 
     days>500 时按 500 截断（单页上限）；中债↔东财同口径（三源互证实测分毫不差）。
     """
-    rows = _dc_query("RPTA_WEB_TREASURYYIELD", "SOLAR_DATE", page_size=min(days, 500))
+    rows = _dc_query("RPTA_WEB_TREASURYYIELD", "SOLAR_DATE",
+                   page_size=min(days, 500), cache_key=f"tsy_{min(days, 500)}")
     out = []
     for r in rows[:days]:
         rec = {"date": str(r.get("SOLAR_DATE", ""))[:10]}
@@ -1331,7 +1459,8 @@ def shibor_history(period: Optional[str] = None, days: int = 30) -> list[dict]:
     if period:
         flt += f'(REPORT_PERIOD="{period}")'
     rows = _dc_query("RPT_IMP_INTRESTRATEN", "REPORT_DATE",
-                     page_size=min(days * (1 if period else 8), 500), filter_str=flt)
+                     page_size=min(days * (1 if period else 8), 500), filter_str=flt,
+                     cache_key=f"shibor_{period or 'all'}_{min(days, 500)}")
     out = [{"date": str(r.get("REPORT_DATE", ""))[:10], "period": r.get("REPORT_PERIOD"),
             "market": r.get("MARKET"), "rate_pct": r.get("IR_RATE"),
             "change_pct": r.get("CHANGE_RATE")} for r in rows]
@@ -1356,7 +1485,8 @@ def benchmark_rate_history() -> list[dict]:
       ⚠️ 这是基准利率史非 LPR 报价（东财无 LPR 报表，实测 9501）。
     附每次调整次日沪深涨跌（next_sh/sz_pct）。
     """
-    rows = _dc_query("RPT_ECONOMY_DEPOSIT_RATE", "REPORT_DATE", page_size=100)
+    rows = _dc_query("RPT_ECONOMY_DEPOSIT_RATE", "REPORT_DATE", page_size=100,
+                     cache_key="deposit_rate_all")
     out = [{"report_date": str(r.get("REPORT_DATE", ""))[:10],
             "deposit_1y_prev": r.get("DEPOSIT_RATE_BB"),
             "deposit_1y": r.get("DEPOSIT_RATE_BA"),
@@ -1391,6 +1521,7 @@ def cn_treasury_realtime() -> dict:
         r = em_get("https://push2.eastmoney.com/api/qt/stock/get",
                    params={"secid": f"171.{sec}", "fields": "f43,f58,f169,f170"},
                    headers={"User-Agent": UA, "Referer": "https://quote.eastmoney.com/"})
+        assert_not_risk_control(r, "em", "push2 stock/get 国债实时")
         r.raise_for_status()
         d = r.json().get("data") or {}
         if not d or not d.get("f43"):

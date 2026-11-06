@@ -1,6 +1,6 @@
 # fund-data
 
-基金领域底层数据工具包（V0.3.0）——对标 [a-stock-data](https://github.com/simonlin1212/a-stock-data) 的形态，为基金诊断/筛选/定投回测等应用层提供零 key、零登录的底层数据原语。
+基金领域底层数据工具包（V0.3.1）——对标 [a-stock-data](https://github.com/simonlin1212/a-stock-data) 的形态，为基金诊断/筛选/定投回测等应用层提供零 key、零登录的底层数据原语。
 
 天天基金主源 + 蛋卷跨域备胎 + 本地计算 + L6 跨域穿透 + L7 宏观利率层。**65/65 分层断言实测通过（2026-11-06）**，覆盖 11 个上游接口（探测期另发现 fundgz/蛋卷 growth 等已下线端点，见坑区 P5）。
 

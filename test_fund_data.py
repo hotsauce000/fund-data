@@ -7,6 +7,7 @@ fund-data V0.2 分层测试运行器（按测试计划 V1.0）
 """
 import json
 import sys
+import time
 import traceback
 from datetime import date
 from pathlib import Path
@@ -14,6 +15,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import fund_data as fd
 
+_unknown = [a for a in sys.argv[1:] if a != "--offline-only"]
+if _unknown:
+    sys.exit(f"未知参数 {_unknown}（仅支持 --offline-only）——防封项目工具自身不能意外发真实请求")
 OFFLINE_ONLY = "--offline-only" in sys.argv
 R = {"pass": 0, "fail": 0, "results": []}
 
@@ -403,21 +407,89 @@ def test_l5_degrade():
         nav = deg["nav_history"]
         check("L5", "降级-E2挂→分拆出数",
               deg["_meta"]["source"].startswith("degraded")
-              and len(nav) > 100 and deg["name"],
+              and len(nav) > 150 and len(nav) < 400 and deg["name"],
               f"source={deg['_meta']['source']} 净值{len(nav)}条 "
               f"经理{deg['manager'].get('name')}")
         # 坑P7 钉子：降级快照必须已反转为升序（E3 原生新→旧），指标可跑且窗口为正
-        check("L5", "降级-净值已反转为升序(坑P7)",
+        check("L5", "降级-净值已反转为升序(坑P7/窗口1年)",
               nav[0]["date"] < nav[-1]["date"],
               f"{nav[0]['date']} → {nav[-1]['date']}")
         dm = fd.fund_metrics(deg)
         check("L5", "降级-指标方向自洽",
-              dm["window"]["days"] > 300 and abs(dm["total_return_pct"]) < 500,
+              dm["window"]["days"] > 200 and dm["window"]["days"] < 420 and abs(dm["total_return_pct"]) < 500,
               f"{dm['window']['days']}天 收益{dm['total_return_pct']}%")
         check("L5", "降级-不写缓存", not (fd.FUND_CACHE_DIR / "snapshots" / "110022.json").exists(),
               "下次调用重试主端点")
     finally:
         fd.ttfund_get = orig
+
+
+
+def test_f_guard_band():                             # 防封专项（F1/F2/F6，零网络为主）
+    import subprocess, sys as _sys
+    # F6: 403 ≠ 网络故障 → RiskControlError 直接上抛，绝不触发降级
+    class _Resp403:
+        status_code = 403
+        text = ""
+        def raise_for_status(self):
+            import requests as _rq
+            raise _rq.HTTPError("403")
+    _orig_get = fd.ttfund_get
+    fd.ttfund_get = lambda *a, **k: _Resp403()
+    fd._cbreak_state["tt"] = 0
+    try:
+        try:
+            fd.fund_snapshot("161725", force_refresh=True)
+            check("F6", "403不触发降级", False, "未抛出")
+        except fd.RiskControlError:
+            check("F6", "403不触发降级", True, "RiskControlError 上抛（非 degraded source）")
+        except Exception as e:
+            check("F6", "403不触发降级", False, f"错误类型: {type(e).__name__}")
+    finally:
+        fd.ttfund_get = _orig_get
+    (fd.FUND_CACHE_DIR / "snapshots" / "161725.json").unlink(missing_ok=True)
+
+    # F2: 熔断冷却期内 ttfund_get 直接拒绝（不发网络请求）
+    fd._cbreak_file("tt").parent.mkdir(parents=True, exist_ok=True)
+    fd._cbreak_file("tt").write_text(str(time.time() + 5))
+    n_before = fd.TT_REQUEST_COUNT[0]
+    try:
+        fd.ttfund_get("https://fund.eastmoney.com/js/fundcode_search.js")
+        check("F2", "冷却期拒绝请求", False, "未拒绝")
+    except RuntimeError as e:
+        zero_net = fd.TT_REQUEST_COUNT[0] == n_before
+        check("F2", "冷却期拒绝请求", "熔断" in str(e) and zero_net,
+              f"拒绝且零网络请求 ✓ {str(e)[:30]}")
+    fd._cbreak_file("tt").unlink(missing_ok=True)
+
+    # F1: 双进程并发节流——合并间隔不得小于单线阈值×0.8
+    code = (
+        "import sys, time; sys.path.insert(0, '.'); import fund_data as fd\n"
+        "fd._cross_proc_throttle('xproc_test', 1.0)\n"
+        "print(time.time())"
+    )
+    p1 = subprocess.Popen([_sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    p2 = subprocess.Popen([_sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    t1 = float(p1.communicate()[0].strip())
+    t2 = float(p2.communicate()[0].strip())
+    gap = abs(t2 - t1)
+    (fd.FUND_CACHE_DIR / ".throttle_xproc_test").unlink(missing_ok=True)
+    check("F1", "跨进程节流(双进程合并间隔)", gap >= 0.8,
+          f"两进程时间差 {gap:.2f}s（阈值1.0s，实测合并未超频）")
+
+
+def test_f_cache_band():                             # F4/F7 缓存专项（在线，便宜）
+    fd.TT_REQUEST_COUNT[0] = 0
+    fd.treasury_yield_daily(days=30)                 # 首次（可能命中昨日缓存）
+    n1 = fd.TT_REQUEST_COUNT[0]
+    fd.treasury_yield_daily(days=30)                 # 二次必命中当日缓存
+    n2 = fd.TT_REQUEST_COUNT[0] - n1
+    check("F7", "宏观层二次调用0请求", n2 == 0, f"实发 {n2} 次")
+    fd.fund_holdings("161725")
+    n3 = fd.TT_REQUEST_COUNT[0]
+    fd.fund_holdings("161725")
+    n4 = fd.TT_REQUEST_COUNT[0] - n3
+    check("F4", "持仓二次调用0请求", n4 == 0, f"实发 {n4} 次")
 
 
 def main():
@@ -429,6 +501,8 @@ def main():
             test_l3_cross()
             test_l4_budget()
             test_l5_degrade()
+            test_f_guard_band()
+            test_f_cache_band()
         except Exception:
             traceback.print_exc()
             R["fail"] += 1
