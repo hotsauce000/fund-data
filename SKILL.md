@@ -1461,7 +1461,7 @@ def benchmark_rate_history() -> list[dict]:
 
     字段语义（实测锚定 2015-10-24/2012-07-06/2008-11-27 三次央行调息）：
       DEPOSIT_RATE_BB/SB = **调整前**一年定存/一年贷款；BA/SA = **调整后**；
-      B/S = 变动 bp。⚠️ 本表无活期/短贷字段，勿被字段名 B/BB/S/SB 字面误导。
+      B/S = 变动**百分点**（非 bp，-0.25 即降 25bp）。⚠️ 本表无活期/短贷字段，勿被字段名 B/BB/S/SB 字面误导。
       ⚠️ 这是基准利率史非 LPR 报价（东财无 LPR 报表，实测 9501）。
     附每次调整次日沪深涨跌（next_sh/sz_pct）。
     """
@@ -1469,9 +1469,9 @@ def benchmark_rate_history() -> list[dict]:
     out = [{"report_date": str(r.get("REPORT_DATE", ""))[:10],
             "deposit_1y_prev": r.get("DEPOSIT_RATE_BB"),
             "deposit_1y": r.get("DEPOSIT_RATE_BA"),
-            "deposit_change_bp": r.get("DEPOSIT_RATE_B"),
+            "deposit_change_pp": r.get("DEPOSIT_RATE_B"),
             "loan_1y_prev": r.get("LOAN_RATE_SB"), "loan_1y": r.get("LOAN_RATE_SA"),
-            "loan_change_bp": r.get("LOAN_RATE_S"),
+            "loan_change_pp": r.get("LOAN_RATE_S"),
             "next_sh_pct": r.get("NEXT_SH_RATE"), "next_sz_pct": r.get("NEXT_SZ_RATE")}
            for r in rows]
     if len(out) < 5:

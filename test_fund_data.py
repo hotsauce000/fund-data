@@ -220,11 +220,13 @@ def test_l1_offline():
               == ("中债国债收益率曲线", "2c9081e50a2f9606010a3068cae70001"))
         check("L1", "利率-树模糊唯一命中",
               fd._cb_curve_id("国债收益率曲线") == ("中债国债收益率曲线", "fake_id"))
-        check("L1", "利率-非法曲线ID拦截", True)     # 见下行 expect_raise
         fake_tree = {"中债企业债收益率曲线(AA＋)": "zz_not_hex_id!!"}
         fd.cb_curve_tree = lambda **k: fake_tree
         expect_raise("L1", "利率-树返回非法ID拒绝",
                      lambda: fd._cb_validated_id("中债企业债收益率曲线(AA＋)"), "32 位十六进制")
+        fd.cb_curve_tree = lambda **k: {"中债企业债收益率曲线(AA＋)": 12345}   # 非字符串 ID
+        expect_raise("L1", "利率-非字符串ID拒绝",
+                     lambda: fd._cb_validated_id("中债企业债收益率曲线(AA＋)"), "曲线 ID 非法")
     finally:
         fd.cb_curve_tree = _orig_tree
 
@@ -294,10 +296,13 @@ def test_l2_smoke():
           f"{sh[0]['date']} {sh[0]['rate_pct']}%（5日极差<50bp，防Chibor混入跳变24bp）")
     bm = fd.benchmark_rate_history()
     latest = bm[0]                                     # 新→旧，最新=2015-10-24 末次调整
-    check("L2", "L7 基准利率史(数值锚定)",
+    check("L2", "L7 基准利率史(数值锚定+单位自洽)",
           len(bm) >= 10 and latest["report_date"] == "2015-10-24"
-          and latest["deposit_1y"] == 1.50 and latest["deposit_1y_prev"] == 1.75,
-          f"{len(bm)}次 最新{latest['report_date']} 一年定存 {latest['deposit_1y_prev']}→{latest['deposit_1y']}")
+          and latest["deposit_1y"] == 1.50 and latest["deposit_1y_prev"] == 1.75
+          and abs(latest["deposit_change_pp"]
+                  - (latest["deposit_1y"] - latest["deposit_1y_prev"])) < 1e-9,
+          f"{len(bm)}次 {latest['report_date']} 定存{latest['deposit_1y_prev']}→"
+          f"{latest['deposit_1y']}（Δ{latest['deposit_change_pp']}pp=25bp 自洽）")
     gc = fd.repo_rate_gc()
     check("L2", "L7 GC007回购代理", 0.5 < gc["rate_pct"] < 8 and gc["proxy_for"] == "DR007",
           f"GC007={gc['rate_pct']}% ({gc['source'][:20]})")
