@@ -436,7 +436,7 @@ def test_f_guard_band():                             # 防封专项（F1/F2/F6�
             raise _rq.HTTPError("403")
     _orig_get = fd.ttfund_get
     fd.ttfund_get = lambda *a, **k: _Resp403()
-    fd._cbreak_state["tt"] = 0
+    fd._cbreak_state["tt"] = [0, 0.0]   # 新格式 [连击, 上次时刻]
     try:
         try:
             fd.fund_snapshot("161725", force_refresh=True)

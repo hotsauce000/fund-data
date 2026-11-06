@@ -117,22 +117,22 @@ def _cross_proc_throttle(line: str, min_interval: float):
     lock_path = _throttle_file(line)
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        if not lock_path.exists():
-            lock_path.write_text("0")
+        open(lock_path, "a").close()                   # O_CREAT 原子首建，绝不截断已有内容
         with open(lock_path, "r+") as f:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             try:
                 last = float(f.read().strip() or 0)
             except ValueError:
                 last = 0.0
+            now = time.time()                          # 拿锁后再取样（排队时长不计入间隔）
             wait = min_interval - (now - last)
             if wait > 0:
                 time.sleep(wait + random.uniform(0.05, 0.3))
             f.seek(0)
             f.truncate()
             f.write(f"{time.time():.6f}")
-    except (OSError, ImportError):
-        # Windows 无 fcntl / 锁文件异常 → 降级进程内保守节流（保持可用性优先）
+    except OSError:
+        # 锁文件异常 → 降级进程内保守节流（保持可用性优先）
         time.sleep(min_interval * random.uniform(0.8, 1.2))
 
 
