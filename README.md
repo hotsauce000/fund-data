@@ -2,7 +2,7 @@
 
 基金领域底层数据工具包（V0.3.0）——对标 [a-stock-data](https://github.com/simonlin1212/a-stock-data) 的形态，为基金诊断/筛选/定投回测等应用层提供零 key、零登录的底层数据原语。
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算 + L6 跨域穿透 + L7 宏观利率层。**63/63 分层断言实测通过（2026-11-06）**，覆盖 11 个上游接口（探测期另发现 fundgz/蛋卷 growth 等已下线端点，见坑区 P5）。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算 + L6 跨域穿透 + L7 宏观利率层。**65/65 分层断言实测通过（2026-11-06）**，覆盖 11 个上游接口（探测期另发现 fundgz/蛋卷 growth 等已下线端点，见坑区 P5）。
 
 ## 核心设计
 
@@ -67,8 +67,8 @@ dca = fund_dca_backtest(snap, amount=1000)
 ## 测试
 
 ```bash
-python3 test_fund_data.py --offline-only   # L1 单元：32 条，零网络
-python3 test_fund_data.py                  # 全链路 63 条（真数据，约 3 分钟）
+python3 test_fund_data.py --offline-only   # L1 单元：34 条，零网络
+python3 test_fund_data.py                  # 全链路 65 条（真数据，约 3 分钟）
 ```
 
 测试含三源交叉验证（E2↔E3↔E6 净值 4 位小数一致、E2↔E4a 持仓交集 10/10、本地复权收益 vs 官方 syl_1n）、请求预算审计、降级演练。
@@ -77,7 +77,7 @@ python3 test_fund_data.py                  # 全链路 63 条（真数据，约 
 
 ```
 fund_data.py        # 核心模块（可直接 import，含 L6 穿透层）
-test_fund_data.py   # 63 条分层回归测试
+test_fund_data.py   # 65 条分层回归测试
 build_skill_md.py   # 从模块自动组装 SKILL.md（保证内嵌代码逐字节一致，双写仓库+安装目录）
 SKILL.md            # Agent skill 文档（build 产物）：防封铁律/坑区/路由表/全量内嵌代码
 archive/            # 已并入主模块的原型存档

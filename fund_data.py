@@ -1091,7 +1091,16 @@ def _cb_request(path: str, params: Optional[dict] = None, method: str = "GET",
             cmd = ["curl", "-sS", "--max-time", str(timeout), "-X", method,
                    "-H", "User-Agent: Mozilla/5.0", "-H", f"Referer: {CB_REFERER}",
                    "-H", "Accept: */*", url]
-            proc = subprocess.run(cmd, capture_output=True, timeout=timeout + 10)
+            try:
+                proc = subprocess.run(cmd, capture_output=True, timeout=timeout + 10)
+            except FileNotFoundError:
+                raise RuntimeError("中债通道需要系统 curl（TLS 指纹墙，requests 不可用，"
+                                   "见坑P11）——当前环境未安装 curl。")
+            except subprocess.TimeoutExpired:
+                if attempt == 2:
+                    raise RuntimeError(f"中债 curl 超时（>{timeout}s）: {url[:90]}")
+                time.sleep(1.5)
+                continue
             if proc.returncode == 0 and proc.stdout:
                 return proc.stdout
             if attempt == 2:
@@ -1159,10 +1168,18 @@ def _cb_curve_id(curve: str) -> tuple[str, str]:
         return _CB_CURVES[curve]
     tree = cb_curve_tree()                                 # name → id（含全族 40+ 条）
     hits = {n: i for n, i in tree.items() if curve in n}
-    if len(hits) == 1:
-        return next(iter(hits.items()))
-    raise ValueError(f"未知曲线 {curve!r}：请用 _CB_CURVES 键（{sorted(_CB_CURVES)}）"
-                     f"或曲线树中的完整名称；模糊命中 {len(hits)} 条不猜。")
+    if len(hits) != 1:
+        raise ValueError(f"未知曲线 {curve!r}：请用 _CB_CURVES 键（{sorted(_CB_CURVES)}）"
+                         f"或曲线树中的完整名称；模糊命中 {len(hits)} 条不猜。")
+    return next(iter(hits.items()))
+
+
+def _cb_validated_id(curve: str) -> tuple[str, str]:
+    """_cb_curve_id + 32 位十六进制校验（防树缓存污染拼入 URL/缓存路径，TypeError 一并拦）。"""
+    name, cid = _cb_curve_id(curve)
+    if not isinstance(cid, str) or not re.fullmatch(r"[0-9a-fA-F]{32}", cid):
+        raise ValueError(f"曲线 ID 非法: {cid!r}（需 32 位十六进制，来源 {name!r}）")
+    return name, cid
 
 
 def cb_curve_tree(force_refresh: bool = False) -> dict[str, str]:
@@ -1202,15 +1219,13 @@ def cb_yield_curve(curve: str = "treasury", year: Optional[int] = None,
     1 请求 = 1 条曲线 1 年的日频全期限（0d~50y）；当日磁盘缓存命中 0 请求。
     返回 {curve, year, fetched_at, source, points: [{date, term, term_years, yield_pct}]}。
     """
-    name, cid = _cb_curve_id(curve)
+    name, cid = _cb_validated_id(curve)             # 32-hex 校验先于缓存路径构造
     year = int(year or date.today().year)
     rel = f"cb_curves/{cid}_{year}.json"
     if not force_refresh:
         cached = _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
         if cached is not None:
             return cached
-    if not re.fullmatch(r"[0-9a-fA-F]{32}", cid):       # 防 tree 数据异常拼入 URL
-        raise ValueError(f"曲线 ID 非法: {cid!r}（需 32 位十六进制）")
     params = {"locale": "zh_CN", "year": str(year), "ycDefId": cid,
               "qxll": "0,", "zblx": "txy", "dxbj": "0",
               "workTime": date.today().isoformat(),
@@ -1219,7 +1234,7 @@ def cb_yield_curve(curve: str = "treasury", year: Optional[int] = None,
     pts = _parse_cb_xlsx(content)
     if not pts:
         raise RuntimeError(f"中债 {name} {year} 年文件解析出 0 个数据点"
-                           f"（{len(r.content)} 字节）——参数或上游结构变更，拒绝静默空")
+                           f"（{len(content)} 字节）——参数或上游结构变更，拒绝静默空")
     snap = {"curve": name, "year": year, "points": pts,
             "fetched_at": datetime.now().isoformat(timespec="seconds"),
             "source": "chinabond/downYearBzqx"}
@@ -1239,8 +1254,12 @@ def cb_curve_series(curve: str, term: str = "10y", year: Optional[int] = None) -
 
 def credit_spread(rating: str = "AA", term: str = "3y",
                   year: Optional[int] = None) -> list[dict]:
-    """信用利差 = 中债企业债(rating) − 国债，同日期同期限对齐后本地算差（2 请求/年/日缓存）。"""
-    corp = cb_yield_curve(f"enterprise_{rating.lower().replace('+', '_plus')}", year)
+    """信用利差 = 中债企业债(rating) − 国债，同日期同期限对齐后本地算差（2 请求/年/日缓存）。
+
+    rating 支持 AAA/AAA-/AA+/AA/AA-（全角＋转半角后匹配曲线树中文名）。
+    """
+    cn = f"中债企业债收益率曲线({rating.replace('+', '＋')})"
+    corp = cb_yield_curve(cn, year)
     gov = cb_yield_curve("treasury", year)
     g = {p["date"]: p["yield_pct"] for p in gov["points"] if p["term"] == term}
     out = [{"date": p["date"], "spread_pct": round(p["yield_pct"] - g[p["date"]], 4)}
@@ -1281,7 +1300,10 @@ _EM_TSY_FIELDS = {"EMM00588704": "cn_2y", "EMM00166462": "cn_5y",
 
 
 def treasury_yield_daily(days: int = 30) -> list[dict]:
-    """国债收益率·日频（东财 RPTA_WEB_TREASURYYIELD，中债口径）：中美 2/5/10/30Y+期限利差。"""
+    """国债收益率·日频（东财 RPTA_WEB_TREASURYYIELD，中债口径，**新→旧序**）：中美 2/5/10/30Y+利差。
+
+    days>500 时按 500 截断（单页上限）；中债↔东财同口径（三源互证实测分毫不差）。
+    """
     rows = _dc_query("RPTA_WEB_TREASURYYIELD", "SOLAR_DATE", page_size=min(days, 500))
     out = []
     for r in rows[:days]:
@@ -1296,22 +1318,26 @@ def treasury_yield_daily(days: int = 30) -> list[dict]:
 
 
 def shibor_history(period: Optional[str] = None, days: int = 30) -> list[dict]:
-    """SHIBOR 历史（东财 RPT_IMP_INTRESTRATEN，filter CNY）。
+    """SHIBOR 历史（东财 RPT_IMP_INTRESTRATEN，恒定过滤「上海银行同业拆借市场」）。
 
-    period=None 返回全期限混合（含 REPORT_PERIOD 字段）；传 '隔夜(O/N)' / '1周(1W)' /
-    '3月(3M)' / '1年(1Y)' 等得单序列。另含 Chibor（中国银行同业拆借市场）。
+    🔴 坑（实测）：不加市场过滤时 Chibor（中国银行同业拆借市场）会混入同币种同期限
+    序列且数值跳变 ~24bp——本函数恒定锁定上海市场（SHIBOR 本尊）。
+    period=None 返回全期限混合；传 '隔夜(O/N)' / '1周(1W)' / '3月(3M)' / '1年(1Y)' 等得单序列。
+    days 语义：单序列≈天数；混合模式每自然日 ~8 行（8期限），仅按 days×8 估页取前若干行。
     """
-    flt = '(CURRENCY_CODE="CNY")'
+    if period and ('"' in period or "\\" in period):   # 括号是合法期名组成(1Y)，只拦引号断串
+        raise ValueError(f"period 含非法字符: {period!r}")
+    flt = '(CURRENCY_CODE="CNY")(MARKET="上海银行同业拆借市场")'
     if period:
         flt += f'(REPORT_PERIOD="{period}")'
-    rows = _dc_query("RPT_IMP_INTRESTRATEN", "REPORT_DATE", page_size=min(days * 2, 500),
-                     filter_str=flt)
+    rows = _dc_query("RPT_IMP_INTRESTRATEN", "REPORT_DATE",
+                     page_size=min(days * (1 if period else 8), 500), filter_str=flt)
     out = [{"date": str(r.get("REPORT_DATE", ""))[:10], "period": r.get("REPORT_PERIOD"),
             "market": r.get("MARKET"), "rate_pct": r.get("IR_RATE"),
             "change_pct": r.get("CHANGE_RATE")} for r in rows]
     if not out:
         raise RuntimeError(f"SHIBOR 查询返回空（period={period!r}），拒绝静默空")
-    if period:                                             # 单序列按日期去重（市场维度折叠）
+    if period:                                             # 双保险：按日期去重
         seen, dedup = set(), []
         for r in sorted(out, key=lambda x: x["date"], reverse=True):
             if r["date"] not in seen:
@@ -1322,16 +1348,21 @@ def shibor_history(period: Optional[str] = None, days: int = 30) -> list[dict]:
 
 
 def benchmark_rate_history() -> list[dict]:
-    """存贷款基准利率历次调整（东财 RPT_ECONOMY_DEPOSIT_RATE，2004 至今）。
+    """一年期存/贷款基准利率历次调整（东财 RPT_ECONOMY_DEPOSIT_RATE，2004 至今）。
 
-    ⚠️ 这是**基准利率调整史**（活期/定期存款、短/中长期贷款），非 LPR 报价——
-    东财无 LPR 独立报表（实测 9501）。附每次调整次日沪深涨跌（NEXT_SH/SZ_RATE）。
+    字段语义（实测锚定 2015-10-24/2012-07-06/2008-11-27 三次央行调息）：
+      DEPOSIT_RATE_BB/SB = **调整前**一年定存/一年贷款；BA/SA = **调整后**；
+      B/S = 变动 bp。⚠️ 本表无活期/短贷字段，勿被字段名 B/BB/S/SB 字面误导。
+      ⚠️ 这是基准利率史非 LPR 报价（东财无 LPR 报表，实测 9501）。
+    附每次调整次日沪深涨跌（next_sh/sz_pct）。
     """
     rows = _dc_query("RPT_ECONOMY_DEPOSIT_RATE", "REPORT_DATE", page_size=100)
     out = [{"report_date": str(r.get("REPORT_DATE", ""))[:10],
-            "deposit_demand": r.get("DEPOSIT_RATE_BB"),
+            "deposit_1y_prev": r.get("DEPOSIT_RATE_BB"),
             "deposit_1y": r.get("DEPOSIT_RATE_BA"),
-            "loan_short": r.get("LOAN_RATE_SB"), "loan_1y": r.get("LOAN_RATE_SA"),
+            "deposit_change_bp": r.get("DEPOSIT_RATE_B"),
+            "loan_1y_prev": r.get("LOAN_RATE_SB"), "loan_1y": r.get("LOAN_RATE_SA"),
+            "loan_change_bp": r.get("LOAN_RATE_S"),
             "next_sh_pct": r.get("NEXT_SH_RATE"), "next_sz_pct": r.get("NEXT_SZ_RATE")}
            for r in rows]
     if len(out) < 5:
