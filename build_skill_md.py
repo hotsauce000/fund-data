@@ -125,6 +125,9 @@ S.append("""## 端点路由速查（按需定位，不必通读）
 | P9 inlineStr | 中债 xlsx 无 sharedStrings，值全在行内 | zipfile+regex 解析，零 pandas 依赖 |
 | P10 报表名 | 东财 datacenter 臆测名全 9501 | 从页面 bundle 逆向（国债/SHIBOR/基准利率三个名实测） |
 | P11 TLS指纹墙 | 中债掐 Python TLS（requests SSL EOF，curl 稳过） | _cb_request 走 subprocess curl，同入限流账本 |
+| P12 系统代理抖动 | macOS 系统代理（trust_env 读 scproxy，curl 不读）转发国内站间歇 SSL EOF | 三线 Session `trust_env=False`+腾讯 no-proxy opener 全直连；**企业代理刚需网络需改回 True** |
+| P13 跨进程并发 | 多进程各持内存限流器=合并速率×进程数（licai-map+AI会话即越线） | F1 磁盘时间戳+flock 三线锁（.throttle_tt/em/cb） |
+| P14 风控误降级 | 403 被 except RequestException 误捕→降级→37页打风控枪口 | F6 防线 9 调用点：403/429→RiskControlError（不触发降级）+F2 熔断冷却10min |
 
 ## Prerequisites
 
