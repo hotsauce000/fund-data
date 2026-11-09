@@ -579,6 +579,20 @@ def fund_snapshot(query: str, force_refresh: bool = False) -> dict:
            for p in (v.get("Data_netWorthTrend") or []) if isinstance(p, dict) and "x" in p]
 
     mgr_raw = (v.get("Data_currentFundManager") or [None])[0] or {}
+    scale_hist = _scale_history(v.get("Data_fluctuationScale"))
+    position_hist = _xy_pairs_to_records(v.get("Data_fundSharesPositions"), "position_pct")
+    peer_hist = _xy_pairs_to_records(v.get("Data_rateInSimilarPersent"), "percentile")
+    bench_curves = _benchmark_curves(v.get("Data_grandTotal"))
+    # P18 关联自洽：变量存在但形态解析失败 ≠「E2 没有」——P3 只查键缺失，
+    # 这类"present,unparsed"必须显式进 missing，消费者才能区分两种空
+    if v.get("Data_fluctuationScale") and not scale_hist:
+        missing.append("Data_fluctuationScale(present,unparsed)")
+    if v.get("Data_fundSharesPositions") and not position_hist:
+        missing.append("Data_fundSharesPositions(present,unparsed)")
+    if v.get("Data_rateInSimilarPersent") and not peer_hist:
+        missing.append("Data_rateInSimilarPersent(present,unparsed)")
+    if v.get("Data_grandTotal") and not bench_curves:
+        missing.append("Data_grandTotal(present,unparsed)")
     snap = {
         "_meta": {"code": code, "version": __version__,
                   "fetched_at": datetime.now().isoformat(timespec="seconds"),
@@ -601,15 +615,13 @@ def fund_snapshot(query: str, force_refresh: bool = False) -> dict:
                            if isinstance(p, dict) and "x" in p],
         "top_stocks": _codes_list(v.get("stockCodesNew") or v.get("stockCodes")),
         "top_bonds": _codes_list(v.get("zqCodesNew") or v.get("zqCodes")),
-        "scale_history": _scale_history(v.get("Data_fluctuationScale")),
+        "scale_history": scale_hist,
         "holder_structure": _normalize_table(v.get("Data_holderStructure")),
         "asset_allocation": _normalize_table(v.get("Data_assetAllocation")),
-        "stock_position_history": _xy_pairs_to_records(
-            v.get("Data_fundSharesPositions"), "position_pct"),
+        "stock_position_history": position_hist,
         "industry_allocation": _normalize_table(v.get("Data_industryAllocation")),
-        "peer_rank_history": _xy_pairs_to_records(
-            v.get("Data_rateInSimilarPersent"), "percentile"),
-        "benchmark_curves": _benchmark_curves(v.get("Data_grandTotal")),
+        "peer_rank_history": peer_hist,
+        "benchmark_curves": bench_curves,
         "buy_redemption_status": v.get("Data_buySedemption"),
         "missing_datasets": missing,                   # 坑P3：显式列出，调用方知情
     }
@@ -961,8 +973,10 @@ def fund_metrics(snapshot: dict, start: str = "", end: str = "",
 def _xirr(cashflows: list, max_rate: float = 10.0) -> Optional[float]:
     """分期现金流年化 IRR（二分法，A1）。cashflows: [(date_str, amount)]，投入负/期末市值正。
 
-    无符号变化（如亏损到市值≈0）或多解无根时返回 None 绝不硬造；
-    NPV(r)=Σ a_i/(1+r)^{t_i 年}，对 r 单调递减，二分稳定收敛。
+    有效性：单符号变化现金流（先负后正，定投即此模式）在 (-1, +∞) 恰有唯一根；
+    NPV 对 r 非单调（先降后升存在极小值）但两端异号下二分仍收敛到唯一根。
+    返回 None 的情形：无符号变化（如清零）、根超出求解域 (-99.99%, max_rate]、
+    数值溢出——绝不硬造。
     """
     if len(cashflows) < 2:
         return None
@@ -979,7 +993,6 @@ def _xirr(cashflows: list, max_rate: float = 10.0) -> Optional[float]:
         return None
     if not (math.isfinite(f_lo) and math.isfinite(f_hi)) or f_lo * f_hi > 0:
         return None
-    mid = (lo + hi) / 2.0
     for _ in range(200):
         mid = (lo + hi) / 2.0
         f_mid = npv(mid)
@@ -1004,6 +1017,8 @@ def fund_dca_backtest(snapshot: dict, amount: float = 1000.0, freq: str = "month
     """
     if freq not in ("monthly", "weekly"):
         raise ValueError(f"freq 只支持 monthly/weekly，收到 {freq!r}")
+    if not amount > 0:
+        raise ValueError(f"amount 必须为正数（每期扣款额），收到 {amount!r}")
     _assert_ascending_dates(snapshot["nav_history"], "fund_dca_backtest")
     adj = adjusted_nav(snapshot["nav_history"])
     if start or end:
@@ -1027,6 +1042,10 @@ def fund_dca_backtest(snapshot: dict, amount: float = 1000.0, freq: str = "month
     cfs = [(a["date"], -float(amount)) for a in invest_dates]
     cfs.append((adj[-1]["date"], float(final_value)))
     xirr = _xirr(cfs)
+    short_note = None
+    if len(invest_dates) < 2 or years < 0.25:
+        short_note = (f"仅 {len(invest_dates)} 期 / {years:.2f} 年窗口，年化数字为极端外推，"
+                      f"读作区间收益更稳妥")
     return {
         "freq": freq, "amount_per_period": amount, "periods": len(invest_dates),
         "first_invest": invest_dates[0]["date"], "last_invest": invest_dates[-1]["date"],
@@ -1038,7 +1057,9 @@ def fund_dca_backtest(snapshot: dict, amount: float = 1000.0, freq: str = "month
         "naive_annualized_pct": round(((final_value / invested) ** (1 / years) - 1) * 100, 4),
         "irr_xirr_pct": round(xirr * 100, 4) if xirr is not None else None,
         "xirr_note": (None if xirr is not None else
-                      "XIRR 无解（期末市值≈0 全亏或窗口过短），分期真年化不适用"),
+                      "XIRR 无解：期末市值≈0（全亏）、窗口过短，或真实年化超出求解域上限"
+                      f"（>{int(10 * 100)}%），分期真年化不适用/不可信"),
+        "short_window_note": short_note,
     }
 
 
@@ -1057,7 +1078,7 @@ def position_trend(snapshot: dict, recent: int = 4) -> dict:
     head = sum(vals[:k]) / k
     tail = sum(vals[-k:]) / k
     label = ("仓位过低（股基/指增常态 80~95%，需核对基金类型或在建仓期）" if latest < 60 else
-             "贴上限运行（≥95%）" if latest > 95 else "仓位正常区间")
+             "贴上限运行（≥95%）" if latest >= 95 else "仓位正常区间")
     if tail - head > 5:
         label += "；近几期加仓"
     elif head - tail > 5:
@@ -1077,6 +1098,9 @@ def peer_rank(snapshot: dict, lookback_days: int = 365) -> dict:
             if isinstance(h.get("percentile"), (int, float))]
     if not hist:
         raise ValueError("同类排名史缺失（E2 Data_rateInSimilarPersent），拒绝解读")
+    _dates_pr = [h["date"] for h in hist]
+    if _dates_pr != sorted(_dates_pr):
+        raise ValueError("peer_rank_history 日期非升序（latest 会取错点），拒绝解读")
     latest = hist[-1]
     cutoff = (datetime.fromisoformat(latest["date"]) - timedelta(days=lookback_days)).isoformat()
     past = [h for h in hist if h["date"] <= cutoff]
@@ -1112,6 +1136,9 @@ def relative_performance(snapshot: dict, benchmark: str = "沪深300",
     b_ret = {}
     for i in range(1, len(dates)):
         c0, c1 = b_by_date[dates[i - 1]], b_by_date[dates[i]]
+        if c0 <= -100.0:
+            raise ValueError(f"基准曲线 {benchmark!r} 在 {dates[i - 1]} 累计值 {c0}%（≤-100，"
+                             f"数值异常），拒绝计算")
         b_ret[dates[i]] = (100.0 + c1) / (100.0 + c0) - 1.0
     _assert_ascending_dates(snapshot["nav_history"], "relative_performance")
     adj = adjusted_nav(snapshot["nav_history"])
@@ -1133,13 +1160,18 @@ def relative_performance(snapshot: dict, benchmark: str = "沪深300",
     win = [a for a in adj if dates[0] <= a["date"] <= dates[-1]]
     fund_ret_pct = (win[-1]["adj_nav"] / win[0]["adj_nav"] - 1.0) * 100.0
     bench_ret_pct = b_by_date[dates[-1]]
+    beta_note = None
+    if beta is None or corr is None:
+        beta_note = ("基准曲线窗口内近乎横盘（方差≈0），β/相关性不可辨识——"
+                     "相对收益仍有效，β 请勿解读")
     return {"benchmark": benchmark,
             "window": {"start": dates[0], "end": dates[-1], "days": n},
             "fund_return_pct": round(fund_ret_pct, 2),
             "benchmark_return_pct": round(bench_ret_pct, 2),
             "relative_return_pct": round(fund_ret_pct - bench_ret_pct, 2),
             "beta": round(beta, 3) if beta is not None else None,
-            "correlation": round(corr, 3) if corr is not None else None}
+            "correlation": round(corr, 3) if corr is not None else None,
+            "beta_note": beta_note}
 
 
 def holding_map(snapshot: dict, topn: int = 10) -> dict:
