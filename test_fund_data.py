@@ -234,6 +234,92 @@ def test_l1_offline():
     finally:
         fd.cb_curve_tree = _orig_tree
 
+    # ── V0.4.0 A1 XIRR / P18 归一化修复 / B1~B3 评测函数（零网络）──
+    from datetime import date as _date, timedelta as _td
+    r = fd._xirr([("2024-01-01", -1000.0), ("2024-12-31", -1000.0), ("2025-12-31", 2400.0)])
+    check("L1", "XIRR-分期现金流锚点12.79%", r is not None and abs(r - 0.127930) < 0.0002,
+          f"{r * 100:.4f}%")
+    check("L1", "XIRR-清零无解返None",
+          fd._xirr([("2024-01-01", -1000.0), ("2024-12-31", -1000.0),
+                    ("2025-12-31", 0.0)]) is None)
+    nav3 = [{"date": "2024-01-01", "nav": 1.0, "daily_return": None, "dividend": 0},
+            {"date": "2024-12-31", "nav": 1.0, "daily_return": None, "dividend": 0},
+            {"date": "2025-11-30", "nav": 1.2, "daily_return": None, "dividend": 0}]
+    dca = fd.fund_dca_backtest({"nav_history": nav3}, amount=1000.0, freq="monthly")
+    check("L1", "DCA-XIRR集成(月投3期)",
+          dca["periods"] == 3 and dca["irr_xirr_pct"]
+          and abs(dca["irr_xirr_pct"] - 13.59) < 0.15
+          and dca["naive_annualized_pct"] < dca["irr_xirr_pct"],
+          f"XIRR={dca['irr_xirr_pct']}% naive={dca['naive_annualized_pct']}%")
+
+    recs = fd._echarts_to_records({"categories": ["2025-09-30", "2025-12-31"],
+                                   "series": [{"y": 1.47, "mom": "11.95%"},
+                                              {"y": 2.88, "mom": "96.28%"}]})
+    check("L1", "归一化-行式{y,mom}修复(P18)",
+          recs[1] == {"_date": "2025-12-31", "y": 2.88, "mom": "96.28%"}, str(recs))
+    sh = fd._scale_history({"categories": ["2025-09-30"],
+                            "series": [{"y": 1.47, "mom": "11.95%"}]})
+    check("L1", "归一化-规模史恢复scale_yi",
+          sh[0]["scale_yi"] == 1.47 and sh[0]["_date"] == "2025-09-30"
+          and sh[0]["mom_pct"] == "11.95%", str(sh))
+    check("L1", "归一化-旧列式(规模键)兼容",
+          fd._scale_history({"categories": ["2025-09-30"],
+                             "series": [{"name": "规模", "data": [2.5]}]})[0]["scale_yi"] == 2.5)
+    pos = fd._xy_pairs_to_records([[1791475200000, 92.83], [1791734400000, 93.75]],
+                                  "position_pct")
+    check("L1", "归一化-时序对修复(P18)",
+          pos[0]["position_pct"] == 92.83 and pos[1]["date"] > pos[0]["date"], str(pos[:1]))
+    check("L1", "归一化-表格形态分流不误伤",
+          fd._xy_pairs_to_records([["a", "b"], [1, 2]], "v") == [])
+    bc = fd._benchmark_curves([{"name": "沪深300",
+                                "data": [[1704067200000, 0.0], [1704153600000, -1.2]]},
+                               {"name": "x", "data": []}])
+    check("L1", "grandTotal曲线解析", len(bc) == 1 and bc[0]["name"] == "沪深300"
+          and bc[0]["points"][1]["return_pct"] == -1.2, str(bc))
+
+    _d0 = _date(2026, 5, 6)
+    _dts = [(_d0 + _td(days=i)).isoformat() for i in range(120)]
+    _bd = [0.0] + [((i * 37) % 23 - 11) / 1000.0 for i in range(1, 120)]
+    _fd_r = [0.0] + [1.2 * b + 0.0003 for b in _bd[1:]]
+    _c, _bc = 0.0, []
+    for _x in _bd:
+        _c += _x
+        _bc.append(_c * 100.0)
+    _curve = [{"name": "沪深300",
+               "points": [{"date": _dts[i], "return_pct": _bc[i]} for i in range(120)]}]
+    _nav, _n = [], 1.0
+    for _i, _rr in enumerate(_fd_r):
+        _n *= (1 + _rr)
+        _nav.append({"date": _dts[_i], "nav": _n, "daily_return": _rr * 100, "dividend": 0})
+    _snap = {"nav_history": _nav, "benchmark_curves": _curve}
+    _rp = fd.relative_performance(_snap)
+    check("L1", "相对表现-β恢复1.2(百分号口径)",
+          abs(_rp["beta"] - 1.2) < 0.01 and _rp["correlation"] > 0.999,
+          f"β={_rp['beta']} corr={_rp['correlation']}")
+    expect_raise("L1", "相对表现-未知基准显式报错",
+                 lambda: fd.relative_performance(_snap, benchmark="中证500"), "沪深300")
+
+    pt = fd.position_trend({"stock_position_history": [
+        {"date": "2025-03-31", "position_pct": 80}, {"date": "2025-06-30", "position_pct": 82},
+        {"date": "2025-09-30", "position_pct": 92}, {"date": "2025-12-31", "position_pct": 94}]})
+    check("L1", "仓位解读-加减仓标签", "加仓" in pt["label"] and pt["latest_pct"] == 94.0,
+          pt["label"])
+    expect_raise("L1", "仓位解读-数据缺失报错",
+                 lambda: fd.position_trend({"stock_position_history": []}), "不足 2 期")
+    _pr, _pv = [], 30
+    for _m in range(22):                              # 跨 >1 年，保证 lookback 对照存在
+        _yy, _mm = 2025 + _m // 12, _m % 12 + 1
+        for _d in range(3):
+            _pr.append({"date": f"{_yy}-{_mm:02d}-{_d * 2 + 1:02d}", "percentile": _pv})
+            _pv += 1
+    pr = fd.peer_rank({"peer_rank_history": _pr})
+    check("L1", "同类百分位-解读", pr["latest_percentile"] == _pv - 1
+          and "同类前列" in pr["label"] and pr["delta_pp"] is not None,
+          f"最新{pr['latest_percentile']} 一年前{pr['year_ago_percentile']} Δ{pr['delta_pp']}pp")
+    check("L1", "metrics-费率标注", fd.fund_metrics(
+        {"nav_history": _nav, "fees": {"current_rate": "0.12"}})["mgmt_fee_pct"] == 0.12
+        and fd.fund_metrics({"nav_history": _nav})["mgmt_fee_pct"] is None)
+
 
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
 def test_l2_smoke():
@@ -252,6 +338,32 @@ def test_l2_smoke():
           and snap["_meta"]["source"].startswith("eastmoney"),
           f"重仓{len(snap['top_stocks'])} 经理{snap['manager']['name']} "
           f"缺失{len(snap['missing_datasets'])}项")
+    check("L2", "E2 快照-基准三曲线(V0.4)",
+          len(snap["benchmark_curves"]) == 3
+          and {"同类平均", "沪深300"} <= {c["name"] for c in snap["benchmark_curves"]}
+          and all(len(c["points"]) > 60 for c in snap["benchmark_curves"]),
+          str([(c["name"], len(c["points"])) for c in snap["benchmark_curves"]]))
+    check("L2", "E2 快照-仓位史/同类百分位修复(V0.4)",
+          len(snap["stock_position_history"]) >= 4
+          and isinstance(snap["stock_position_history"][-1]["position_pct"], float)
+          and len(snap["peer_rank_history"]) > 100,
+          f"仓位{len(snap['stock_position_history'])}期 "
+          f"同类{len(snap['peer_rank_history'])}点")
+    check("L2", "E2 快照-规模史修复(V0.4)",
+          snap["scale_history"]
+          and isinstance(snap["scale_history"][-1]["scale_yi"], float),
+          str(snap["scale_history"][-1]))
+    _fund_curve = next((c for c in snap["benchmark_curves"]
+                        if c["name"] not in ("同类平均", "沪深300")), None)
+    _rp = fd.relative_performance(snap)
+    check("L2", "相对表现-基金窗口收益=grandTotal基金曲线末点",
+          _fund_curve is not None
+          and abs(_rp["fund_return_pct"]
+                  - _fund_curve["points"][-1]["return_pct"]) < 0.05
+          and _rp["beta"] is not None and abs(_rp["beta"]) < 3,
+          f"相对{_rp['relative_return_pct']}% β={_rp['beta']} corr={_rp['correlation']}"
+          f"（板块基金可与大盘日频脱钩，实测白酒 corr 0.06——只锚窗口收益一致性）"
+          f"窗口{_rp['window']['start']}~{_rp['window']['end']}")
 
     hist = fd.fund_nav_history("161725", start="2026-09-01", end="2026-11-05")
     check("L2", "E3 净值-区间+申赎状态",
@@ -319,9 +431,13 @@ def test_l2_smoke():
 
 # ════════════════════ L3 交叉验证（三源互证）════════════════════
 def test_l3_cross():
+    from datetime import date, timedelta
     snap = fd.fund_snapshot("161725")
     e2_last = snap["nav_history"][-1]
-    hist = fd.fund_nav_history("161725", start="2026-10-01", end="2026-11-05")
+    # 窗口锚定 E2 末条净值日期（曾是硬编码日期 → 周末/隔日即炸的时间炸弹，已改动态）
+    _end = e2_last["date"]
+    _start = (date.fromisoformat(_end) - timedelta(days=35)).isoformat()
+    hist = fd.fund_nav_history("161725", start=_start, end=_end)
     check("L3", "净值互证 E2 vs E3",
           hist[0]["date"] == e2_last["date"]
           and abs(hist[0]["nav"] - e2_last["nav"]) < 1e-4,
@@ -341,9 +457,11 @@ def test_l3_cross():
           f"最新报告期{latest} 交集{len(overlap)}/E4a{len(e4a_codes)}/E2{len(e2_codes)}")
 
     # 本地指标 vs 官方同期收益（E2 自带 ground truth）
-    # 官方 syl_1n 窗口=近1年交易日口径，本地=自然日365天前起 → 边界差容差 0.6pct
-    from datetime import date, timedelta
-    m = fd.fund_metrics(snap, start=(date.today() - timedelta(days=365)).isoformat())
+    # 官方 syl_1n 锚定最后净值日；本地窗口同样以末条净值日回溯 365 自然日
+    # （曾用 date.today() 回溯——周末 today 比最后净值日晚 1~3 天，起点漂移 × 急跌段
+    #  可差 3pct+，2026-11-09 实测踩中；改为锚定数据日本身，永久消除漂移）
+    m = fd.fund_metrics(snap, start=(date.fromisoformat(e2_last["date"])
+                                     - timedelta(days=365)).isoformat())
     official = fd._to_float(snap["period_returns_pct"].get("1year"))
     mine = m["total_return_pct"]
     check("L3", "指标互证 复权收益 vs 官方syl_1n",
