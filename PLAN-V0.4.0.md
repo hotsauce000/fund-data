@@ -91,3 +91,9 @@ D3（可选）：ETF 日频折溢价 = 腾讯场内 K 线（不封 IP）+ E2 净
 - 三份拷贝同步（workspace / `~/.agents/skills/fund-data/` / `licai-map/server/`）+ SKILL.md 重建（build_skill_md.py）+ README 版本行
 - 冷启请求数不变（B/C 零请求；D 为按需新端点 +2）
 - 每批次完成后独立跑全量测试 + code-reviewer 审查闭环，再进下一批
+
+## 执行记录补遗（V0.4.1，2026-11-09 审计修复）
+
+- P-A penetrate 名字改 fund_list 直查（0 请求，原 436KB 黑洞）；P-B 预算文档修正（重跑 2→1）；P-C E4a thead 动态列映射（防"文案在列位变"静默错列）；P-D 空结果缓存；P-E credit_spread 报错分期限/日期两因
+- 复核遗留清零：XIRR 上限常量化 / beta_note 按横盘侧归因 / peer_rank 复用升序断言 / 抬头版本 / +11 守卫断言
+- 测试 89 → 100 全绿；V0.4.1 三份拷贝同步

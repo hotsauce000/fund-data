@@ -320,6 +320,120 @@ def test_l1_offline():
         {"nav_history": _nav, "fees": {"current_rate": "0.12"}})["mgmt_fee_pct"] == 0.12
         and fd.fund_metrics({"nav_history": _nav})["mgmt_fee_pct"] is None)
 
+    # ── V0.4.1 审计修复项守卫（P-A~P-E + 复核遗留）──
+    expect_raise("L1", "DCA-amount非正拦截",
+                 lambda: fd.fund_dca_backtest({"nav_history": nav3}, amount=0),
+                 "amount 必须为正数")
+    expect_raise("L1", "peer_rank-乱序拒绝",
+                 lambda: fd.peer_rank({"peer_rank_history": [
+                     {"date": "2026-02-01", "percentile": 50},
+                     {"date": "2026-01-01", "percentile": 60}]}), "非升序")
+    _flat_bench = [{"name": "沪深300",
+                    "points": [{"date": _dts[i], "return_pct": 0.0} for i in range(120)]}]
+    _rp_flat = fd.relative_performance({"nav_history": _nav, "benchmark_curves": _flat_bench})
+    check("L1", "相对表现-基准横盘beta_note",
+          _rp_flat["beta"] is None and _rp_flat["beta_note"]
+          and "基准曲线窗口内近乎横盘" in _rp_flat["beta_note"], _rp_flat["beta_note"][:30])
+    _neg_bench = [{"name": "沪深300", "points": [
+        {"date": "2026-05-06", "return_pct": 0.0}, {"date": "2026-05-07", "return_pct": -100.0},
+        {"date": "2026-05-08", "return_pct": -101.0}]}]
+    expect_raise("L1", "相对表现-基准归零守卫",
+                 lambda: fd.relative_performance(
+                     {"nav_history": _nav, "benchmark_curves": _neg_bench},
+                     min_overlap=1), "数值异常")
+    _nav_short = [{"date": "2026-01-02", "nav": 1.0, "daily_return": None, "dividend": 0},
+                  {"date": "2026-01-20", "nav": 1.05, "daily_return": None, "dividend": 0}]
+    _dca_short = fd.fund_dca_backtest({"nav_history": _nav_short}, amount=1000.0)
+    check("L1", "DCA-短窗口警示note",
+          _dca_short["short_window_note"] and "外推" in _dca_short["short_window_note"]
+          and _dca_short["irr_xirr_pct"] and 100 < _dca_short["irr_xirr_pct"] < 300,
+          f"note={_dca_short['short_window_note'][:24]} irr={_dca_short['irr_xirr_pct']}%")
+    _nav_dead = [{"date": "2026-01-02", "nav": 1.0, "daily_return": None, "dividend": 0},
+                 {"date": "2026-06-20", "nav": 0.001, "daily_return": None, "dividend": 0}]
+    _dca_dead = fd.fund_dca_backtest({"nav_history": _nav_dead}, amount=1000.0)
+    check("L1", "DCA-清零xirr_note含上限",
+          _dca_dead["irr_xirr_pct"] is None and "1000%" in _dca_dead["xirr_note"],
+          f"irr={_dca_dead['irr_xirr_pct']} note={(_dca_dead['xirr_note'] or '')[:30]}")
+    check("L1", "XIRR求解域上限引用常量", fd.XIRR_MAX_RATE == 10.0
+          and f"{fd.XIRR_MAX_RATE * 100:.0f}%" == "1000%")
+
+    # fund_holdings 动态列映射（P-C）：插列变体不静默错列
+    class _FakeResp:
+        status_code = 200
+        def __init__(self, text):
+            self.content = text.encode("utf-8")
+            self.text = text
+        def raise_for_status(self):
+            return None
+    _th_std = ("<thead><tr><th>序号</th><th>股票代码</th><th>股票名称</th><th>最新价</th>"
+               "<th>涨跌幅</th><th>资讯</th><th>占净值比例</th><th>持股数（万股）</th>"
+               "<th>持仓市值（万元）</th></tr></thead>")
+    _th_ins = ("<thead><tr><th>序号</th><th>股票代码</th><th>股票名称</th><th>最新价</th>"
+               "<th>涨跌幅</th><th>涨跌额</th><th>资讯</th><th>占净值比例</th>"
+               "<th>持股数（万股）</th><th>持仓市值（万元）</th></tr></thead>")
+    _row_std = ("<tbody><tr><td>1</td><td>600519</td><td>贵州茅台</td><td>1500.0</td>"
+                "<td>1.0%</td><td>公告</td><td>9.95</td><td>100</td><td>150000</td></tr></tbody>")
+    _row_ins = ("<tbody><tr><td>1</td><td>600519</td><td>贵州茅台</td><td>1500.0</td>"
+                "<td>1.0%</td><td>15.0</td><td>公告</td><td>9.95</td><td>100</td>"
+                "<td>150000</td></tr></tbody>")
+    def _jjcc_resp(thead, tbody):
+        return _FakeResp('var apidata={ content:"<h4>截止至：<font>2026-09-30</font></h4>'
+                         '<table>' + thead + tbody + '</table>", arryear:[2026]};')
+    _orig_ttf, _orig_cache_r, _orig_cache_w = fd.ttfund_get, fd._cache_read, fd._cache_write
+    fd._cache_read = lambda rel, max_age_hours=None: None
+    fd._cache_write = lambda rel, payload: None
+    try:
+        fd.ttfund_get = lambda url, **k: _jjcc_resp(_th_std, _row_std)
+        h_std = fd.fund_holdings("161725")
+        fd.ttfund_get = lambda url, **k: _jjcc_resp(_th_ins, _row_ins)
+        h_ins = fd.fund_holdings("161725")
+        check("L1", "持仓-动态列映射(插列不变错)",
+              h_std and h_ins and h_std[0]["nav_pct"] == h_ins[0]["nav_pct"] == 9.95
+              and h_ins[0]["stock_code"] == "600519" and h_ins[0]["value_wan"] == 150000.0,
+              f"std={h_std[0]['nav_pct']} ins={h_ins[0]['nav_pct']}")
+        fd.ttfund_get = lambda url, **k: _jjcc_resp(
+            _th_std.replace("<th>占净值比例</th>", ""), _row_std)
+        expect_raise("L1", "持仓-缺列显式报错",
+                     lambda: fd.fund_holdings("161725"), "缺 '占净值'")
+        # snapshot present-unparsed（P18 关联）：raw 存在但形态解析失败进 missing
+        _pz = ('var fS_name="测试基金";var fS_code="161725";var ishb="0";'
+               'var Data_netWorthTrend=[{"x":1767225600000,"y":1.0,"equityReturn":"0"}];'
+               'var Data_ACWorthTrend=[];var Data_grandTotal=[];'
+               'var Data_rateInSimilarPersent=[[1767225600000,50]];'
+               'var Data_fundSharesPositions=[["坏行"],[1,2,3]];'
+               'var Data_fluctuationScale={"categories":["2025-09-30"],'
+               '"series":[{"y":1.5}]};' + ("/*" + "x" * 1200 + "*/"))
+        fd.ttfund_get = lambda url, **k: _FakeResp(_pz)
+        _snap_fake = fd.fund_snapshot("161725")
+        check("L1", "快照-present,unparsed进missing",
+              "Data_fundSharesPositions(present,unparsed)" in _snap_fake["missing_datasets"]
+              and _snap_fake["peer_rank_history"][0]["percentile"] == 50
+              and _snap_fake["scale_history"][0]["scale_yi"] == 1.5,
+              str(_snap_fake["missing_datasets"]))
+    finally:
+        fd.ttfund_get, fd._cache_read, fd._cache_write = \
+            (_orig_ttf, _orig_cache_r, _orig_cache_w)
+
+    # penetrate 不再为名字拉快照（P-A）
+    _orig = (fd.fund_holdings, fd.tencent_quote, fd.concept_blocks, fd.fund_snapshot)
+    def _bomb(*a, **k):
+        raise AssertionError("penetrate 不应再调用 fund_snapshot（名字应从 fund_list 直查）")
+    try:
+        fd.fund_holdings = lambda q, **k: [
+            {"period": "2026-09-30", "seq": 1, "stock_code": "600519", "stock_name": "贵州茅台",
+             "nav_pct": 9.95, "shares_wan": 100, "value_wan": 150000}]
+        fd.tencent_quote = lambda codes: {"600519": {"name": "贵州茅台", "price": 1500.0,
+                                                     "pe_ttm": 20.0, "pb": 8.0,
+                                                     "change_pct": 1.0}}
+        fd.concept_blocks = lambda code, **k: ["白酒Ⅲ", "酿酒概念"]
+        fd.fund_snapshot = _bomb
+        p = fd.penetrate("161725")
+        check("L1", "穿透-名字零快照(P-A)", p["fund"] == "招商中证白酒指数(LOF)A"
+              and p["themes"] and p["themes"][0][0] == "白酒",
+              f"fund={p['fund']} 主题={p['themes'][:2]}")
+    finally:
+        (fd.fund_holdings, fd.tencent_quote, fd.concept_blocks, fd.fund_snapshot) = _orig
+
 
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
 def test_l2_smoke():

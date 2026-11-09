@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-fund-data V0.3.0 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率）
+fund-data V0.4.1 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤2 请求（1×pingzhongdata，0~1×lsjz）
@@ -59,7 +59,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 # ══════════════════════════════════════════════════════════════════
 # L1 前置层：限流入口 / 缓存目录 / 请求计数
@@ -791,19 +791,32 @@ def fund_holdings(query: str, year: Optional[int] = None) -> list[dict]:
         prev_end = t.end()
         dates = re.findall(r"\d{4}-\d{2}-\d{2}", header_zone)
         period = dates[-1] if dates else None
-        # 列序防线：上游调整列序时下标取值会静默错列，先按表头文案定位校验
+        # 列序防线（P-C 升级）：不再按下标盲取——从 thead 解析「列名→索引」映射动态取列，
+        # 上游保留文案但调整列位（如插一列涨跌额）时旧防线会静默错列（F10 家族有改列前科）。
         thead = re.search(r"<thead[^>]*>(.*?)</thead>", t.group(0), re.S)
-        head_txt = re.sub(r"<[^>]+>|\s+", "", thead.group(1)) if thead else ""
-        if "占净值" not in head_txt or "持股数" not in head_txt:
-            raise RuntimeError(f"jjcc 表头与预期不符（{code}，报告期 {period}）："
-                               f"{head_txt[:60]!r}——上游疑似调整列序，拒绝按下标盲取。")
+        head_cells = ([re.sub(r"<[^>]+>|\s+", "", c)
+                       for c in re.findall(r"<th[^>]*>(.*?)</th>", thead.group(1), re.S)]
+                      if thead else [])
+        if not head_cells:
+            raise RuntimeError(f"jjcc 表头缺失/无 th 列（{code}，报告期 {period}），拒绝盲取")
+
+        def col_idx(keyword: str) -> int:
+            for i, h in enumerate(head_cells):
+                if keyword in h:
+                    return i
+            raise RuntimeError(f"jjcc 表头缺 {keyword!r} 列（{code}，报告期 {period}）："
+                               f"{head_cells}——上游列序变更，拒绝盲取")
+
+        i_code, i_name = col_idx("代码"), col_idx("名称")
+        i_pct, i_shares, i_value = col_idx("占净值"), col_idx("持股数"), col_idx("市值")
+        i_max = max(i_code, i_name, i_pct, i_shares, i_value)
         for cells in _html_table_rows(t.group(0)):
-            if len(cells) >= 9 and cells[0].isdigit():
+            if len(cells) > i_max and cells[0].isdigit():
                 out.append({"period": period, "seq": int(cells[0]),
-                            "stock_code": cells[1], "stock_name": cells[2],
-                            "nav_pct": _to_float(cells[6]),
-                            "shares_wan": _to_float(cells[7]),
-                            "value_wan": _to_float(cells[8])})
+                            "stock_code": cells[i_code], "stock_name": cells[i_name],
+                            "nav_pct": _to_float(cells[i_pct]),
+                            "shares_wan": _to_float(cells[i_shares]),
+                            "value_wan": _to_float(cells[i_value])})
     _cache_write(rel, out)
     return out
 
@@ -910,11 +923,12 @@ def adjusted_nav(nav_records: list[dict]) -> list[dict]:
 
 
 def _assert_ascending_dates(records: list[dict], ctx: str) -> None:
-    """净值序列必须日期升序（E2 是升序；E3 原生降序——喂指标前必须反转，坑P7）。"""
+    """日期序列必须升序（E2 净值升序；E3 lsjz 原生降序——喂指标前必须反转，坑P7；
+    peer_rank_history 等一切时序输入同样适用）。"""
     dates = [r["date"] for r in records]
     if dates != sorted(dates):
         raise ValueError(
-            f"{ctx}：净值序列日期非升序（首 {dates[0]} → 末 {dates[-1]}）。"
+            f"{ctx}：日期序列非升序（首 {dates[0]} → 末 {dates[-1]}）。"
             f"若数据来自 lsjz(E3) 请先反转——降序序列会让收益/回撤方向全反。")
 
 
@@ -970,7 +984,10 @@ def fund_metrics(snapshot: dict, start: str = "", end: str = "",
     }
 
 
-def _xirr(cashflows: list, max_rate: float = 10.0) -> Optional[float]:
+XIRR_MAX_RATE = 10.0          # XIRR 求解域上限（年化 1000%）；note 文案引用此常量防漂移
+
+
+def _xirr(cashflows: list, max_rate: float = XIRR_MAX_RATE) -> Optional[float]:
     """分期现金流年化 IRR（二分法，A1）。cashflows: [(date_str, amount)]，投入负/期末市值正。
 
     有效性：单符号变化现金流（先负后正，定投即此模式）在 (-1, +∞) 恰有唯一根；
@@ -1058,7 +1075,7 @@ def fund_dca_backtest(snapshot: dict, amount: float = 1000.0, freq: str = "month
         "irr_xirr_pct": round(xirr * 100, 4) if xirr is not None else None,
         "xirr_note": (None if xirr is not None else
                       "XIRR 无解：期末市值≈0（全亏）、窗口过短，或真实年化超出求解域上限"
-                      f"（>{int(10 * 100)}%），分期真年化不适用/不可信"),
+                      f"（>{XIRR_MAX_RATE * 100:.0f}%），分期真年化不适用/不可信"),
         "short_window_note": short_note,
     }
 
@@ -1098,9 +1115,7 @@ def peer_rank(snapshot: dict, lookback_days: int = 365) -> dict:
             if isinstance(h.get("percentile"), (int, float))]
     if not hist:
         raise ValueError("同类排名史缺失（E2 Data_rateInSimilarPersent），拒绝解读")
-    _dates_pr = [h["date"] for h in hist]
-    if _dates_pr != sorted(_dates_pr):
-        raise ValueError("peer_rank_history 日期非升序（latest 会取错点），拒绝解读")
+    _assert_ascending_dates(hist, "peer_rank_history（latest 会取错点）")
     latest = hist[-1]
     cutoff = (datetime.fromisoformat(latest["date"]) - timedelta(days=lookback_days)).isoformat()
     past = [h for h in hist if h["date"] <= cutoff]
@@ -1157,13 +1172,17 @@ def relative_performance(snapshot: dict, benchmark: str = "沪深300",
     sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
     beta = sxy / sxx if sxx > 1e-18 else None
     corr = sxy / math.sqrt(sxx * syy) if sxx > 1e-18 and syy > 1e-18 else None
+    bench_flat, fund_flat = sxx <= 1e-18, syy <= 1e-18
     win = [a for a in adj if dates[0] <= a["date"] <= dates[-1]]
     fund_ret_pct = (win[-1]["adj_nav"] / win[0]["adj_nav"] - 1.0) * 100.0
     bench_ret_pct = b_by_date[dates[-1]]
     beta_note = None
-    if beta is None or corr is None:
-        beta_note = ("基准曲线窗口内近乎横盘（方差≈0），β/相关性不可辨识——"
-                     "相对收益仍有效，β 请勿解读")
+    if bench_flat and fund_flat:
+        beta_note = "基准与基金曲线窗口内均近乎横盘（方差≈0），β/相关性不可辨识——相对收益仍有效"
+    elif bench_flat:                                  # corr=None 的根因也是基准侧，勿误报基金横盘
+        beta_note = "基准曲线窗口内近乎横盘（方差≈0），β 不可辨识——相对收益仍有效，β 请勿解读"
+    elif fund_flat:
+        beta_note = "基金净值窗口内近乎横盘（方差≈0），相关性不可辨识，β 数值意义同样有限"
     return {"benchmark": benchmark,
             "window": {"start": dates[0], "end": dates[-1], "days": n},
             "fund_return_pct": round(fund_ret_pct, 2),
@@ -1360,11 +1379,14 @@ def _clean_tag(tag: str):
 def penetrate(query: str, topn: int = 10) -> dict:
     """重仓穿透主入口（R9 场景 04）：基金 → 重仓股权重 → 股票域行情+板块 → 白话地图。
 
-    请求预算：1(持仓 jjcc，每次现查——fund_holdings 无缓存) + 1(腾讯批量) + N(板块，当日缓存)
-    → 冷启动最多 ≈14 请求（含 snapshot/fund_list 缓存 miss）；当日重跑 = 2 请求（jjcc+腾讯）。
+    请求预算（P-B 修正）：1(持仓 jjcc，当日缓存 F4) + 1(腾讯批量) + N(板块，当日缓存)
+    → 冷启动 ≈13 请求；当日重跑 = 1 请求（仅腾讯，持仓与板块全缓存命中）。
+    基金名从 fund_list 主键表直查（0 请求）——不再为拿名字拉 436KB 快照（P-A）。
     单股失败不中断整体：跳过该股的主题聚合，记入 failed_stocks（含 reason 与权重）。
     """
-    hold = fund_holdings(query)
+    code = resolve_fund_code(query)
+    name = next((f["name"] for f in fund_list() if f["code"] == code), code)
+    hold = fund_holdings(code)
     if not hold:
         raise RuntimeError(f"{query} 无股票持仓记录（债基/货基？）——"
                            f"股票穿透需要股票重仓；债券穿透请用 fund_snapshot().top_bonds")
@@ -1414,7 +1436,7 @@ def penetrate(query: str, topn: int = 10) -> dict:
     unclassified = round(sum(f["weight"] for f in failed_stocks if f["weight"]), 2)
     detail = [{**h, "quote": quotes.get(h["stock_code"], {})} for h in picks]
     return {
-        "fund": fund_snapshot(query)["name"],
+        "fund": name,
         "period": latest, "topn_weight_pct": round(weight_sum, 2),
         "detail": detail,
         "themes": [(k, round(v, 2)) for k, v in top_themes],
@@ -1654,10 +1676,18 @@ def credit_spread(rating: str = "AA", term: str = "3y",
     corp = cb_yield_curve(cn, year)
     gov = cb_yield_curve("treasury", year)
     g = {p["date"]: p["yield_pct"] for p in gov["points"] if p["term"] == term}
+    corp_pts = [p for p in corp["points"] if p["term"] == term]
+    # P-E：先分清「期限不存在」与「日期对不上」——报错文案直接决定排查方向
+    if not corp_pts:
+        raise ValueError(f"企业债曲线({rating}) 无 {term!r} 期限数据点。可选期限: "
+                         f"{sorted({p['term'] for p in corp['points']})[:12]}")
+    if not g:
+        raise ValueError(f"国债曲线无 {term!r} 期限数据点。可选期限: "
+                         f"{sorted({p['term'] for p in gov['points']})[:12]}")
     out = [{"date": p["date"], "spread_pct": round(p["yield_pct"] - g[p["date"]], 4)}
-           for p in corp["points"] if p["term"] == term and p["date"] in g]
+           for p in corp_pts if p["date"] in g]
     if not out:
-        raise ValueError(f"企业债({rating}) 与国债在 {term} 无共同日期，无法算利差")
+        raise ValueError(f"企业债({rating}) 与国债在 {term} 无共同日期（两条曲线日期错位），无法算利差")
     return out
 
 
@@ -1691,7 +1721,9 @@ def _dc_query(report: str, sort_col: str, page_size: int = 60,
         rows.extend(batch)
         if len(batch) < page_size:
             break
-    if cache_key and rows:
+    if cache_key:
+        # 空结果也缓存（P-D）：success 链路已校验，空 = 上游真无数据；
+        # 不缓存会让合法空报表每次调用重发请求
         _cache_write(f"macro/{cache_key}.json", rows)
     return rows
 
