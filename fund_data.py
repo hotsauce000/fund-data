@@ -807,12 +807,14 @@ def fund_holdings(query: str, year: Optional[int] = None) -> list[dict]:
             raise RuntimeError(f"jjcc 表头缺 {keyword!r} 列（{code}，报告期 {period}）："
                                f"{head_cells}——上游列序变更，拒绝盲取")
 
-        i_code, i_name = col_idx("代码"), col_idx("名称")
+        i_seq = col_idx("序号")
+        i_code, i_name = col_idx("股票代码"), col_idx("股票名称")   # 全称做关键词：
+        # "代码"/"名称"过短，上游若插"行业代码"之类列会错列命中
         i_pct, i_shares, i_value = col_idx("占净值"), col_idx("持股数"), col_idx("市值")
-        i_max = max(i_code, i_name, i_pct, i_shares, i_value)
+        i_max = max(i_seq, i_code, i_name, i_pct, i_shares, i_value)
         for cells in _html_table_rows(t.group(0)):
-            if len(cells) > i_max and cells[0].isdigit():
-                out.append({"period": period, "seq": int(cells[0]),
+            if len(cells) > i_max and cells[i_seq].isdigit():   # 序号也走映射——上游删序号列时
+                out.append({"period": period, "seq": int(cells[i_seq]),   # 代码列 isdigit 会冒充序号
                             "stock_code": cells[i_code], "stock_name": cells[i_name],
                             "nav_pct": _to_float(cells[i_pct]),
                             "shares_wan": _to_float(cells[i_shares]),

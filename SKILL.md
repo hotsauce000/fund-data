@@ -7,13 +7,13 @@ version: 0.4.1
 
 # fund-data 基金底层数据工具包 V0.4.1
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层。**V0.4.1（2026-11-09）：100/100 断言实测通过**（L1单元60 · L2端点smoke 21 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×5），覆盖 11 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层。**V0.4.1（2026-11-09）：105/105 断言实测通过**（L1单元65 · L2端点smoke 21 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×5），覆盖 11 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
 
 **V0.4.1 审计修复（P-A~P-E + 复核遗留）：**
 - 🔴 **P-C 持仓列序防线升级**：E4a 从"文案存在校验+下标盲取"升级为 thead 动态列映射——上游保留文案但调列位时不再静默错列（+2 断言）
 - 🔴 **P-A 穿透预算黑洞**：penetrate 基金名改从 fund_list 直查（0 请求）——原实现为拿名字拉 436KB 快照；当日重跑 2→1 请求
 - 🟡 P-B 预算文档漂移修正 / P-D `_dc_query` 空结果也缓存 / P-E credit_spread 报错区分"期限不存在 vs 日期错位"
-- 🟡 复核遗留：XIRR 上限常量化（note 不再硬编码）、beta_note 按横盘侧分别归因、peer_rank 复用 `_assert_ascending_dates`、模块抬头版本、新守卫测试 +11
+- 🟡 复核遗留：XIRR 上限常量化（note 不再硬编码）、beta_note 按横盘侧分别归因、peer_rank 复用 `_assert_ascending_dates`、模块抬头版本、新守卫测试 +16（含利差三段报错/基金横盘分支）
 
 **V0.4.0 正确性欠账清偿 + 在手数据接线（A/B 批次）：**
 - 🔴 **P18 归一化双 bug 修复**：E2 表格变量两种形态旧解析器都吃不下——`{categories, series:[{y,mom}]}` 行式（规模史）值全丢成光杆 `_date` 行；`[[ts,val],...]` 时序对（仓位/同类百分位）被当"首行表头"产出乱码。修复后规模史/仓位史/同类百分位史全部恢复真实值（评测skill C7 的份额兜底路径不再是常态）
@@ -948,12 +948,14 @@ def fund_holdings(query: str, year: Optional[int] = None) -> list[dict]:
             raise RuntimeError(f"jjcc 表头缺 {keyword!r} 列（{code}，报告期 {period}）："
                                f"{head_cells}——上游列序变更，拒绝盲取")
 
-        i_code, i_name = col_idx("代码"), col_idx("名称")
+        i_seq = col_idx("序号")
+        i_code, i_name = col_idx("股票代码"), col_idx("股票名称")   # 全称做关键词：
+        # "代码"/"名称"过短，上游若插"行业代码"之类列会错列命中
         i_pct, i_shares, i_value = col_idx("占净值"), col_idx("持股数"), col_idx("市值")
-        i_max = max(i_code, i_name, i_pct, i_shares, i_value)
+        i_max = max(i_seq, i_code, i_name, i_pct, i_shares, i_value)
         for cells in _html_table_rows(t.group(0)):
-            if len(cells) > i_max and cells[0].isdigit():
-                out.append({"period": period, "seq": int(cells[0]),
+            if len(cells) > i_max and cells[i_seq].isdigit():   # 序号也走映射——上游删序号列时
+                out.append({"period": period, "seq": int(cells[i_seq]),   # 代码列 isdigit 会冒充序号
                             "stock_code": cells[i_code], "stock_name": cells[i_name],
                             "nav_pct": _to_float(cells[i_pct]),
                             "shares_wan": _to_float(cells[i_shares]),

@@ -414,11 +414,14 @@ def test_l1_offline():
         fd.ttfund_get, fd._cache_read, fd._cache_write = \
             (_orig_ttf, _orig_cache_r, _orig_cache_w)
 
-    # penetrate 不再为名字拉快照（P-A）
-    _orig = (fd.fund_holdings, fd.tencent_quote, fd.concept_blocks, fd.fund_snapshot)
+    # penetrate 不再为名字拉快照（P-A）——fund_list 也 patch，与真实清单缓存隔离
+    _orig = (fd.fund_holdings, fd.tencent_quote, fd.concept_blocks, fd.fund_snapshot,
+             fd.fund_list)
     def _bomb(*a, **k):
         raise AssertionError("penetrate 不应再调用 fund_snapshot（名字应从 fund_list 直查）")
     try:
+        fd.fund_list = lambda **k: [{"code": "161725", "name": "测试白酒基金",
+                                     "type": "股票指数", "pinyin": "csbc"}]
         fd.fund_holdings = lambda q, **k: [
             {"period": "2026-09-30", "seq": 1, "stock_code": "600519", "stock_name": "贵州茅台",
              "nav_pct": 9.95, "shares_wan": 100, "value_wan": 150000}]
@@ -428,11 +431,49 @@ def test_l1_offline():
         fd.concept_blocks = lambda code, **k: ["白酒Ⅲ", "酿酒概念"]
         fd.fund_snapshot = _bomb
         p = fd.penetrate("161725")
-        check("L1", "穿透-名字零快照(P-A)", p["fund"] == "招商中证白酒指数(LOF)A"
+        check("L1", "穿透-名字零快照(P-A)", p["fund"] == "测试白酒基金"
               and p["themes"] and p["themes"][0][0] == "白酒",
               f"fund={p['fund']} 主题={p['themes'][:2]}")
     finally:
-        (fd.fund_holdings, fd.tencent_quote, fd.concept_blocks, fd.fund_snapshot) = _orig
+        (fd.fund_holdings, fd.tencent_quote, fd.concept_blocks, fd.fund_snapshot,
+         fd.fund_list) = _orig
+
+    # credit_spread 三段报错（P-E）与 beta_note 基金侧横盘——离线分支覆盖
+    _orig_cb = fd.cb_yield_curve
+    try:
+        _corp = lambda term, dates: {"points": [
+            {"date": d, "term": term, "yield_pct": 2.5} for d in dates]}
+        fd.cb_yield_curve = lambda curve, year=None: (
+            _corp("3y", ["2026-01-05", "2026-01-06"]) if "企业债" in str(curve)
+            else _corp("3y", ["2026-01-05", "2026-01-06"]))
+        sp = fd.credit_spread("AA", "3y")
+        check("L1", "利差-正常算差", len(sp) == 2 and sp[0]["spread_pct"] == 0.0,
+              f"{sp[0]}")
+        fd.cb_yield_curve = lambda curve, year=None: (
+            {"points": [{"date": "2026-01-05", "term": "1y", "yield_pct": 2.0}]}
+            if "企业债" in str(curve) else _corp("3y", ["2026-01-05"]))
+        expect_raise("L1", "利差-企业债期限缺失报错",
+                     lambda: fd.credit_spread("AA", "3y"), "企业债曲线")
+        fd.cb_yield_curve = lambda curve, year=None: (
+            _corp("3y", ["2026-01-05"]) if "企业债" in str(curve)
+            else {"points": [{"date": "2026-01-05", "term": "1y", "yield_pct": 2.0}]})
+        expect_raise("L1", "利差-国债期限缺失报错",
+                     lambda: fd.credit_spread("AA", "3y"), "国债曲线")
+        fd.cb_yield_curve = lambda curve, year=None: (
+            _corp("3y", ["2026-01-05"]) if "企业债" in str(curve)
+            else _corp("3y", ["2026-02-01"]))
+        expect_raise("L1", "利差-日期错位报错",
+                     lambda: fd.credit_spread("AA", "3y"), "无共同日期")
+    finally:
+        fd.cb_yield_curve = _orig_cb
+    _fund_flat = [{"date": _dts[i], "nav": 1.0, "daily_return": 0.0, "dividend": 0}
+                  for i in range(120)]
+    _rp_ff = fd.relative_performance({"nav_history": _fund_flat,
+                                      "benchmark_curves": _curve})
+    check("L1", "相对表现-基金横盘beta_note",
+          _rp_ff["beta"] is not None and _rp_ff["correlation"] is None
+          and _rp_ff["beta_note"] and "基金净值窗口内近乎横盘" in _rp_ff["beta_note"],
+          _rp_ff["beta_note"][:30])
 
 
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
