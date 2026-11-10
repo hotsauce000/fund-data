@@ -344,7 +344,7 @@ def assert_not_risk_control(resp, line: str = "tt", context: str = ""):
     if resp.status_code in (403, 429):
         _cbreak_signal(line, f"HTTP {resp.status_code} {context}")
         raise RiskControlError(
-            f"HTTP {resp.status_code}（{context}）：疑似东财风控信号，"
+            f"HTTP {resp.status_code}（{context}）：疑似{_line_label(line)}风控信号，"
             f"已计入熔断计数。本错误不触发降级（防请求风暴），请降频稍后再试。")
     _cbreak_state[line] = [0, 0.0]   # 成功响应清零连击（孤立 403 不跨时间累积误熔断）
 
@@ -2226,8 +2226,9 @@ def fund_rank(top: Optional[int] = None, fund_type: str = "all", sort: str = "yt
     top = int(top)
     if not 1 <= top <= 100:
         raise ValueError("top 只支持 1~100（更大需求走全量模式 top=None 本地排序）")
-    # 缓存键含 top（服务端只回该页）；sort/ascending 不入键——排序在缓存读取后本地执行
-    rel = f"rank/top_{fund_type}_{top}.json"
+    # 缓存键含 top+sort：服务端窗口（按 sc 字段取前 N 名）随两者变化，键必须同变；
+    # 仅 ascending 不入键——升/降序在缓存读取后本地重排兑现
+    rel = f"rank/top_{fund_type}_{sort}_{top}.json"
     rows = None if force_refresh else _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
     if rows is None:
         type_map = {f["code"]: f["type"] for f in fund_list()}

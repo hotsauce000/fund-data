@@ -576,9 +576,13 @@ def test_l1_offline():
         fd.fund_rank(top=50, fund_type="gp", sort="ytd", force_refresh=True)
         check("L1", "排行-top入缓存键(不同top不串缓存)", len(_calls) == 2,
               f"top=50 触发新拉取，实发 {len(_calls)} 次")
+        fd.fund_rank(top=20, fund_type="gp", sort="1m", force_refresh=True)
+        check("L1", "排行-sort入缓存键(跨sort不串服务端窗口)", len(_calls) == 3,
+              f"sort=1m 触发新拉取（窗口随 sc 字段变化），实发 {len(_calls)} 次")
     finally:
         fd.ttfund_get, fd.fund_list = _orig_get, _orig_fl
-        for rel in ("rank/top_gp_20.json", "rank/top_gp_50.json"):
+        for rel in ("rank/top_gp_ytd_20.json", "rank/top_gp_ytd_50.json",
+                    "rank/top_gp_1m_20.json"):
             (fd.FUND_CACHE_DIR / rel).unlink(missing_ok=True)   # mock 数据不入真缓存
 
     # cninfo 451 刷新重试（P20：钥匙时效非风控，不计熔断）

@@ -162,7 +162,7 @@ V0.5 全市场数据层（排行底座 + 巨潮第四线，防封为第一约束
 | 限流入口 `ttfund_get()` / `em_get()` | 跨进程磁盘锁（flock 时间戳）+ 熔断检查 + 直连（trust_env=False）+ 瞬态重试 + Keep-Alive 会话 + 请求计数；tt/em 分管不同子域，中债独立 cb 节流线，巨潮独立 cninfo 节流线，腾讯直连不限流 |
 | 风控断言 `assert_not_risk_control(r,line,ctx)` | 403/429 → `RiskControlError`（非网络异常子类，**不触发降级风暴**）；成功响应清零熔断连击；东财调用点全覆盖 |
 | 内容级风控断言 `assert_rankhandler(r,ctx)` | rankhandler 家族被拦是 **200+「无访问权限」而非 403**（P19）——状态码查不出，前 500 字符内容断言接入全部 rankhandler/jbgk/company 调用点 |
-| 巨潮第四线 `_cninfo_post` | flock 节流 1.5s + 独立熔断通道 + Accept-Enckey（AES-CBC 秒级时间戳，node 子进程计算，零新依赖）+ 451/token null 刷新重试（钥匙时效**非风控**，不计熔断）+ 独立请求账本 |
+| 巨潮第四线 `_cninfo_post` | flock 节流 1.5s + 独立熔断通道 + Accept-Enckey（AES-CBC 秒级时间戳，node 子进程计算——零新 Python 依赖，需系统 node）+ 451/token null 刷新重试（钥匙时效**非风控**，不计熔断）+ 独立请求账本 |
 | 四线请求账本 | `TT_REQUEST_COUNT`（分 host 明细）/ `EM_REQUEST_COUNT` / `TENCENT_REQUEST_COUNT` / `CNINFO_REQUEST_COUNT`，测试与生产共用预算审计 |
 
 ## 防封设计：请求预算契约（先读）
