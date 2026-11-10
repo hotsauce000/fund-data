@@ -441,27 +441,29 @@ def test_l1_offline():
     # credit_spread 三段报错（P-E）与 beta_note 基金侧横盘——离线分支覆盖
     _orig_cb = fd.cb_yield_curve
     try:
-        _corp = lambda term, dates: {"points": [
-            {"date": d, "term": term, "yield_pct": 2.5} for d in dates]}
+        # 企业债 3.1 / 国债 2.5 → 锚 0.6（方向：企业债−国债；同值 0.0 锚测不出
+        # 实现被误反转的方向颠倒——复核建议⑤）
+        _mk = lambda y: (lambda term, dates: {"points": [
+            {"date": d, "term": term, "yield_pct": y} for d in dates]})
         fd.cb_yield_curve = lambda curve, year=None: (
-            _corp("3y", ["2026-01-05", "2026-01-06"]) if "企业债" in str(curve)
-            else _corp("3y", ["2026-01-05", "2026-01-06"]))
+            _mk(3.1)("3y", ["2026-01-05", "2026-01-06"]) if "企业债" in str(curve)
+            else _mk(2.5)("3y", ["2026-01-05", "2026-01-06"]))
         sp = fd.credit_spread("AA", "3y")
-        check("L1", "利差-正常算差", len(sp) == 2 and sp[0]["spread_pct"] == 0.0,
+        check("L1", "利差-正常算差(方向锚0.6)", len(sp) == 2 and sp[0]["spread_pct"] == 0.6,
               f"{sp[0]}")
         fd.cb_yield_curve = lambda curve, year=None: (
             {"points": [{"date": "2026-01-05", "term": "1y", "yield_pct": 2.0}]}
-            if "企业债" in str(curve) else _corp("3y", ["2026-01-05"]))
+            if "企业债" in str(curve) else _mk(2.5)("3y", ["2026-01-05"]))
         expect_raise("L1", "利差-企业债期限缺失报错",
                      lambda: fd.credit_spread("AA", "3y"), "企业债曲线")
         fd.cb_yield_curve = lambda curve, year=None: (
-            _corp("3y", ["2026-01-05"]) if "企业债" in str(curve)
+            _mk(2.5)("3y", ["2026-01-05"]) if "企业债" in str(curve)
             else {"points": [{"date": "2026-01-05", "term": "1y", "yield_pct": 2.0}]})
         expect_raise("L1", "利差-国债期限缺失报错",
                      lambda: fd.credit_spread("AA", "3y"), "国债曲线")
         fd.cb_yield_curve = lambda curve, year=None: (
-            _corp("3y", ["2026-01-05"]) if "企业债" in str(curve)
-            else _corp("3y", ["2026-02-01"]))
+            _mk(2.5)("3y", ["2026-01-05"]) if "企业债" in str(curve)
+            else _mk(2.5)("3y", ["2026-02-01"]))
         expect_raise("L1", "利差-日期错位报错",
                      lambda: fd.credit_spread("AA", "3y"), "无共同日期")
     finally:
@@ -474,6 +476,27 @@ def test_l1_offline():
           _rp_ff["beta"] is not None and _rp_ff["correlation"] is None
           and _rp_ff["beta_note"] and "基金净值窗口内近乎横盘" in _rp_ff["beta_note"],
           _rp_ff["beta_note"][:30])
+
+    # ── V0.4.2 渐进加载架构守卫（路由层瘦身/签名覆盖/reference 内嵌）──
+    from pathlib import Path as _P
+    import ast as _ast
+    _repo = _P(__file__).resolve().parent
+    _thin = (_repo / "SKILL.md").read_text(encoding="utf-8")
+    _ref = (_repo / "reference.md").read_text(encoding="utf-8")
+    _thin_b = len(_thin.encode("utf-8"))
+    check("L1", "架构-瘦SKILL体积上限", _thin_b < 12000,
+          f"{_thin_b}B（超重=有人往路由层塞长文，移 reference.md）")
+    _pub = [n.name for n in _ast.parse((_repo / "fund_data.py").read_text(encoding="utf-8")).body
+            if isinstance(n, _ast.FunctionDef) and not n.name.startswith("_")]
+    check("L1", "架构-签名速查全覆盖", len(_pub) >= 32 and all(f"`{n}(" in _thin for n in _pub),
+          f"{len(_pub)} 个公开函数")
+    check("L1", "架构-reference内嵌与坑区",
+          "def fund_snapshot(query: str, force_refresh: bool = False) -> dict:" in _ref
+          and "P18" in _ref and "使用示例" in _ref and "不覆盖" in _ref,
+          f"{len(_ref.encode('utf-8'))}B")
+    check("L1", "架构-路由层零内嵌代码",
+          _thin.count("```python") == 1 and "import sys" in _thin,
+          f"python 代码块 {_thin.count('```python')} 个（应仅 1 个 import 示例）")
 
 
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
@@ -612,16 +635,24 @@ def test_l3_cross():
           f"最新报告期{latest} 交集{len(overlap)}/E4a{len(e4a_codes)}/E2{len(e2_codes)}")
 
     # 本地指标 vs 官方同期收益（E2 自带 ground truth）
-    # 官方 syl_1n 锚定最后净值日；本地窗口同样以末条净值日回溯 365 自然日
-    # （曾用 date.today() 回溯——周末 today 比最后净值日晚 1~3 天，起点漂移 × 急跌段
-    #  可差 3pct+，2026-11-09 实测踩中；改为锚定数据日本身，永久消除漂移）
-    m = fd.fund_metrics(snap, start=(date.fromisoformat(e2_last["date"])
-                                     - timedelta(days=365)).isoformat())
+    # EM"近1年"口径实证（2026-11-09/10 双日校准）：周年日锚定——end 减 1 年同日，
+    # 落在非交易日时回退到 ≤该日的最后一个净值日。残差稳定 0.07pct。
+    # （曾踩两坑：①date.today() 回溯周末漂 3pct+；②末净值日−365 自然日在周年日落
+    #  周末时起点跳到下一交易日，急跌段差 3.5pct——2026-11-10 实测 -27.29 vs -23.77）
+    _end_d = date.fromisoformat(e2_last["date"])
+    try:
+        _anniv = _end_d.replace(year=_end_d.year - 1)
+    except ValueError:                               # 2/29 周年 → 2/28
+        _anniv = _end_d.replace(year=_end_d.year - 1, day=28)
+    _adj_all = fd.adjusted_nav(snap["nav_history"])
+    _base = max((a for a in _adj_all if a["date"] <= _anniv.isoformat()),
+                key=lambda a: a["date"], default=_adj_all[0])
+    m = fd.fund_metrics(snap, start=_base["date"])
     official = fd._to_float(snap["period_returns_pct"].get("1year"))
     mine = m["total_return_pct"]
     check("L3", "指标互证 复权收益 vs 官方syl_1n",
           official is not None and mine is not None and abs(mine - official) <= 0.6,
-          f"本地{mine}% vs 官方{official}%")
+          f"本地{mine}%（{_base['date']}起）vs 官方{official}%")
 
     # 十年期国债收益率三源互证：中债年文件 vs 东财日频 vs push2 实时
     # （东财 zmgzsyl 页本身即中债口径 → 两源应近乎一致；push2 为盘中实时，宽容差）
