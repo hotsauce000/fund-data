@@ -247,7 +247,7 @@ _FUND_LIST_MEM: list[dict] = []     # 进程级缓存（同一会话多次调用
 
 
 def fund_list(force_refresh: bool = False) -> list[dict]:
-    """全量基金清单 ~2万只：[{code, pinyin, name, type}, ...]
+    """全量基金清单 ~2.8万只：[{code, pinyin, name, type}, ...]
 
     E1: fund.eastmoney.com/js/fundcode_search.js（首载 1 请求，之后磁盘 30 天 / 进程内 0 开销）
     """
@@ -686,8 +686,7 @@ LSJZ_PAGE_SIZE = 20                                   # 坑P2：服务端实际�
 
 def fund_nav_history(query: str, start: str = "", end: str = "",
                      max_pages: int = 80) -> list[dict]:
-    """历史净值逐页（E3 lsjz）。定位为补充端点——E2 已含净值全史，
-    本端点独有价值 = ① 按日申赎状态史（SGZT/SHZT）② E2 失效时的净值兜底。
+    """历史净值逐页（E3 lsjz）。定位为补充端点——E2 已含净值全史，本端点独有价值是按日申赎状态史与 E2 失效时的净值兜底。
 
     坑P2 安全用法（2026-11-05 实测钉死）：
       - pageSize 服务端钳制为 20：请求 49/50/100/200 都只回 20 条，500 直接静默 0 条

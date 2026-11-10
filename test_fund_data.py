@@ -651,7 +651,7 @@ def test_l3_cross():
     official = fd._to_float(snap["period_returns_pct"].get("1year"))
     mine = m["total_return_pct"]
     check("L3", "指标互证 复权收益 vs 官方syl_1n",
-          official is not None and mine is not None and abs(mine - official) <= 0.6,
+          official is not None and mine is not None and abs(mine - official) <= 0.3,
           f"本地{mine}%（{_base['date']}起）vs 官方{official}%")
 
     # 十年期国债收益率三源互证：中债年文件 vs 东财日频 vs push2 实时

@@ -54,12 +54,12 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | 函数 | 说明 |
 |---|---|
 | `assert_not_risk_control(resp, line='tt', context='')` | F6 防线：调用方 raise_for_status **之前**先过这一道——403/429 转 RiskControlError |
-| `ttfund_get(url, params=None, headers=None, timeout=20)` | 天天/东财/蛋卷统一请求入口：跨进程串行限流(F1) + 熔断(F2) + 强制 HTTPS（坑P1） |
-| `fund_list(force_refresh=False)` | 全量基金清单 ~2万只：[{code, pinyin, name, type}, ...] |
+| `ttfund_get(url, params=None, headers=None, timeout=20, **kwargs)` | 天天/东财/蛋卷统一请求入口：跨进程串行限流(F1) + 熔断(F2) + 强制 HTTPS（坑P1） |
+| `fund_list(force_refresh=False)` | 全量基金清单 ~2.8万只：[{code, pinyin, name, type}, ...] |
 | `norm_fund_code(query)` | 基金代码/名称/拼音 → 归一化结果 |
 | `resolve_fund_code(query)` | norm_fund_code 的便捷包装：唯一命中返回代码，多候选/未命中直接抛错 |
 | `fund_snapshot(query, force_refresh=False)` | 单基金一站式快照（E2 pingzhongdata，436KB → 20+ 数据集） |
-| `fund_nav_history(query, start='', end='', max_pages=80)` | 历史净值逐页（E3 lsjz）。定位为补充端点——E2 已含净值全史， |
+| `fund_nav_history(query, start='', end='', max_pages=80)` | 历史净值逐页（E3 lsjz）。定位为补充端点——E2 已含净值全史，本端点独有价值是按日申赎状态史与 E2 失效时的净值兜底 |
 | `fund_holdings(query, year=None)` | 季度股票持仓前十大（E4a FundArchivesDatas type=jjcc） |
 | `fund_detail_danjuan(query)` | 蛋卷基金详情（D1 djapi/fund/{code}）：总份额/经理/托管/风险等级/申赎状态 |
 | `fund_realtime_nav(codes)` | 批量最新净值（E6 fundmobapi FCodes 逗号分隔）。轻量探测（1KB vs E2 的 436KB）， |
@@ -70,7 +70,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | `peer_rank(snapshot, lookback_days=365)` | 同类百分位解读（零网络，V0.4.0 B2）。输入 snapshot.peer_rank_history（日频） |
 | `relative_performance(snapshot, benchmark='沪深300', min_overlap=60)` | 基金 vs E2 内置基准曲线的区间相对表现（零网络，V0.4.0 B3） |
 | `holding_map(snapshot, topn=10)` | 持仓穿透桥（零网络）：把重仓股代码整理成可直接喂 a-stock-data 的形态 |
-| `em_get(url, params=None, headers=None, timeout=15)` | 股票域东财统一入口（push2 系）：跨进程串行限流(F1) + 熔断(F2) + 会话复用 |
+| `em_get(url, params=None, headers=None, timeout=15, **kwargs)` | 股票域东财统一入口（push2 系）：跨进程串行限流(F1) + 熔断(F2) + 会话复用 |
 | `tencent_quote(codes)` | 腾讯批量实时行情（通道内嵌自 a-stock-data §1.2）：价/涨跌/换手/PE/PB/市值 |
 | `em_market_code(code)` | 东财 secid 市场号：沪=1，深/北=0（规则照抄 a-stock-data，勿用 startswith('6')） |
 | `concept_blocks(stock_code, use_cache=True)` | 个股板块标签（通道内嵌自 a-stock-data §3.3 东财 slist，一次请求拿全） |

@@ -38,6 +38,10 @@ def _fmt_args(node: ast.FunctionDef) -> str:
             parts.append(f"{a.arg}={ast.unparse(defaults[i - pad])}")
         else:
             parts.append(a.arg)
+    if node.args.vararg:
+        parts.append(f"*{node.args.vararg.arg}")
+    if node.args.kwarg:
+        parts.append(f"**{node.args.kwarg.arg}")
     return ", ".join(parts)
 
 
@@ -350,7 +354,7 @@ ref_text = "\n".join(REF)
 thin_bytes = len(thin_text.encode("utf-8"))
 assert thin_bytes < 12000, f"瘦 SKILL.md 超重 {thin_bytes}B（上限 12000）——把长内容移入 reference.md"
 for n, _, _ in _sig_rows():                          # 签名覆盖：每个公开函数都在路由层
-    assert f"`{n}(" in thin_text, f"签名速查漏函数 {n}"
+    assert f"| `{n}(" in thin_text, f"签名速查表漏行 {n}"
 assert "def fund_snapshot(query: str, force_refresh: bool = False) -> dict:" in ref_text
 
 for dest in (SKILL_DIR, HERE):
@@ -359,5 +363,5 @@ for dest in (SKILL_DIR, HERE):
 (SKILL_DIR / "fund_data.py").write_text(SRC, encoding="utf-8")
 (SKILL_DIR / "test_fund_data.py").write_text(
     (HERE / "test_fund_data.py").read_text(encoding="utf-8"), encoding="utf-8")
-print(f"OK: SKILL.md 路由层 {thin_bytes}B（≈{thin_bytes // 3 // 1000}K token）+ "
+print(f"OK: SKILL.md 路由层 {thin_bytes}B（token 下限粗估 ≈{thin_bytes // 3 // 1000}K）+ "
       f"reference.md {len(ref_text.encode('utf-8'))}B；函数速查 {len(_sig_rows())} 个全覆盖")
