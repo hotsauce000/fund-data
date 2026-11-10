@@ -488,7 +488,7 @@ def _xy_pairs_to_records(raw, value_key: str = "value") -> list[dict]:
 def _scale_history(raw) -> list[dict]:
     """Data_fluctuationScale（行式 {y: 规模亿, mom: 环比}）→ [{_date, scale_yi, mom_pct}]。
 
-    兼容旧列式（系列名"规模"）以防上游回切。评测skill C7 的兜底路径由此修复为正路。
+    兼容旧列式（系列名"规模"）以防上游回切。下游评测 skill 的份额兜底路径由此修复为正路。
     """
     recs = _normalize_table(raw)
     out = []

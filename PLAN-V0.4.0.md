@@ -10,7 +10,7 @@
 - **A3 ✅** 坑区 P15/P16/P17 入册；**执行中新发现 P18**（见下）
 - **B1 ✅** 变量名实测为 `Data_grandTotal`（无 EM typo）；三系列 = [基金简称, 同类平均, 沪深300]，窗口 126 交易日（约半年）；交叉验证：本地基金窗口收益 -4.23% vs 曲线末点 -4.22%
 - **B2 部分改判 ✅**：仓位史/同类百分位/费率三项接线；**行业配置实测停供**（10 只缓存基金 Data_industryAllocation 全缺，pz.js 中 industry 零出现）→ `industry_check` 不做，写入边界
-- **🔴 执行中揪出存量 bug（P18）**：`_echarts_to_records` 只认列式 `{name,data}` → 规模史（行式 `{y,mom}`）值全丢成光杆 `_date` 行（评测skill C7 份额兜底成常态的根因）；`_pair_rows_to_dicts` 把 `[[ts,v]]` 时序对当"首行表头" → 仓位史/同类百分位史乱码。双双修复 + `_xy_pairs_to_records` 时序专用通道
+- **🔴 执行中揪出存量 bug（P18）**：`_echarts_to_records` 只认列式 `{name,data}` → 规模史（行式 `{y,mom}`）值全丢成光杆 `_date` 行（下游评测 skill 的份额兜底曾因此成为常态）；`_pair_rows_to_dicts` 把 `[[ts,v]]` 时序对当"首行表头" → 仓位史/同类百分位史乱码。双双修复 + `_xy_pairs_to_records` 时序专用通道
 - **B3 ✅** `relative_performance`：白酒实测 β=0.076/corr=0.06 属真实板块脱钩（同类平均↔沪深300 corr=0.948 自洽），非 bug
 - **测试 70 → 89 全绿**；顺带修掉 3 个时间炸弹断言（硬编码 2026-11-05、`date.today()` 回溯在周末漂移 3pp——现锚定末条净值日，永久消除）
 - 版本 0.3.1 → **0.4.0**；三份拷贝 md5 一致；SKILL.md 重建（109KB）
@@ -76,7 +76,7 @@ D3（可选）：ETF 日频折溢价 = 腾讯场内 K 线（不封 IP）+ E2 净
 
 | # | 项 | 内容 |
 |---|---|---|
-| E1 | 评测基座下放 | `manager_tenure` / `index_daily` / `tsdata_f10` 从 评测skill 沉到 fund-data；评测skill 改为 import，瘦身为纯计算+组装层。注意：B1 接线后沪深300 基准不再依赖 push2his，但指增**跟踪指数**日线仍需下放 |
+| E1 | 评测基座下放 | `manager_tenure` / `index_daily` / `tsdata_f10` 从独立评测 skill 沉到 fund-data；该 skill 改为 import，瘦身为纯计算+组装层。注意：B1 接线后沪深300 基准不再依赖 push2his，但指增**跟踪指数**日线仍需下放 |
 | E2 | （可选）lsjz 按月分片缓存 | 降级批量场景每只最多 80 页的缓解项，F3 已压到 1 年窗口，优先级低 |
 
 ## 显式不做（边界）
