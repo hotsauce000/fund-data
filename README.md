@@ -241,11 +241,11 @@ norm_fund_code("华夏成长")                     # matches: 000001/024808/... 
 ## 测试与质量
 
 ```bash
-python3 test_fund_data.py --offline-only   # 65 条单元断言，零网络，秒级
+python3 test_fund_data.py --offline-only   # 69 条单元断言，零网络，秒级
 python3 test_fund_data.py                  # 全链路 109 条（真数据，约 3 分钟）
 ```
 
-- **分层结构**：L1 单元 65 · L2 端点 smoke 21 · L3 三源交叉验证 5 · L4 请求预算审计 2 · L5 降级演练 7 · 防封专项 F×5
+- **分层结构**：L1 单元 69 · L2 端点 smoke 21 · L3 三源交叉验证 5 · L4 请求预算审计 2 · L5 降级演练 7 · 防封专项 F×5
 - **交叉验证**（L3）：E2↔E3↔E6 净值互证、E2↔E4a 持仓交集、本地复权收益 vs 官方 `syl_1n` 容差 0.6pct、中债↔东财↔push2 十年期国债三源（同口径近乎一致，断言容差 0.05/0.25pct）
 - **预算审计**（L4）：每次跑完打印三线请求账本（基金域东财含分 host 明细/股票域东财/腾讯计数）
 - **独立审查**：每个版本经 code-reviewer 独立审查闭环（V0.4.1 经三轮：初审 APPROVE → 建议落地 → 双通道复核 APPROVE）

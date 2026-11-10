@@ -488,7 +488,7 @@ def test_l1_offline():
           f"{_thin_b}B（超重=有人往路由层塞长文，移 reference.md）")
     _pub = [n.name for n in _ast.parse((_repo / "fund_data.py").read_text(encoding="utf-8")).body
             if isinstance(n, _ast.FunctionDef) and not n.name.startswith("_")]
-    check("L1", "架构-签名速查全覆盖", len(_pub) >= 32 and all(f"`{n}(" in _thin for n in _pub),
+    check("L1", "架构-签名速查全覆盖", len(_pub) >= 32 and all(f"| `{n}(" in _thin for n in _pub),
           f"{len(_pub)} 个公开函数")
     check("L1", "架构-reference内嵌与坑区",
           "def fund_snapshot(query: str, force_refresh: bool = False) -> dict:" in _ref
