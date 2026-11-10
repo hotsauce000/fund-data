@@ -91,6 +91,16 @@ def test_l1_offline():
           f"投入{dca['total_invested']}→市值{dca['final_value']}, 收益{dca['return_pct']}%")
     expect_raise("L1", "定投-非法频率拒绝",
                  lambda: fd.fund_dca_backtest(snap, freq="daily"), "monthly/weekly")
+    weekly_snap = {"nav_history": [
+        {"date": d, "nav": 1.0, "daily_return": 0.0, "dividend": 0}
+        for d in ("2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08",
+                  "2026-01-09", "2026-01-12")]}
+    weekly = fd.fund_dca_backtest(weekly_snap, amount=1000, freq="weekly")
+    check("L1", "定投-每周按ISO周去重",
+          weekly["periods"] == 2 and weekly["total_invested"] == 2000.0
+          and weekly["first_invest"] == "2026-01-05"
+          and weekly["last_invest"] == "2026-01-12",
+          f"6个净值日→{weekly['periods']}期，{weekly['first_invest']}~{weekly['last_invest']}")
 
     # 指标：构造序列 [1.0,1.2,0.6,0.9] → 最大回撤 -50%
     snap = {"nav_history": [{"date": f"2026-01-0{i}", "nav": v, "dividend": 0}
@@ -101,6 +111,12 @@ def test_l1_offline():
     check("L1", "指标-字段完备",
           all(m.get(k) is not None for k in
               ["total_return_pct", "annualized_return_pct", "sharpe", "calmar"]))
+    m30 = fd.fund_metrics({"nav_history": [
+        {"date": "2026-01-01", "nav": 1.0, "daily_return": 0.0, "dividend": 0},
+        {"date": "2026-01-31", "nav": 1.01, "daily_return": None, "dividend": 0}]})
+    check("L1", "指标-不足一年仍复合年化",
+          abs(m30["annualized_return_pct"] - 12.8695) < 1e-4,
+          f"30天收益1%→年化{m30['annualized_return_pct']}%")
 
     # 缓存损坏容忍（读完即清理，不留垃圾在用户缓存目录）
     bad = fd.FUND_CACHE_DIR / "snapshots" / "_corrupt_test.json"
@@ -110,6 +126,23 @@ def test_l1_offline():
         check("L1", "缓存-损坏文件视为miss", fd._cache_read("snapshots/_corrupt_test.json", None) is None)
     finally:
         bad.unlink(missing_ok=True)
+
+    class _DJ403:
+        status_code = 403
+        content = b"forbidden"
+
+        def raise_for_status(self):
+            raise AssertionError("403 应先被风控断言拦截")
+
+    _orig_resolve, _orig_get = fd.resolve_fund_code, fd.ttfund_get
+    fd._cbreak_state["tt"] = [0, 0.0]
+    try:
+        fd.resolve_fund_code = lambda q: q
+        fd.ttfund_get = lambda *a, **k: _DJ403()
+        expect_raise("L1", "蛋卷-403进入RiskControlError防线",
+                     lambda: fd.fund_detail_danjuan("161725"), "D1 蛋卷")
+    finally:
+        fd.resolve_fund_code, fd.ttfund_get = _orig_resolve, _orig_get
 
     # ── L6 穿透层单元（零网络）：路由 / 标签清洗 / 注入拦截 ──
     cases = {"920982": "bj920982", "832982": "bj832982", "430047": "bj430047",
@@ -586,6 +619,14 @@ def test_l1_offline():
         fd.fund_rank(top=20, fund_type="gp", sort="1m")
         check("L1", "排行-sort入缓存键(跨sort不串服务端窗口)", len(_calls) == 3,
               f"sort=1m 走 miss 路径触发新拉取（窗口随 sc 字段变化），实发 {len(_calls)} 次")
+        fd.ttfund_get = lambda *a, **k: _RR(_body.replace("allRecords:2", "allRecords:5086"))
+        window_rows = fd._rank_fetch("zs", "1n", 2)
+        check("L1", "排行-TopN总数与本页条数分校验",
+              len(window_rows) == 2,
+              "allRecords=5086、pn=2、实收2行应通过（真实接口口径）")
+        fd.ttfund_get = lambda *a, **k: _RR(_body.replace("allRecords:2", "allRecords:25001"))
+        expect_raise("L1", "排行-全量超过单页上限仍拒绝截断",
+                     lambda: fd._rank_fetch("all", "1nzf", 25000), "校验失败")
     finally:
         fd.ttfund_get, fd.fund_list = _orig_get, _orig_fl
         for rel in ("rank/top_gp_ytd_20.json", "rank/top_gp_ytd_50.json",

@@ -4,7 +4,7 @@ fund-data V0.5.0 — 基金底层数据工具包（基金主源 + 蛋卷备胎 +
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤2 请求（1×pingzhongdata，0~1×lsjz）
-  2. 全市场筛选只允许 rankhandler 翻页（1请求=50只），禁止 for fund in all: snapshot(fund)
+  2. 全市场筛选走 rankhandler 全量单请求或 TopN 单页，禁止 for fund in all: snapshot(fund)
   3. 同一基金当日快照磁盘缓存命中 = 0 请求
   4. 所有东财/天天请求走 ttfund_get()：串行 + 1.5s 最小间隔 + 会话复用 + 强制 HTTPS
 
@@ -847,6 +847,7 @@ def fund_detail_danjuan(query: str) -> dict:
     code = resolve_fund_code(query)
     r = ttfund_get(f"https://danjuanfunds.com/djapi/fund/{code}",
                    headers={"Referer": "https://danjuanfunds.com/"})
+    assert_not_risk_control(r, "tt", "D1 蛋卷")
     r.raise_for_status()
     d = (r.json() or {}).get("data") or {}
     if not d:
@@ -942,6 +943,7 @@ def fund_metrics(snapshot: dict, start: str = "", end: str = "",
                  risk_free_annual: float = 0.015) -> dict:
     """区间收益/年化/最大回撤/年化波动/夏普/卡玛（复权口径，零网络）。
 
+    年化收益按实际天数复合年化，包括不足一年的区间；短窗口外推需谨慎解读。
     对照 ground truth：snapshot.period_returns_pct 是官方同期收益（测试容差 0.6pct）。
     """
     _assert_ascending_dates(snapshot["nav_history"], "fund_metrics")
@@ -955,7 +957,7 @@ def fund_metrics(snapshot: dict, start: str = "", end: str = "",
     total_ret = navs[-1] / navs[0] - 1
     days = (datetime.strptime(adj[-1]["date"], "%Y-%m-%d")
             - datetime.strptime(adj[0]["date"], "%Y-%m-%d")).days
-    annual_ret = (1 + total_ret) ** (365 / max(days, 1)) - 1 if days > 365 else total_ret
+    annual_ret = (1 + total_ret) ** (365 / max(days, 1)) - 1
 
     peak, max_dd, dd_end, dd_peak_date = navs[0], 0.0, None, None
     cur_peak_date = adj[0]["date"]
@@ -1049,10 +1051,13 @@ def fund_dca_backtest(snapshot: dict, amount: float = 1000.0, freq: str = "month
                and (not end or a["date"] <= end)]
     if len(adj) < 2:
         raise ValueError("区间内净值不足 2 个点，无法回测")
-    key_len = 7 if freq == "monthly" else 10
     seen, invest_dates = set(), []
     for a in adj:                                      # 每期首个交易日 = 该期第一条净值
-        k = a["date"][:key_len]
+        if freq == "monthly":
+            k = a["date"][:7]
+        else:
+            iso = date.fromisoformat(a["date"]).isocalendar()
+            k = (iso.year, iso.week)
         if k not in seen:
             seen.add(k)
             invest_dates.append(a)
@@ -2031,9 +2036,11 @@ def _rank_fetch(ft: str, sc: str, pn: int) -> list:
     total = int(m.group(1)) if m else 0
     if not rows or not total:
         raise RuntimeError(f"rankhandler 返回空（ft={ft}）: {text[:100]!r}")
-    if total != len(rows):
-        raise RuntimeError(f"rankhandler 校验失败 allRecords={total} 实收 {len(rows)}"
-                           f"（静默截断拒绝，pn={pn}）")
+    # 全量模式必须总数一致；TopN 的 allRecords 是类别总数，只校验本页应收条数。
+    expected = total if pn == 25000 else min(pn, total)
+    if len(rows) != expected:
+        raise RuntimeError(f"rankhandler 校验失败 allRecords={total} 实收 {len(rows)}，"
+                           f"应收 {expected}（静默截断拒绝，pn={pn}）")
     return rows
 
 
