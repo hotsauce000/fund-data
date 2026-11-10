@@ -564,6 +564,10 @@ def test_l1_offline():
         fd.fund_list = lambda: [{"code": "161725", "type": "指数型-股票"},
                                 {"code": "005827", "type": "混合型-偏股"}]
         fd.ttfund_get = _fake_get
+        for rel in ("rank/top_gp_ytd_20.json", "rank/top_gp_ytd_50.json",
+                    "rank/top_gp_1m_20.json", "rank/top_gp_20.json",
+                    "rank/top_gp_50.json"):                 # 预清：序列确定性不受历史缓存影响
+            (fd.FUND_CACHE_DIR / rel).unlink(missing_ok=True)
         rk_t = fd.fund_rank(top=20, fund_type="gp", sort="ytd", force_refresh=True)
         check("L1", "排行-top模式正常路径(mock)", len(rk_t) == 2
               and rk_t[0]["code"] == "005827" and rk_t[0]["ret_ytd_pct"] == 9.5
@@ -576,9 +580,12 @@ def test_l1_offline():
         fd.fund_rank(top=50, fund_type="gp", sort="ytd", force_refresh=True)
         check("L1", "排行-top入缓存键(不同top不串缓存)", len(_calls) == 2,
               f"top=50 触发新拉取，实发 {len(_calls)} 次")
-        fd.fund_rank(top=20, fund_type="gp", sort="1m", force_refresh=True)
+        # 刻意不带 force_refresh：必须走缓存读取路径才有锁力——键含 sort 时
+        # top_gp_1m_20.json miss → 第 3 次实发；键回退丢 sort 时命中 call1 的
+        # top_gp_20.json → len==2 断言红（force_refresh 会绕读缓存成空锁）
+        fd.fund_rank(top=20, fund_type="gp", sort="1m")
         check("L1", "排行-sort入缓存键(跨sort不串服务端窗口)", len(_calls) == 3,
-              f"sort=1m 触发新拉取（窗口随 sc 字段变化），实发 {len(_calls)} 次")
+              f"sort=1m 走 miss 路径触发新拉取（窗口随 sc 字段变化），实发 {len(_calls)} 次")
     finally:
         fd.ttfund_get, fd.fund_list = _orig_get, _orig_fl
         for rel in ("rank/top_gp_ytd_20.json", "rank/top_gp_ytd_50.json",
