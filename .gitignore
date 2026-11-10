@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 .v2c/
 .video_agent/
+licai-map/
+quant-board/

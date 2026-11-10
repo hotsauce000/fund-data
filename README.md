@@ -250,7 +250,7 @@ python3 test_fund_data.py                  # 全链路 105 条（真数据，约
 - **预算审计**（L4）：每次跑完打印三线请求账本（基金域东财含分 host 明细/股票域东财/腾讯计数）
 - **独立审查**：每个版本经 code-reviewer 独立审查闭环（V0.4.1 经三轮：初审 APPROVE → 建议落地 → 双通道复核 APPROVE）
 
-部署形态：**三份拷贝逐字节同步**（本仓库 / `~/.agents/skills/fund-data/` / licai-map 服务端），由 `build_skill_md.py` 从模块自动组装 SKILL.md 保证文档内嵌代码与源码一致。
+部署形态：本仓库与 `~/.agents/skills/fund-data/` 两处逐字节同步（另有 licai-map 本地服务端副本按需手动同步，属独立应用不入库），由 `build_skill_md.py` 从模块自动组装 SKILL.md 保证文档内嵌代码与源码一致。
 
 ## 版本历史
 
@@ -283,7 +283,6 @@ test_fund_data.py   # 105 条分层回归测试（支持 --offline-only 离线�
 build_skill_md.py   # 从模块自动组装 SKILL.md（内嵌代码逐字节一致）
 SKILL.md            # Agent skill 文档（build 产物）：防封铁律/坑区/路由表/全量内嵌代码
 PLAN-V0.4.0.md      # V0.4.0 规划与执行记录（含一手探测数据）
-licai-map/          # R9 复刻应用（server/fund_data.py 为本模块同步副本）
 archive/            # 已并入主模块的原型存档
 ```
 
