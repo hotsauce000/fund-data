@@ -498,6 +498,67 @@ def test_l1_offline():
           _thin.count("```python") == 1 and "import sys" in _thin,
           f"python 代码块 {_thin.count('```python')} 个（应仅 1 个 import 示例）")
 
+    # ── V0.5 全市场层离线单元（第四线 cninfo + rankhandler 家族）──
+    check("L1", "cninfo-enckey确定性(P20)",
+          fd._cninfo_enckey(ts=1731000000) == "teu1Gv6Sv0Zz8DY+oqvqxg=="
+          and fd._cninfo_enckey().endswith("="),
+          "AES-128-CBC(秒级时间戳)→Base64，锚 ts=1731000000")
+    _row = ("161725,招商中证白酒指数(LOF)A,ZSZZBJZSLOFA,2026-11-09,0.5859,2.302,"
+            "-0.63,-0.31,10.34,3.85,-4.87,-23.77,--,--,-21.02,-30.45,"
+            "2008-05-09,--,--,0.15%")
+    rr = fd._rank_row(_row, {"161725": "指数型-股票"})
+    check("L1", "排行-行解析官方syl四点校准",
+          rr["code"] == "161725" and rr["nav"] == 0.5859
+          and rr["ret_1m_pct"] == 10.34 and rr["ret_3m_pct"] == 3.85
+          and rr["ret_6m_pct"] == -4.87 and rr["ret_1y_pct"] == -23.77
+          and rr["ret_ytd_pct"] == -21.02 and rr["ret_since_pct"] == -30.45
+          and rr["fee_pct"] == 0.15 and rr["fund_type"] == "指数型-股票"
+          and rr["founded"] == "2008-05-09",
+          f"1m={rr['ret_1m_pct']} 3m={rr['ret_3m_pct']} 6m={rr['ret_6m_pct']} "
+          f"1y={rr['ret_1y_pct']}（字段序对照官方syl，2026-11-10 校准）")
+    check("L1", "排行-缺失值'--'归None",
+          rr["ret_2y_pct"] is None and rr["ret_3y_pct"] is None)
+    check("L1", "排行-短行不炸(缺字段None)",
+          fd._rank_row("654321,残缺行,CHQ,,", {})["nav"] is None)
+
+    class _FR:                                    # 内容级风控断言（坑P19）：200+拒绝文案
+        def __init__(self, code, body):
+            self.status_code, self.content = code, body.encode("utf-8")
+
+    fd._cbreak_state["tt"] = [0, 0.0]
+    expect_raise("L1", "排行-内容级风控断言(P19)",
+                 lambda: fd.assert_rankhandler(_FR(200, 'var r="无访问权限"'), "t"),
+                 "无访问权限")
+    check("L1", "排行-风控信号计入熔断计数(未达阈值不落盘)",
+          fd._cbreak_state["tt"][0] == 1 and not fd._cbreak_file("tt").exists(),
+          str(fd._cbreak_state["tt"]))
+    fd.assert_rankhandler(_FR(200, 'var records=["161725,x"];'), "t")   # 正常文案不抛
+    check("L1", "排行-正常响应清零计数",
+          fd._cbreak_state["tt"] == [0, 0.0], str(fd._cbreak_state["tt"]))
+
+    expect_raise("L1", "排行-参数钳制fund_type",
+                 lambda: fd.fund_rank(fund_type="mm"), "fund_type")
+    expect_raise("L1", "排行-参数钳制sort", lambda: fd.fund_rank(sort="5y"), "sort")
+    expect_raise("L1", "排行-参数钳制top上限", lambda: fd.fund_rank(top=101), "top")
+    expect_raise("L1", "排行-参数钳制top下限", lambda: fd.fund_rank(top=0), "top")
+    check("L1", "报告期-归一化与空=最近季末",
+          fd._norm_rdate("2026-09-30") == "20260930"
+          and fd._norm_rdate("") == fd._latest_quarter_end().replace("-", ""),
+          f"空入参→{fd._norm_rdate('')}")
+    expect_raise("L1", "报告期-非季末日拒绝",
+                 lambda: fd._norm_rdate("20261015"), "季末日")
+    check("L1", "报告期-最近季末锚点(跨年回退)",
+          fd._latest_quarter_end(date(2026, 11, 10)) == "2026-09-30"
+          and fd._latest_quarter_end(date(2026, 1, 1)) == "2025-12-31"
+          and fd._latest_quarter_end(date(2026, 12, 31)) == "2026-12-31"
+          and fd._latest_quarter_end(date(2026, 3, 31)) == "2026-03-31", "")
+    check("L1", "类型桶-E1类型→类别映射",
+          fd._bucket_of("指数型-股票") == "zs" and fd._bucket_of("QDII") == "qdii"
+          and fd._bucket_of("混合型-偏股") == "hh" and fd._bucket_of("债券型-长债") == "zq"
+          and fd._bucket_of("股票型") == "gp" and fd._bucket_of("FOF-稳健") == "fof"
+          and fd._bucket_of(None) is None and fd._bucket_of("商品型") is None,
+          "fund_rank 本地过滤的映射依据")
+
 
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
 def test_l2_smoke():
@@ -605,6 +666,59 @@ def test_l2_smoke():
           all(t in rt for t in ("2y", "5y", "10y", "30y"))
           and rt["2y"]["yield_pct"] < rt["10y"]["yield_pct"] < rt["30y"]["yield_pct"],
           f"2Y={rt['2y']['yield_pct']} 10Y={rt['10y']['yield_pct']} 30Y={rt['30y']['yield_pct']}")
+
+    # ── V0.5 全市场层（rankhandler 全量底座 + cninfo 第四线）──
+    _n5 = fd.TT_REQUEST_COUNT[0]
+    rk = fd.fund_rank()
+    _rk_first = fd.TT_REQUEST_COUNT[0] - _n5
+    check("L2", "N1 全市场排行-规模(全量1请求)",
+          len(rk) > 20000 and _rk_first <= 1,
+          f"{len(rk)} 行（首调实发 {_rk_first} 请求，缓存内=0）")
+    _me = next((r for r in rk if r["code"] == "161725"), None)
+    check("L2", "N1 全市场排行-161725在册",
+          _me is not None and "白酒" in (_me["name"] or "") and _me["nav"]
+          and isinstance(_me["fund_type"], str),
+          f"{_me['name']} nav={_me['nav']} type={_me['fund_type']}")
+    _vals = [r["ret_ytd_pct"] for r in rk]
+    _nn = [v for v in _vals if v is not None]
+    check("L2", "N1 排序契约-ytd降序且None恒末尾",
+          _nn == sorted(_nn, reverse=True)
+          and _vals[len(_nn):] == [None] * (len(_vals) - len(_nn)),
+          f"Top1 {_nn[0]}%，{len(_vals) - len(_nn)} 只无 ytd 排尾")
+    _n6 = fd.TT_REQUEST_COUNT[0]
+    rk_gp = fd.fund_rank(fund_type="gp")
+    check("L2", "N1 类型过滤=本地0请求",
+          fd.TT_REQUEST_COUNT[0] == _n6 and len(rk_gp) > 500
+          and all(fd._bucket_of(r.get("fund_type")) == "gp" for r in rk_gp),
+          f"gp 型 {len(rk_gp)} 只，实发 {fd.TT_REQUEST_COUNT[0] - _n6} 请求")
+    ni = fd.fund_new_issues()
+    check("L2", "N2 新发基金-全量+公司ID映射",
+          len(ni) >= 300 and all(len(it["company_id"]) == 8 for it in ni)
+          and ni[0]["company"] and ni[0]["code"],
+          f"{len(ni)} 只，示例 {ni[0]['name']} / {ni[0]['company']}")
+    co = fd.fund_company("80065113")
+    check("L2", "N3a 公司画像-ID路径",
+          "中欧" in (co["name"] or "") and (co["scope_yi"] or 0) > 1000
+          and (co["fund_count"] or 0) >= 100 and len(co["funds"]) >= 100,
+          f"{co['name']} 规模{co['scope_yi']}亿 基金{co['fund_count']} "
+          f"经理{co['manager_count']} 表格{len(co['funds'])}只")
+    co2 = fd.fund_company("161725")
+    check("L2", "N3b 公司画像-基金码路径",
+          "招商" in (co2["name"] or "") and co2["company_id"] != "161725"
+          and len(co2["company_id"]) == 8,
+          f"161725→{co2['name']}（ID {co2['company_id']}）")
+    cd = fd.fund_crowding()
+    check("L2", "N4a 抱团度-规模与排序",
+          len(cd) > 1000 and cd[0]["fund_count"] > 1000
+          and all(cd[i]["fund_count"] >= cd[i + 1]["fund_count"]
+                  for i in range(len(cd) - 1)),
+          f"{len(cd)} 只重仓股，Top1 {cd[0]['name']} {cd[0]['fund_count']} 家")
+    ia = fd.fund_industry_allocation()
+    check("L2", "N4b 行业配置-门类数与头部",
+          len(ia) >= 18 and ia[0]["industry"] == "制造业"
+          and ia[0]["weight_pct"] > 10 and ia[0]["market_value_yi"] > 10000,
+          f"{len(ia)} 门类，Top1 {ia[0]['industry']} {ia[0]['market_value_yi']}亿/"
+          f"{ia[0]['weight_pct']}%")
 
 
 # ════════════════════ L3 交叉验证（三源互证）════════════════════
@@ -794,6 +908,20 @@ def test_f_cache_band():                             # F4/F7 缓存专项（在�
     fd.fund_holdings("161725")
     n4 = fd.TT_REQUEST_COUNT[0] - n3
     check("F4", "持仓二次调用0请求", n4 == 0, f"实发 {n4} 次")
+    # V0.5 全市场层：排行/公司（tt 线账本）与抱团度（cninfo 线账本）二次 0 请求
+    n5 = fd.TT_REQUEST_COUNT[0]
+    fd.fund_rank()
+    n6 = fd.TT_REQUEST_COUNT[0] - n5
+    check("F4", "排行全量二次调用0请求", n6 == 0, f"实发 {n6} 次")
+    fd.fund_company("80065113")
+    n7 = fd.TT_REQUEST_COUNT[0]
+    fd.fund_company("80065113")
+    n8 = fd.TT_REQUEST_COUNT[0] - n7
+    check("F4", "公司画像二次调用0请求", n8 == 0, f"实发 {n8} 次")
+    cn5 = fd.CNINFO_REQUEST_COUNT[0]
+    fd.fund_crowding()
+    cn6 = fd.CNINFO_REQUEST_COUNT[0] - cn5
+    check("F4", "抱团度二次调用0请求(cninfo账本)", cn6 == 0, f"实发 {cn6} 次")
 
 
 def main():
@@ -820,8 +948,9 @@ def main():
         print(f"  {layer}: {p} pass / {f} fail")
     print(f"  合计: {R['pass']} pass / {R['fail']} fail")
     if not OFFLINE_ONLY:
-        print(f"  三线请求账本: 基金域东财 {fd.TT_REQUEST_COUNT[0]} {fd.TT_REQUEST_COUNT[1]}"
-              f" | 股票域东财 {fd.EM_REQUEST_COUNT[0]} | 腾讯 {fd.TENCENT_REQUEST_COUNT[0]}")
+        print(f"  四线请求账本: 基金域东财 {fd.TT_REQUEST_COUNT[0]} {fd.TT_REQUEST_COUNT[1]}"
+              f" | 股票域东财 {fd.EM_REQUEST_COUNT[0]} | 腾讯 {fd.TENCENT_REQUEST_COUNT[0]}"
+              f" | 巨潮 {fd.CNINFO_REQUEST_COUNT[0]}")
     sys.exit(1 if R["fail"] else 0)
 
 

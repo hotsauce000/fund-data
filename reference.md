@@ -1,13 +1,23 @@
-# fund-data 完整参考（reference.md · 按需读取层）V0.4.2
+# fund-data 完整参考（reference.md · 按需读取层）V0.5.0
 
 > 本文件按需读取：调试 / 扩展 / 排查坑时才打开，勿随 skill 激活预加载。
 > 路由与签名速查见 SKILL.md；本文件内嵌代码与 fund_data.py 同源直拼（构建时生成）。
 
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（~9KB/≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 
-# fund-data 基金底层数据工具包 V0.4.1 模块全档
+# fund-data 基金底层数据工具包 V0.5.0 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层。**V0.4.1（2026-11-09）：105/105 断言实测通过**（L1单元65 · L2端点smoke 21 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×5），覆盖 11 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层 + **V0.5 全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.5.0（2026-11-10）：136/136 断言实测通过**，覆盖 15 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+
+**V0.5.0 全市场数据层（四端点 + cninfo 第四线基础设施，防封为第一约束）：**
+- 🟢 **N1 `fund_rank`**：rankhandler.aspx 全市场 24792 只 **1 请求**（鉴权=Referer fundranking.html，无 cookie）；top=None 全量 20h 缓存，fund_type/sort/ascending 全部本地执行=组合筛选 0 请求；签名上不存在翻页参数（496 页逐页爬的封禁路径从 API 形态上消失）；None 值恒排末尾；字段序经官方 syl 四点校准（161725 近1月/3月/6月/1年分毫不差）
+- 🟢 **N2 `fund_new_issues`**：在发/新成立全量（record 总数强校验，≈7 页），顺带产出「公司名→公司ID」映射（fund_company 消歧用）
+- 🟢 **N3 `fund_company`**：公司画像 1 请求（8 位公司ID 直取 / 6 位基金码经 jbgk 直链转 / 公司名走新发缓存 best-effort）；管理规模/基金数/经理数/旗下清单服务端直出
+- 🟢 **N4 `fund_crowding` / `fund_industry_allocation`**：巨潮官方专题统计（p_sysapi1112/1113）季度重仓股聚合（3088 只，Top1 中际旭创 2424 家）+ 19 门类行业配置——抱团度原料 + 补上 E2 停供后的行业配置缺口；Accept-Enckey=AES-CBC(秒级时间戳) 用系统 node 子进程算（零新依赖）
+- 🔴 **P19 rankhandler 风控形态**：被拦是 200+「无访问权限」**而非 403**——状态码层面查不出 → `assert_rankhandler` 内容级断言接入全部 rankhandler 调用点
+- 🔴 **P20 cninfo enckey**：451/"token null" = 钥匙时效问题（时钟漂移/秒边界）**非风控**——自动刷新重试一次不计熔断，仍拒才报错
+- 🟡 **P21 r.text 编码**：requests 无 charset 头时默认 ISO-8859-1，中文正则全失灵——新端点一律 `r.content.decode("utf-8", errors="replace")`
+- 防封预算：全市场排行=1 请求（20h）；类型过滤/排序本地 0 请求；抱团度 1 请求/季（90 天缓存，已发布季报不可变）；cninfo 独立 flock 节流 1.5s + 独立熔断通道 + `CNINFO_REQUEST_COUNT` 独立账本
 
 **V0.4.1 审计修复（P-A~P-E + 复核遗留）：**
 - 🔴 **P-C 持仓列序防线升级**：E4a 从"文案存在校验+下标盲取"升级为 thead 动态列映射——上游保留文案但调列位时不再静默错列（+2 断言）
@@ -58,7 +68,7 @@
 1. **请求预算**：单基金深度诊断 ≤2 请求（1×pingzhongdata 当日缓存 + 0~1×lsjz）；全市场筛选只允许列表端点
 2. **明令禁止** `for fund in all_funds: fund_snapshot(fund)` —— a-stock-data #36 案例 20 小时封禁的复刻路径
 3. **聚合优先**：任何数据先问"pingzhongdata 里有没有"（一次 436KB 覆盖 90% 静态数据），再考虑 F10 窄端点
-4. **所有东财/天天/蛋卷请求必须走 `ttfund_get()`**：强制 HTTPS + 跨进程串行限流（F1）+ 熔断（F2）+ 会话复用 + 瞬态重试1次 + 请求计数；调用方 `raise_for_status()` 前必过 `assert_not_risk_control()`（F6）
+4. **所有东财/天天/蛋卷请求必须走 `ttfund_get()`**：强制 HTTPS + 跨进程串行限流（F1）+ 熔断（F2）+ 会话复用 + 瞬态重试1次 + 请求计数；调用方 `raise_for_status()` 前必过 `assert_not_risk_control()`（F6）；rankhandler 家族再过 `assert_rankhandler()`（P19 内容级）；**巨潮 cninfo 只经 `_cninfo_post()`**（独立 flock 节流 1.5s + 独立熔断 + enckey 刷新重试）
 5. **批量场景降速**：诊断 ≥10 只基金时把 `TT_MIN_INTERVAL` 调到 2~3s；多进程并发已被 F1 文件锁强制串行
 
 **缓存分层（同基金当日反复诊断 = 齐网络）：**
@@ -67,6 +77,9 @@
 |---|---|---|
 | fund_list（2.8万只主键表） | 30天 | miss 单点回源在线查一只，不为1只重下2MB |
 | fund_snapshot | 当日20h | pingzhongdata 每日更新一次 |
+| fund_rank 全量 / new_issues | 当日20h | rankhandler 每日更新一次；过滤排序全在缓存上 0 请求 |
+| fund_company | 24h | 公司页静态 |
+| fund_crowding / fund_industry_allocation | 90天 | 季报发布后不可变；1 请求/季 |
 | lsjz | 不缓存 | 补充端点，按区间现查 |
 
 ## 端点路由速查（按需定位，不必通读）
@@ -80,6 +93,10 @@
 | E4a | `fund_holdings(q,year)` | 季度前十大重仓（含历史各季报，与E2互证） | fundf10.eastmoney.com | 1 |
 | D1 | `fund_detail_danjuan(q)` | 蛋卷档案：总份额/经理/托管/风险等级/申赎（跨域备胎） | danjuanfunds.com | 1 |
 | E6 | `fund_realtime_nav(codes)` | 批量最新净值（N只1请求，轻量探测） | fundmobapi.eastmoney.com | 1 |
+| N1 | `fund_rank(top,fund_type,sort,ascending)` | 全市场排行/初筛底座（ytd/1m~3y/since 收益率族；类型本地过滤；None 恒末尾） | fund.eastmoney.com/data/rankhandler | 全量1，筛选0 |
+| N2 | `fund_new_issues()` | 在发/新成立全量 + 公司名→ID 映射 | .../data/FundNewIssue.aspx | ~7页,缓存0 |
+| N3 | `fund_company(q)` | 公司画像：规模/基金数/经理数/旗下清单（q=8位ID/基金码/公司名） | .../company/{id}.html | 1（基金码+1） |
+| N4 | `fund_crowding(rdate)` / `fund_industry_allocation(rdate)` | 季度重仓股聚合（抱团度）/ 全市场19门类行业配置 | webapi.cninfo.com.cn（第四线） | 1/季,90天缓存 |
 | 本地 | `adjusted_nav(recs)` | 复权净值（分红再投口径，链式） | 零网络 | 0 |
 | 本地 | `fund_metrics(snap,s,e)` | 区间收益/年化/最大回撤/波动/夏普/卡玛/管理费率标注 | 零网络 | 0 |
 | 本地 | `fund_dca_backtest(snap,...)` | 定投回测 + **XIRR 分期真年化**（naive 对照保留） | 零网络 | 0 |
@@ -118,6 +135,9 @@
 | P16 QDII 日历差 | 净值 T+1/T+2、非 252 节奏 | 输出解读时标注 |
 | P17 跨域净值不可得 | 蛋卷growth/新浪HTML壳/openapi 三候选实测全死 | 诚实边界：东财域被封时净值无备胎 |
 | P18 E2 表格双形态 | 行式{y,mom}值全丢；[[ts,v]]被当表头 | 双形态分流 + 时序专用通道（V0.4.0 修复） |
+| P19 rankhandler 风控形态 | 被拦=200+「无访问权限」（**无 403**），状态码查不出 | `assert_rankhandler` 内容级断言（前500字符）+ 计入 tt 熔断 |
+| P20 cninfo enckey | Accept-Enckey=AES-CBC(秒级时间戳,固定密钥)；451/"token null"=时效**非风控** | node 子进程计算；451 刷新重试一次不计熔断，仍拒=时钟漂移 |
+| P21 r.text 编码 | 无 charset 头默认 ISO-8859-1，中文正则全失灵 | 新端点一律 `r.content.decode("utf-8", errors="replace")` |
 
 ## Prerequisites
 
@@ -134,7 +154,7 @@ pip install requests
 ```python
 # -*- coding: utf-8 -*-
 """
-fund-data V0.4.1 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率）
+fund-data V0.5.0 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤2 请求（1×pingzhongdata，0~1×lsjz）
@@ -193,7 +213,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 
 FUND_CACHE_DIR = Path.home() / ".fund_data_cache"
@@ -224,7 +244,7 @@ except ImportError:
 
 _CBREAK_COOLDOWN = 600           # F2：熔断冷却 10 分钟
 _CBREAK_TRIP = 3                 # 连续 3 次风控信号触发熔断
-_cbreak_state = {"tt": [0, 0.0], "em": [0, 0.0]}   # [连击数, 上次信号时刻]；>5min 衰减归一
+_cbreak_state = {"tt": [0, 0.0], "em": [0, 0.0], "cninfo": [0, 0.0]}   # [连击数, 上次信号时刻]；>5min 衰减归一
 
 
 class RiskControlError(RuntimeError):
@@ -1976,6 +1996,439 @@ def cn_treasury_realtime() -> dict:
     return out
 ```
 
+## V0.5 全市场数据层（rankhandler 排行底座 + 新发 + 公司画像 + 巨潮抱团度/行业配置）
+
+```python
+# 防封设计（第一约束，2026-11-10 实测钉死）：
+#   · rankhandler / FundNewIssue / company 与 E1/E2 同域（fund.eastmoney.com）→ tt 线
+#     全套继承（F1 锁 / F2 熔断 / 1.5s 串行 / 会话复用）。rankhandler 的风控形态不是
+#     403 而是 200+"无访问权限"（坑P19）→ 内容级断言 assert_rankhandler 计入熔断。
+#   · cninfo 独立第四线：.throttle_cninfo 磁盘锁 + F2 熔断 + 独立账本
+#     CNINFO_REQUEST_COUNT；enckey=AES(秒级时间戳) 本地算（坑P20，subprocess node
+#     标准库，同 P11 curl 先例零新依赖）；451 token 过期=钥匙时效问题非风控→刷新重试。
+#   · 预算契约：全市场排行 = 1 请求（pn=25000 实测 24792 行）+ 20h 缓存，类型/排序
+#     筛选全在缓存上本地做；新发全量 ≈7 页；抱团度/行业配置 = 1 请求/季度长效缓存
+#     （已发布季报数据不可变）。fund_rank 不暴露翻页参数——逐页爬 496 次的封禁路径
+#     从函数签名上不存在。
+
+CNINFO_REQUEST_COUNT = [0]                     # 第四线账本（审计用）
+CNINFO_MIN_INTERVAL = 1.5                      # cninfo 线最小间隔（秒）
+_CNINFO_AES_KEY = "1234567887654321"           # 巨潮公开 cninfo.js 中的固定密钥（坑P20）
+_NODE_ENCKEY_TMPL = (
+    "const crypto=require('crypto');"
+    "const c=crypto.createCipheriv('aes-128-cbc',"
+    "Buffer.from('%s'),Buffer.from('%s'));"
+    "console.log(Buffer.concat([c.update(String(%d),'utf8'),c.final()]).toString('base64'));"
+)
+
+
+def _cninfo_enckey(ts: Optional[int] = None) -> str:
+    """cninfo Accept-Enckey：AES-128-CBC(秒级时间戳) 的 Base64（坑P20）。
+
+    密钥/IV 是巨潮公开 cninfo.js 里的固定串；用系统 node 标准库计算（与中债
+    subprocess curl 同为先例，零新 Python 依赖）。ts 可注入——确定性测试用。
+    """
+    import subprocess
+    if ts is None:
+        ts = int(time.time())
+    out = subprocess.run(
+        ["node", "-e", _NODE_ENCKEY_TMPL % (_CNINFO_AES_KEY, _CNINFO_AES_KEY, ts)],
+        capture_output=True, text=True, timeout=10)
+    key = out.stdout.strip()
+    if out.returncode != 0 or not key.endswith("="):
+        raise RuntimeError(f"enckey 计算失败（需系统 node）: {out.stderr[:80]}")
+    return key
+
+
+def assert_rankhandler(resp, context: str = "rankhandler"):
+    """rankhandler 家族内容级风控断言（坑P19）：被拦时是 200+"无访问权限"而非 403——
+    只看状态码会漏。命中后计入 tt 线熔断并抛 RiskControlError（不触发降级）。"""
+    assert_not_risk_control(resp, "tt", context)
+    text = resp.content.decode("utf-8", errors="replace")[:500]
+    if "无访问权限" in text:
+        _cbreak_signal("tt", f"rankhandler 拒绝访问 {context}")
+        raise RiskControlError(
+            f"rankhandler 返回「无访问权限」（{context}）：疑似东财风控信号，已计入熔断。"
+            f"该接口鉴权=Referer（fundranking.html），先检查 Referer 头是否丢失。")
+
+
+def _cninfo_post(sysapi: str, params: dict, context: str) -> list:
+    """cninfo 专题统计统一 POST：第四线节流 + enckey + 451 刷新重试一次。
+
+    451/"token null" = enckey 时效问题（本地时钟漂移或秒边界）非风控——刷新钥匙
+    重试一次，仍拒才报错；403/429 仍走 assert_not_risk_control 计熔断。
+    """
+    for attempt in (1, 2):
+        _cbreak_check("cninfo")
+        _cross_proc_throttle("cninfo", CNINFO_MIN_INTERVAL)
+        key = _cninfo_enckey()
+        try:
+            CNINFO_REQUEST_COUNT[0] += 1
+            r = TT_SESSION.post(f"https://webapi.cninfo.com.cn/api/sysapi/{sysapi}",
+                                params=params, timeout=20,
+                                headers={"Accept-Enckey": key,
+                                         "Referer": "https://webapi.cninfo.com.cn/",
+                                         "X-Requested-With": "XMLHttpRequest"})
+        except requests.RequestException:
+            if attempt == 2:
+                raise
+            time.sleep(1.0)
+            continue
+        assert_not_risk_control(r, "cninfo", context)
+        d = r.json()
+        msg = str(d.get("resultmsg") or "")
+        if d.get("resultcode") == 451 or "token" in msg:
+            if attempt == 1:                        # 钥匙时效：刷新重试（非风控不计熔断）
+                continue
+            raise RuntimeError(f"cninfo enckey 两次被拒（{context}）：检查本机时钟是否漂移")
+        recs = d.get("records")
+        if not recs:
+            raise RuntimeError(f"cninfo {context} 返回空 records: {str(d)[:120]}")
+        return recs
+    raise RuntimeError(f"cninfo {context} 重试路径未达（不可达分支）")
+
+
+def _norm_rdate(rdate: str = "") -> str:
+    """报告期季末归一化："20260930"/"2026-09-30" → "20260930"；空=最近已发布季末。"""
+    s = re.sub(r"-", "", str(rdate or "").strip())
+    if not s:
+        return _latest_quarter_end().replace("-", "")
+    valid = {(m, d) for m, d in ((3, 31), (6, 30), (9, 30), (12, 31))}
+    if not re.fullmatch(r"\d{8}", s) or (int(s[4:6]), int(s[6:8])) not in valid:
+        raise ValueError(f"rdate 须为季末日（0331/0630/0930/1231 之一），收到 {rdate!r}")
+    return s
+
+
+def _latest_quarter_end(today: Optional[date] = None) -> str:
+    """≤today 的最近季末日（跨年自动回退到上年 12-31）。"""
+    d = today or date.today()
+    cands = [date(d.year, m, dd) for m, dd in ((3, 31), (6, 30), (9, 30), (12, 31))]
+    cands.append(date(d.year - 1, 12, 31))
+    return max(c for c in cands if c <= d).isoformat()
+
+
+# ── ① 全市场排行 / 初筛底座 ──────────────────────────────────────
+
+_RANK_SC = {"ytd": "1nzf", "1m": "1yzf", "3m": "3yzf", "6m": "6yzf",
+            "1y": "1n", "2y": "2n", "3y": "3n", "since": "ln"}
+_RANK_FT = {"all", "zs", "gp", "hh", "zq", "qdii", "fof"}
+_RANK_SORT_KEY = {"ytd": "ret_ytd_pct", "1m": "ret_1m_pct", "3m": "ret_3m_pct",
+                  "6m": "ret_6m_pct", "1y": "ret_1y_pct", "2y": "ret_2y_pct",
+                  "3y": "ret_3y_pct", "since": "ret_since_pct"}
+# rankhandler 行不带类型 → 本地过滤用 E1 中文类型映射到类别桶
+_TYPE_BUCKETS = (("指数型", "zs"), ("QDII", "qdii"), ("FOF", "fof"), ("股票型", "gp"),
+                 ("混合型", "hh"), ("债券型", "zq"), ("REIT", "zq"), ("货币", "zq"))
+
+
+def _bucket_of(fund_type) -> Optional[str]:
+    if not fund_type:
+        return None
+    for prefix, bucket in _TYPE_BUCKETS:
+        if prefix in fund_type:
+            return bucket
+    return None
+
+
+def _rank_row(raw: str, type_map: dict) -> dict:
+    """rankhandler CSV 行 → dict。字段序经官方 syl 四点校准（161725：近1月/3月/6月/
+    1年分毫不差，2026-11-10）；[17][18][24] 语义不明不映射（[19]=原费率）。"""
+    f = raw.split(",")
+
+    def num(i):
+        try:
+            v = f[i] if i < len(f) else ""
+            return float(v) if v not in ("", "--") else None
+        except ValueError:
+            return None
+
+    def s(i):
+        return f[i] if i < len(f) else ""
+
+    code = s(0)
+    fee = None
+    if len(f) > 19 and f[19].endswith("%"):
+        try:
+            fee = float(f[19][:-1])
+        except ValueError:
+            pass
+    return {"code": code, "name": s(1), "pinyin": s(2), "nav_date": s(3) or None,
+            "nav": num(4), "ac_nav": num(5), "daily_pct": num(6),
+            "ret_1w_pct": num(7), "ret_1m_pct": num(8), "ret_3m_pct": num(9),
+            "ret_6m_pct": num(10), "ret_1y_pct": num(11), "ret_2y_pct": num(12),
+            "ret_3y_pct": num(13), "ret_ytd_pct": num(14), "ret_since_pct": num(15),
+            "founded": s(16) or None, "fee_pct": fee,
+            "fund_type": type_map.get(code)}
+
+
+def _rank_fetch(ft: str, sc: str, pn: int) -> list:
+    """rankhandler 单次拉取（tt 线 + Referer 鉴权 + allRecords 强校验防截断）。"""
+    today_iso = date.today().isoformat()
+    r = ttfund_get("https://fund.eastmoney.com/data/rankhandler.aspx",
+                   params={"op": "ph", "dt": "kf", "ft": ft, "pi": 1, "pn": pn,
+                           "sd": (date.today() - timedelta(days=7)).isoformat(),
+                           "ed": today_iso, "sc": sc, "st": "desc"},
+                   headers={"Referer": "https://fund.eastmoney.com/data/fundranking.html"})
+    assert_rankhandler(r, f"rankhandler ft={ft} sc={sc}")
+    text = r.content.decode("utf-8", errors="replace")
+    rows = re.findall(r'"(\d{6},[^"]*)"', text)
+    m = re.search(r"allRecords:(\d+)", text)
+    total = int(m.group(1)) if m else 0
+    if not rows or not total:
+        raise RuntimeError(f"rankhandler 返回空（ft={ft}）: {text[:100]!r}")
+    if total != len(rows):
+        raise RuntimeError(f"rankhandler 校验失败 allRecords={total} 实收 {len(rows)}"
+                           f"（静默截断拒绝，pn={pn}）")
+    return rows
+
+
+def fund_rank(top: Optional[int] = None, fund_type: str = "all", sort: str = "ytd",
+              ascending: bool = False, force_refresh: bool = False) -> list[dict]:
+    """全市场基金排行 / 初筛底座（坑P19；全量 = 1 请求）。
+
+    两种形态（无翻页参数——逐页爬 496 次的封禁路径从签名上不存在）：
+      top=None（默认）：全市场一次拉（pn=25000 实测 24792 行），20h 缓存；
+        fund_type/sort/ascending 全部在缓存上【本地】执行——组合筛选 0 请求
+      top=N（1~100）：服务端单页（ft+sc 下推），当日缓存
+    fund_type: all/zs/gp/hh/zq/qdii/fof（本地过滤经 E1 类型映射）；
+    sort: ytd/1m/3m/6m/1y/2y/3y/since；None 值恒排末尾。
+    """
+    if fund_type not in _RANK_FT:
+        raise ValueError(f"fund_type 须为 {sorted(_RANK_FT)}，收到 {fund_type!r}")
+    if sort not in _RANK_SC:
+        raise ValueError(f"sort 须为 {sorted(_RANK_SC)}，收到 {sort!r}")
+    key_field = _RANK_SORT_KEY[sort]
+    if top is None:
+        rel = "rank/full_market.json"
+        cached = None if force_refresh else _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
+        if cached is not None:
+            rows = cached
+        else:
+            type_map = {f["code"]: f["type"] for f in fund_list()}
+            rows = [_rank_row(raw, type_map) for raw in _rank_fetch("all", "1nzf", 25000)]
+            _cache_write(rel, rows)
+        if fund_type != "all":
+            rows = [r for r in rows if _bucket_of(r.get("fund_type")) == fund_type]
+        # None 恒排末尾：降序把 None 映射 -inf、升序映射 +inf，再统一 reverse
+        nil = float("-inf") if not ascending else float("inf")
+        rows.sort(key=lambda r: r.get(key_field) if r.get(key_field) is not None else nil,
+                  reverse=not ascending)
+        return rows
+    top = int(top)
+    if not 1 <= top <= 100:
+        raise ValueError("top 只支持 1~100（更大需求走全量模式 top=None 本地排序）")
+    rel = f"rank/top_{fund_type}_{sort}.json"
+    cached = None if force_refresh else _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
+    if cached is not None:
+        return cached
+    type_map = {f["code"]: f["type"] for f in fund_list()}
+    rows = [_rank_row(raw, type_map)
+            for raw in _rank_fetch(_RANK_FT[fund_type], _RANK_SC[sort], top)]
+    _cache_write(rel, rows)
+    return rows
+
+
+# ── ② 新发基金 ────────────────────────────────────────────────────
+
+def fund_new_issues(force_refresh: bool = False) -> list[dict]:
+    """在发/新成立基金全量（FundNewIssue.aspx，tt 线 ≈7 页×1 请求，20h 缓存）。
+
+    返回 [{code,name,company,company_id,fund_type,issue_period,fee_pct,manager}]，
+    record 总数强校验（坑P2 同款防线，实测 record=332/pages=7）。
+    顺带产出「公司名→公司ID」映射（fund_company 消歧用）。
+    """
+    rel = "new_issues.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
+        if cached is not None:
+            return cached
+    out, total = [], 0
+    for page in range(1, 11):                        # 上限 10 页（500 条）防失控
+        r = ttfund_get("https://fund.eastmoney.com/data/FundNewIssue.aspx",
+                       params={"dt": 14, "page": f"{page},50", "order": "issuedate"},
+                       headers={"Referer": "https://fund.eastmoney.com/data/xinfound.html"})
+        assert_rankhandler(r, f"新发 page{page}")
+        ntext = r.content.decode("utf-8", errors="replace")
+        m = re.search(r"datas:\s*(\[.*?\])\s*,\s*record", ntext, re.S)
+        if not m:
+            raise RuntimeError(f"新发响应无 datas（page{page}）: {r.text[:80]!r}")
+        try:
+            arrs = json.loads(m.group(1))
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"新发 datas 解析失败（page{page}）: {e}") from e
+        for a in arrs:
+            out.append({"code": a[0], "name": a[1], "company": a[2], "company_id": a[3],
+                        "fund_type": a[4], "issue_period": a[5],
+                        "fee_pct": _to_float((a[6] or "").replace("%", "")) or None,
+                        "manager": a[7] or None})
+        mt = re.search(r"record:(\d+)", ntext)
+        if mt:
+            total = int(mt.group(1))
+            if len(out) >= total:
+                break
+        if not arrs:
+            break
+    if total and len(out) != total:
+        raise RuntimeError(f"新发分页校验失败 record={total} 实收 {len(out)}（截断拒绝）")
+    if not out:
+        raise RuntimeError("新发列表为空，拒绝静默返回")
+    _cache_write(rel, out)
+    return out
+
+
+# ── ③ 基金公司画像 ────────────────────────────────────────────────
+
+def _company_id_from_fund(fund_query: str) -> tuple:
+    """基金 → (公司ID, 公司名)：F10 概况页（jbgk）服务端直出的 company/{id} 直链。"""
+    code = resolve_fund_code(fund_query)
+    r = ttfund_get(f"https://fundf10.eastmoney.com/jbgk_{code}.html",
+                   headers={"Referer": "https://fundf10.eastmoney.com/"})
+    assert_rankhandler(r, f"jbgk {code}")
+    # ⚠️ 链接锚文本是通用的"基金公司"字样而非公司名——只取 ID，名字走详情页 title
+    m = re.search(r'company/(\d{8})\.html',
+                  r.content.decode("utf-8", errors="replace"))
+    if not m:
+        raise RuntimeError(f"jbgk 页未找到公司直链（{code}）——上游结构变更")
+    return m.group(1), None
+
+
+def fund_company(query: str, force_refresh: bool = False) -> dict:
+    """基金公司画像（company/{id}.html 服务端直出，24h 缓存，1 请求）。
+
+    query 三种形态：8 位数字公司ID（如 80065113）/ 基金代码或名称（6 位码是基金，
+    经 jbgk 直链转公司，1 额外请求）/ 公司名（best-effort：仅新发缓存中的公司可命中）。
+    返回 {company_id,name,scope_yi 管理规模(亿),fund_count 旗下基金数,
+    manager_count 经理人数,funds:[{code,name}]}（旗下基金服务端表格去重）。
+    """
+    q = str(query).strip()
+    jbgk_name = None
+    if re.fullmatch(r"\d{8}", q):                   # 公司ID 恒 8 位（6 位是基金代码）
+        cid = q
+    else:
+        cid = None
+        # best-effort：新发缓存里的公司名→ID（免请求）
+        try:
+            for it in fund_new_issues():
+                if it.get("company") == q:
+                    cid = it["company_id"]
+                    break
+        except Exception:
+            pass
+        if cid is None:                              # 走基金→jbgk→公司直链
+            cid, jbgk_name = _company_id_from_fund(q)
+    rel = f"company/{cid}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=24)
+        if cached is not None:
+            return cached
+    r = ttfund_get(f"https://fund.eastmoney.com/company/{cid}.html",
+                   headers={"Referer": "https://fund.eastmoney.com/company/default.html"})
+    assert_rankhandler(r, f"公司 {cid}")
+    h = r.content.decode("utf-8", errors="replace")
+    if len(h) < 10000:                               # 跳转页/空壳防线（E2 同款）
+        raise RuntimeError(f"公司页异常（{cid} 仅 {len(h)}B）")
+    def _num_near(label: str, unit: str) -> Optional[float]:
+        """标签段内去 HTML 标签/空白后取「label+数字+unit」。数字常被 <span> 包裹；
+        同名 label 会先出现在导航链接里（无数字），须逐个出现位置扫描直到命中。"""
+        for i in (mm_.start() for mm_ in re.finditer(re.escape(label), h)):
+            seg = re.sub(r"<[^>]+>|\s+", "", h[i:i + 300])
+            m = re.search(re.escape(label) + r"[:：]?([0-9.]+)" + unit, seg)
+            if m:
+                return float(m.group(1))
+        return None
+
+    mt = re.search(r"<title>([^<\-]{2,25})", h)
+    name = ((mt.group(1).strip() if mt else "").split("_")[0].split("-")[0]
+            .strip().rstrip("主页").strip()) or None
+    ms_v = _num_near("管理规模", "亿元")
+    mf_v = _num_near("基金数量", "只")
+    mm_v = _num_near("经理人数", "人")
+    seen, funds = set(), []
+    for code2, name2 in re.findall(
+            r'href="https?://fund\.eastmoney\.com/(\d{6})\.html"[^>]*>([^<]{2,30})</a>', h):
+        n2 = name2.strip()
+        if code2 in seen or n2.isdigit() or n2 in ("基金品种", "净值", "持仓", "档案"):
+            continue
+        seen.add(code2)
+        funds.append({"code": code2, "name": n2})
+    out = {"company_id": cid, "name": name or jbgk_name,
+           "scope_yi": ms_v,
+           "fund_count": int(mf_v) if mf_v is not None else None,
+           "manager_count": int(mm_v) if mm_v is not None else None,
+           "funds": funds}
+    if out["scope_yi"] is None and out["fund_count"] is None:
+        raise RuntimeError(f"公司页字段解析失败（{cid}）——上游结构变更，拒绝半空返回")
+    _cache_write(rel, out)
+    return out
+
+
+# ── ④ 抱团度 / 行业配置（cninfo 第四线）──────────────────────────
+
+def fund_crowding(rdate: str = "", force_refresh: bool = False) -> list[dict]:
+    """季度基金重仓股聚合（cninfo 官方专题统计 p_sysapi1112，坑P20）→ 抱团度原料。
+
+    rdate 报告期季末（"20260930"/"2026-09-30" 皆可，空=最近已发布季末）。
+    返回 [{code,name,fund_count 被多少只基金持有,shares_wan 持股总数(万),
+    market_value_wan 持股市值(万元),date}] 按 fund_count 降序——TOP50 排名与
+    TOP10 平均家数（市场抱团温度计）直接从这张表算。1 请求/季度，90 天缓存
+    （已发布季报数据不可变）。实测 2026Q3：3088 只重仓股，Top1 中际旭创 2424 家。
+    """
+    rd8 = _norm_rdate(rdate)
+    rel = f"crowding/{rd8}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=24 * 90)
+        if cached is not None:
+            return cached
+    recs = _cninfo_post("p_sysapi1112",
+                        {"rdate": f"{rd8[:4]}-{rd8[4:6]}-{rd8[6:]}"}, f"基金重仓股 {rd8}")
+    out = []
+    for x in recs:
+        try:
+            out.append({"code": x.get("SECCODE"), "name": x.get("SECNAME"),
+                        "fund_count": int(float(x.get("F001N") or 0)),
+                        "shares_wan": float(x.get("F002N") or 0),
+                        "market_value_wan": float(x.get("F003N") or 0),
+                        "date": (x.get("ENDDATE") or "")[:10]})
+        except (TypeError, ValueError):
+            continue
+    if len(out) < 100:
+        raise RuntimeError(f"基金重仓股聚合仅解析出 {len(out)} 行（{rd8}），疑似结构变更")
+    out.sort(key=lambda r: -r["fund_count"])
+    _cache_write(rel, out)
+    return out
+
+
+def fund_industry_allocation(rdate: str = "", force_refresh: bool = False) -> list[dict]:
+    """季度全市场基金行业配置聚合（cninfo p_sysapi1113，证监会行业门类口径）。
+
+    返回 [{industry_code 门类码,industry 门类名,fund_count 持有基金家数,
+    market_value_yi 持股市值(亿),weight_pct 占比%,date}] 按市值降序。
+    实测 2026Q3：19 个门类（制造业 4.6 万亿/11.94% 居首）。同 fund_crowding 节流缓存。
+    """
+    rd8 = _norm_rdate(rdate)
+    rel = f"industry/{rd8}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=24 * 90)
+        if cached is not None:
+            return cached
+    recs = _cninfo_post("p_sysapi1113",
+                        {"rdate": f"{rd8[:4]}-{rd8[4:6]}-{rd8[6:]}"}, f"行业配置 {rd8}")
+    out = []
+    for x in recs:
+        try:
+            out.append({"industry_code": x.get("F001V"), "industry": x.get("F002V"),
+                        "fund_count": int(float(x.get("F003N") or 0)),
+                        "market_value_yi": float(x.get("F004N") or 0),
+                        "weight_pct": float(x.get("F005N") or 0),
+                        "date": (x.get("ENDDATE") or "")[:10]})
+        except (TypeError, ValueError):
+            continue
+    if len(out) < 10:
+        raise RuntimeError(f"行业配置仅解析出 {len(out)} 行（{rd8}），疑似结构变更")
+    out.sort(key=lambda r: -r["market_value_yi"])
+    _cache_write(rel, out)
+    return out
+```
+
 ## 使用示例
 
 ```python
@@ -2008,6 +2461,16 @@ credit_spread("AA", "3y")[-1]                # 3Y AA 信用利差
 shibor_history("1年(1Y)", days=5)            # SHIBOR 1Y
 repo_rate_gc()                               # GC007
 cn_treasury_realtime()                       # 国债 2/5/10/30Y 盘中
+
+# V0.5 全市场数据层
+fund_rank()                                  # 全市场 24792 只（1 请求，20h 缓存）
+fund_rank(fund_type="gp", sort="1y")         # 类型过滤+排序全在本地缓存 → 0 请求
+fund_rank(top=20, fund_type="zs", sort="ytd")  # 服务端 Top20 单页
+fund_new_issues()                            # 在发/新成立全量 + 公司名→ID 映射
+fund_company("161725")                       # 基金码→公司画像（基金码路径 +1 请求）
+fund_company("80065113")                     # 8 位公司 ID 直取（1 请求）
+fund_crowding()[:10]                         # 抱团度 Top10（1 请求/季，90 天缓存）
+fund_industry_allocation()                   # 19 门类行业配置（巨潮官方口径）
 ```
 
-**不覆盖（明确边界）**：账户持仓/交易下单（用 ttskill）、港基专项、盘中实时估值、基金经理历任切分（独立评测 skill 的 jjjl 通道）、全市场排名筛选、货基万份收益（P15）、行业配置史（E2 已停供）、债券持仓明细 zqcc。
+**不覆盖（明确边界）**：账户持仓/交易下单（用 ttskill）、港基专项、盘中实时估值、基金经理历任切分（独立评测 skill 的 jjjl 通道）、单基金行业配置史（E2 已停供；全市场季度口径见 `fund_industry_allocation`）、货基万份收益（P15）、债券持仓明细 zqcc。
