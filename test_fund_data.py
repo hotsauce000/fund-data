@@ -541,6 +541,75 @@ def test_l1_offline():
     expect_raise("L1", "排行-参数钳制sort", lambda: fd.fund_rank(sort="5y"), "sort")
     expect_raise("L1", "排行-参数钳制top上限", lambda: fd.fund_rank(top=101), "top")
     expect_raise("L1", "排行-参数钳制top下限", lambda: fd.fund_rank(top=0), "top")
+
+    # top=N 服务端单页模式（mock 网络锁回归：曾因 set 下标 100% TypeError 无覆盖）
+    class _RR:
+        def __init__(self, body):
+            self.status_code = 200
+            self.content = body.encode("utf-8")
+
+    _body = ('var rankData = {allRecords:2, pagesize:20}, records=['
+             '"161725,招商中证白酒指数(LOF)A,ZS,2026-11-09,0.5859,2.302,-0.63,'
+             '-0.31,10.34,3.85,-4.87,-23.77,--,--,-21.02,-30.45,2008-05-09,--,--,0.15%",'
+             '"005827,易方达蓝筹精选混合,YFDLCJSHH,2026-11-09,1.9,2.1,-0.5,'
+             '0.2,5.0,8.0,12.0,15.0,--,--,9.5,20.0,2018-09-05,--,--,1.50%"];')
+    _calls = []
+    _orig_get, _orig_fl = fd.ttfund_get, fd.fund_list
+
+    def _fake_get(url, params=None, headers=None, **k):
+        _calls.append(params.get("pn"))
+        return _RR(_body)
+
+    try:
+        fd.fund_list = lambda: [{"code": "161725", "type": "指数型-股票"},
+                                {"code": "005827", "type": "混合型-偏股"}]
+        fd.ttfund_get = _fake_get
+        rk_t = fd.fund_rank(top=20, fund_type="gp", sort="ytd", force_refresh=True)
+        check("L1", "排行-top模式正常路径(mock)", len(rk_t) == 2
+              and rk_t[0]["code"] == "005827" and rk_t[0]["ret_ytd_pct"] == 9.5
+              and rk_t[1]["code"] == "161725" and rk_t[1]["fund_type"] == "指数型-股票",
+              f"desc: {[r['code'] for r in rk_t]}")
+        rk_a = fd.fund_rank(top=20, fund_type="gp", sort="ytd", ascending=True)
+        check("L1", "排行-top模式ascending本地重排+缓存0请求",
+              rk_a[0]["code"] == "161725" and len(_calls) == 1,
+              f"asc: {[r['code'] for r in rk_a]}，实发 {len(_calls)} 次")
+        fd.fund_rank(top=50, fund_type="gp", sort="ytd", force_refresh=True)
+        check("L1", "排行-top入缓存键(不同top不串缓存)", len(_calls) == 2,
+              f"top=50 触发新拉取，实发 {len(_calls)} 次")
+    finally:
+        fd.ttfund_get, fd.fund_list = _orig_get, _orig_fl
+        for rel in ("rank/top_gp_20.json", "rank/top_gp_50.json"):
+            (fd.FUND_CACHE_DIR / rel).unlink(missing_ok=True)   # mock 数据不入真缓存
+
+    # cninfo 451 刷新重试（P20：钥匙时效非风控，不计熔断）
+    class _CJ:
+        def __init__(self, d):
+            self.status_code, self._d, self.content = 200, d, b"{}"
+
+        def json(self):
+            return self._d
+
+    _seq = [_CJ({"resultcode": 451, "resultmsg": "token null"}),
+            _CJ({"resultcode": 200, "records": [
+                {"SECCODE": "300308", "SECNAME": "中际旭创", "F001N": "2424",
+                 "F002N": "123", "F003N": "456", "ENDDATE": "2026-09-30 00:00:00"}]})]
+    _orig_post, _orig_key = fd.TT_SESSION.post, fd._cninfo_enckey
+    try:
+        fd._cbreak_state["cninfo"] = [0, 0.0]
+        fd.TT_SESSION.post = lambda *a, **k: _seq.pop(0)
+        fd._cninfo_enckey = lambda ts=None: "mock="
+        recs = fd._cninfo_post("p_sysapi1112", {"rdate": "2026-09-30"}, "mock")
+        check("L1", "cninfo-451刷新钥匙重试一次成功(P20)",
+              len(recs) == 1 and recs[0]["SECCODE"] == "300308" and not _seq,
+              f"耗 {2 - len(_seq)} 次请求成功")
+        check("L1", "cninfo-451重试不计熔断",
+              fd._cbreak_state["cninfo"] == [0, 0.0], str(fd._cbreak_state["cninfo"]))
+        _seq.append(_CJ({"resultcode": 451, "resultmsg": "token null"}))
+        _seq.append(_CJ({"resultcode": 451, "resultmsg": "token null"}))
+        expect_raise("L1", "cninfo-两次451仍拒报错",
+                     lambda: fd._cninfo_post("p_sysapi1112", {}, "mock"), "两次被拒")
+    finally:
+        fd.TT_SESSION.post, fd._cninfo_enckey = _orig_post, _orig_key
     check("L1", "报告期-归一化与空=最近季末",
           fd._norm_rdate("2026-09-30") == "20260930"
           and fd._norm_rdate("") == fd._latest_quarter_end().replace("-", ""),
@@ -922,6 +991,7 @@ def test_f_cache_band():                             # F4/F7 缓存专项（在�
     fd.fund_crowding()
     cn6 = fd.CNINFO_REQUEST_COUNT[0] - cn5
     check("F4", "抱团度二次调用0请求(cninfo账本)", cn6 == 0, f"实发 {cn6} 次")
+    fd.TT_REQUEST_COUNT[1].clear()          # F 段复位清零后同步清 host 明细，账本打印自洽
 
 
 def main():

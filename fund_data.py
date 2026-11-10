@@ -141,6 +141,11 @@ def _cross_proc_throttle(line: str, min_interval: float):
         time.sleep(min_interval * random.uniform(0.8, 1.2))
 
 
+def _line_label(line: str) -> str:
+    """熔断文案的线上标签：cninfo 线显示「巨潮」，其余显示「东财」。"""
+    return "巨潮" if line == "cninfo" else "东财"
+
+
 def _cbreak_check(line: str):
     """F2：熔断检查。冷却期内所有请求直接拒绝（不敲上游），报错给明确解除时间。"""
     f = _cbreak_file(line)
@@ -152,7 +157,7 @@ def _cbreak_check(line: str):
         if until > time.time():
             remain = int(until - time.time())
             raise RuntimeError(
-                f"东财[{line}] 熔断中（疑似触发风控已自动停机），冷却剩 {remain}s 至 "
+                f"{_line_label(line)}[{line}] 熔断中（疑似触发风控已自动停机），冷却剩 {remain}s 至 "
                 f"{datetime.fromtimestamp(until).strftime('%H:%M:%S')}。"
                 f"这是保护机制——继续请求只会延长封禁；稍后再试或换网络。")
         f.unlink(missing_ok=True)                     # 冷却期满自动复位
@@ -173,9 +178,9 @@ def _cbreak_signal(line: str, why: str):
             pass
         _cbreak_state[line] = [0, 0.0]
         raise RiskControlError(
-            f"东财[{line}] 连续 {_CBREAK_TRIP} 次风控信号（最近: {why}），已自动熔断 "
+            f"{_line_label(line)}[{line}] 连续 {_CBREAK_TRIP} 次风控信号（最近: {why}），已自动熔断 "
             f"{_CBREAK_COOLDOWN // 60} 分钟至 {datetime.fromtimestamp(until).strftime('%H:%M:%S')}。"
-            f"熔断期内所有东财请求直接拒绝（保护 IP）。")
+            f"熔断期内所有{_line_label(line)}请求直接拒绝（保护 IP）。")
 
 
 def assert_not_risk_control(resp, line: str = "tt", context: str = ""):
@@ -1922,7 +1927,10 @@ def _cninfo_post(sysapi: str, params: dict, context: str) -> list:
             time.sleep(1.0)
             continue
         assert_not_risk_control(r, "cninfo", context)
-        d = r.json()
+        try:
+            d = r.json()
+        except ValueError as e:                     # 非反爬 JSON（HTML 拦截页等）→ 带上下文报错
+            raise RuntimeError(f"cninfo {context} 返回非 JSON: {r.content[:80]!r}") from e
         msg = str(d.get("resultmsg") or "")
         if d.get("resultcode") == 451 or "token" in msg:
             if attempt == 1:                        # 钥匙时效：刷新重试（非风控不计熔断）
@@ -1963,6 +1971,7 @@ _RANK_SORT_KEY = {"ytd": "ret_ytd_pct", "1m": "ret_1m_pct", "3m": "ret_3m_pct",
                   "6m": "ret_6m_pct", "1y": "ret_1y_pct", "2y": "ret_2y_pct",
                   "3y": "ret_3y_pct", "since": "ret_since_pct"}
 # rankhandler 行不带类型 → 本地过滤用 E1 中文类型映射到类别桶
+# （REIT/货币归 zq 仅为七桶全覆盖；zq 初筛注意货基收益量级与债基完全不同）
 _TYPE_BUCKETS = (("指数型", "zs"), ("QDII", "qdii"), ("FOF", "fof"), ("股票型", "gp"),
                  ("混合型", "hh"), ("债券型", "zq"), ("REIT", "zq"), ("货币", "zq"))
 
@@ -2035,7 +2044,8 @@ def fund_rank(top: Optional[int] = None, fund_type: str = "all", sort: str = "yt
     两种形态（无翻页参数——逐页爬 496 次的封禁路径从签名上不存在）：
       top=None（默认）：全市场一次拉（pn=25000 实测 24792 行），20h 缓存；
         fund_type/sort/ascending 全部在缓存上【本地】执行——组合筛选 0 请求
-      top=N（1~100）：服务端单页（ft+sc 下推），当日缓存
+      top=N（1~100）：服务端单页（ft+sc 下推，取该类前 N 名），当日缓存；
+        ascending=True 表示【前 N 名窗口内】升序展示（服务端仍按该字段取前 N）
     fund_type: all/zs/gp/hh/zq/qdii/fof（本地过滤经 E1 类型映射）；
     sort: ytd/1m/3m/6m/1y/2y/3y/since；None 值恒排末尾。
     """
@@ -2063,14 +2073,19 @@ def fund_rank(top: Optional[int] = None, fund_type: str = "all", sort: str = "yt
     top = int(top)
     if not 1 <= top <= 100:
         raise ValueError("top 只支持 1~100（更大需求走全量模式 top=None 本地排序）")
-    rel = f"rank/top_{fund_type}_{sort}.json"
-    cached = None if force_refresh else _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
-    if cached is not None:
-        return cached
-    type_map = {f["code"]: f["type"] for f in fund_list()}
-    rows = [_rank_row(raw, type_map)
-            for raw in _rank_fetch(_RANK_FT[fund_type], _RANK_SC[sort], top)]
-    _cache_write(rel, rows)
+    # 缓存键含 top（服务端只回该页）；sort/ascending 不入键——排序在缓存读取后本地执行
+    rel = f"rank/top_{fund_type}_{top}.json"
+    rows = None if force_refresh else _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
+    if rows is None:
+        type_map = {f["code"]: f["type"] for f in fund_list()}
+        # _RANK_FT 是合法 ft 值集合（fund_type 已校验在其中）；服务端恒 desc，
+        # ascending 语义由下方本地重排兑现
+        rows = [_rank_row(raw, type_map)
+                for raw in _rank_fetch(fund_type, _RANK_SC[sort], top)]
+        _cache_write(rel, rows)
+    nil = float("-inf") if not ascending else float("inf")
+    rows = sorted(rows, key=lambda r: r.get(key_field) if r.get(key_field) is not None else nil,
+                  reverse=not ascending)
     return rows
 
 
@@ -2103,18 +2118,21 @@ def fund_new_issues(force_refresh: bool = False) -> list[dict]:
         except json.JSONDecodeError as e:
             raise RuntimeError(f"新发 datas 解析失败（page{page}）: {e}") from e
         for a in arrs:
-            out.append({"code": a[0], "name": a[1], "company": a[2], "company_id": a[3],
-                        "fund_type": a[4], "issue_period": a[5],
-                        "fee_pct": _to_float((a[6] or "").replace("%", "")) or None,
-                        "manager": a[7] or None})
+            def g(i):
+                return a[i] if len(a) > i else ""
+            out.append({"code": g(0), "name": g(1), "company": g(2), "company_id": g(3),
+                        "fund_type": g(4), "issue_period": g(5),
+                        "fee_pct": _to_float((g(6) or "").replace("%", "")) or None,
+                        "manager": g(7) or None})
         mt = re.search(r"record:(\d+)", ntext)
-        if mt:
-            total = int(mt.group(1))
-            if len(out) >= total:
-                break
+        if not mt:                              # record 缺席=强校验失效，拒绝静默跳过
+            raise RuntimeError(f"新发响应无 record 总数（page{page}），截断校验不可用")
+        total = int(mt.group(1))
+        if len(out) >= total:
+            break
         if not arrs:
             break
-    if total and len(out) != total:
+    if len(out) != total:
         raise RuntimeError(f"新发分页校验失败 record={total} 实收 {len(out)}（截断拒绝）")
     if not out:
         raise RuntimeError("新发列表为空，拒绝静默返回")
@@ -2142,7 +2160,8 @@ def fund_company(query: str, force_refresh: bool = False) -> dict:
     """基金公司画像（company/{id}.html 服务端直出，24h 缓存，1 请求）。
 
     query 三种形态：8 位数字公司ID（如 80065113）/ 基金代码或名称（6 位码是基金，
-    经 jbgk 直链转公司，1 额外请求）/ 公司名（best-effort：仅新发缓存中的公司可命中）。
+    经 jbgk 直链转公司，1 额外请求）/ 公司名（best-effort：先查新发缓存免请求命中；
+    未命中则按基金名路径尝试——公司名≠基金名，多半显式报错，绝不静默错配）。
     返回 {company_id,name,scope_yi 管理规模(亿),fund_count 旗下基金数,
     manager_count 经理人数,funds:[{code,name}]}（旗下基金服务端表格去重）。
     """
@@ -2152,12 +2171,15 @@ def fund_company(query: str, force_refresh: bool = False) -> dict:
         cid = q
     else:
         cid = None
-        # best-effort：新发缓存里的公司名→ID（免请求）
+        # best-effort：新发缓存里的公司名→ID（免请求）；风控信号绝不吞——
+        # 已计入熔断的信号若被 pass 掉，后续仍会连发 jbgk+company 两请求打枪口
         try:
             for it in fund_new_issues():
                 if it.get("company") == q:
                     cid = it["company_id"]
                     break
+        except RiskControlError:
+            raise
         except Exception:
             pass
         if cid is None:                              # 走基金→jbgk→公司直链
@@ -2174,10 +2196,11 @@ def fund_company(query: str, force_refresh: bool = False) -> dict:
     if len(h) < 10000:                               # 跳转页/空壳防线（E2 同款）
         raise RuntimeError(f"公司页异常（{cid} 仅 {len(h)}B）")
     def _num_near(label: str, unit: str) -> Optional[float]:
-        """标签段内去 HTML 标签/空白后取「label+数字+unit」。数字常被 <span> 包裹；
-        同名 label 会先出现在导航链接里（无数字），须逐个出现位置扫描直到命中。"""
+        """标签段内去 HTML 标签/空白/千分位逗号后取「label+数字+unit」。数字常被
+        <span> 包裹；同名 label 会先出现在导航链接里（无数字），须逐个出现位置
+        扫描直到命中。"""
         for i in (mm_.start() for mm_ in re.finditer(re.escape(label), h)):
-            seg = re.sub(r"<[^>]+>|\s+", "", h[i:i + 300])
+            seg = re.sub(r"<[^>]+>|\s+|,", "", h[i:i + 300])
             m = re.search(re.escape(label) + r"[:：]?([0-9.]+)" + unit, seg)
             if m:
                 return float(m.group(1))
@@ -2218,6 +2241,9 @@ def fund_crowding(rdate: str = "", force_refresh: bool = False) -> list[dict]:
     market_value_wan 持股市值(万元),date}] 按 fund_count 降序——TOP50 排名与
     TOP10 平均家数（市场抱团温度计）直接从这张表算。1 请求/季度，90 天缓存
     （已发布季报数据不可变）。实测 2026Q3：3088 只重仓股，Top1 中际旭创 2424 家。
+    ⚠️ 披露窗口：季末后约 15 个工作日内各公司季报尚未披露完，最新一期聚合
+    会随披露进度逐渐变多——首次拉取即被缓存 90 天，刚过季末慎用（可显式传
+    上一季度 rdate 拿完整快照）。
     """
     rd8 = _norm_rdate(rdate)
     rel = f"crowding/{rd8}.json"
@@ -2249,7 +2275,8 @@ def fund_industry_allocation(rdate: str = "", force_refresh: bool = False) -> li
 
     返回 [{industry_code 门类码,industry 门类名,fund_count 持有基金家数,
     market_value_yi 持股市值(亿),weight_pct 占比%,date}] 按市值降序。
-    实测 2026Q3：19 个门类（制造业 4.6 万亿/11.94% 居首）。同 fund_crowding 节流缓存。
+    实测 2026Q3：19 个门类（制造业 4.6 万亿/11.94% 居首）。同 fund_crowding 节流缓存，
+    披露窗口内最新季聚合同样可能不完整（见 fund_crowding ⚠️）。
     """
     rd8 = _norm_rdate(rdate)
     rel = f"industry/{rd8}.json"

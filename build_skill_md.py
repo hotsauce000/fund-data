@@ -166,18 +166,18 @@ REF.append(f"""# fund-data 完整参考（reference.md · 按需读取层）V{VE
 > 本文件按需读取：调试 / 扩展 / 排查坑时才打开，勿随 skill 激活预加载。
 > 路由与签名速查见 SKILL.md；本文件内嵌代码与 fund_data.py 同源直拼（构建时生成）。
 
-**V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（~9KB/≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
+**V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 """)
 
 REF.append("""# fund-data 基金底层数据工具包 V0.5.0 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层 + **V0.5 全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.5.0（2026-11-10）：136/136 断言实测通过**，覆盖 15 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层 + **V0.5 全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.5.0（2026-11-10）：142/142 断言实测通过**（L1单元90 · L2端点smoke 30 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×8），覆盖 15 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
 
 **V0.5.0 全市场数据层（四端点 + cninfo 第四线基础设施，防封为第一约束）：**
 - 🟢 **N1 `fund_rank`**：rankhandler.aspx 全市场 24792 只 **1 请求**（鉴权=Referer fundranking.html，无 cookie）；top=None 全量 20h 缓存，fund_type/sort/ascending 全部本地执行=组合筛选 0 请求；签名上不存在翻页参数（496 页逐页爬的封禁路径从 API 形态上消失）；None 值恒排末尾；字段序经官方 syl 四点校准（161725 近1月/3月/6月/1年分毫不差）
 - 🟢 **N2 `fund_new_issues`**：在发/新成立全量（record 总数强校验，≈7 页），顺带产出「公司名→公司ID」映射（fund_company 消歧用）
 - 🟢 **N3 `fund_company`**：公司画像 1 请求（8 位公司ID 直取 / 6 位基金码经 jbgk 直链转 / 公司名走新发缓存 best-effort）；管理规模/基金数/经理数/旗下清单服务端直出
-- 🟢 **N4 `fund_crowding` / `fund_industry_allocation`**：巨潮官方专题统计（p_sysapi1112/1113）季度重仓股聚合（3088 只，Top1 中际旭创 2424 家）+ 19 门类行业配置——抱团度原料 + 补上 E2 停供后的行业配置缺口；Accept-Enckey=AES-CBC(秒级时间戳) 用系统 node 子进程算（零新依赖）
+- 🟢 **N4 `fund_crowding` / `fund_industry_allocation`**：巨潮官方专题统计（p_sysapi1112/1113）季度重仓股聚合（3088 只，Top1 中际旭创 2424 家）+ 19 门类行业配置——抱团度原料 + 补上 E2 停供后的行业配置缺口；Accept-Enckey=AES-CBC(秒级时间戳) 用系统 node 子进程算（零新 Python 依赖，需系统 node，无则两函数显式报错）。⚠️ 披露窗口：季末后约 15 个工作日内最新季聚合不完整且首拉即缓存 90 天——刚过季末显式传上一季度 rdate
 - 🔴 **P19 rankhandler 风控形态**：被拦是 200+「无访问权限」**而非 403**——状态码层面查不出 → `assert_rankhandler` 内容级断言接入全部 rankhandler 调用点
 - 🔴 **P20 cninfo enckey**：451/"token null" = 钥匙时效问题（时钟漂移/秒边界）**非风控**——自动刷新重试一次不计熔断，仍拒才报错
 - 🟡 **P21 r.text 编码**：requests 无 charset 头时默认 ISO-8859-1，中文正则全失灵——新端点一律 `r.content.decode("utf-8", errors="replace")`
@@ -311,7 +311,7 @@ REF.append("""## 端点路由速查（按需定位，不必通读）
 pip install requests
 ```
 
-硬依赖 requests + 系统 curl（L7 中债通道需要，P11；macOS/Linux 自带）。pandas 可选。L6 穿透自带内嵌股票域通道，无需 a-stock-data 即可跑通；个股深度再加载 a-stock-data。
+硬依赖 requests + 系统 curl（L7 中债通道需要，P11；macOS/Linux 自带）+ 系统 node（V0.5 巨潮抱团度/行业配置线的 enckey 计算，macOS/Linux 常见自带；无 node 时该两函数显式报错不静默）。pandas 可选。L6 穿透自带内嵌股票域通道，无需 a-stock-data 即可跑通；个股深度再加载 a-stock-data。
 """)
 
 REF.append("## L1 前置层：统一入口 + 主键表\n\n所有端点的前置依赖：\n")
