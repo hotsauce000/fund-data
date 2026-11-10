@@ -286,8 +286,6 @@ PLAN-V0.4.0.md      # V0.4.0 规划与执行记录（含一手探测数据）
 archive/            # 已并入主模块的原型存档
 ```
 
-> 另含 评测skill 子工具集（`评测skill.py` 等，指数增强基金评判，见 `SKILL_评测skill.md`）；上表仅列核心文件。
-
 安装为 Agent skill：将 `SKILL.md`（及附带模块）放入 `~/.agents/skills/fund-data/`。
 
 ## License
