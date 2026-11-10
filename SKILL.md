@@ -976,7 +976,7 @@ def _to_float(s) -> Optional[float]:
 ```python
 
 def fund_detail_danjuan(query: str) -> dict:
-    """蛋卷基金详情（D1 djapi/fund/{code}）：规模/经理/托管/风险等级/申赎状态。
+    """蛋卷基金详情（D1 djapi/fund/{code}）：总份额/经理/托管/风险等级/申赎状态。
 
     定位：东财系全挂时的跨域备胎（不同域名不同风控面）。
     ⚠️ 蛋卷 growth 净值端点已死（坑P5），此处只保档案，无净值能力。
@@ -1079,7 +1079,7 @@ def fund_metrics(snapshot: dict, start: str = "", end: str = "",
                  risk_free_annual: float = 0.015) -> dict:
     """区间收益/年化/最大回撤/年化波动/夏普/卡玛（复权口径，零网络）。
 
-    对照 ground truth：snapshot.period_returns_pct 是官方同期收益（测试容差 0.1pct）。
+    对照 ground truth：snapshot.period_returns_pct 是官方同期收益（测试容差 0.6pct）。
     """
     _assert_ascending_dates(snapshot["nav_history"], "fund_metrics")
     adj = adjusted_nav(snapshot["nav_history"])
