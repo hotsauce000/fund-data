@@ -1,10 +1,10 @@
 ---
 name: fund-data
-display_name: 基金鹰眼 FundHawk · 全域基金数据引擎
-display_name_en: FundHawk · Full-Spectrum Fund Data Engine
+display_name: 基金数据底座 FundBase
+display_name_en: FundBase · The Data Foundation for China Funds
 description: 写代码实际获取基金领域底层数据时使用——零key零登录，八层能力：【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:净值全史/规模史/持有人/经理/重仓股债/仓位史/基准三曲线/申赎/费率)、区间净值+申赎状态、批量实时净值、季度前十大、蛋卷备胎，快照挂自动降级；【本地计算】复权/回撤/波动/夏普/卡玛/费率标注、定投XIRR、仓位解读(加减仓)、同类百分位(一年前对照)、相对表现(vs沪深300/同类平均)；【持仓穿透】腾讯行情×板块归属→主题聚合→白酒约86%白话地图；【宏观利率】中债曲线族40+条、信用利差、国债/SHIBOR/基准利率史、GC007、国债盘中；【全市场】24792只排行底座(过滤排序全本地)、新发基金全量、公司画像、抱团度(巨潮)、19门类行业配置；【经理与专项】经理画像(在管清单/任期/回报)、排行、持续性矩阵、固收+画像、单基金规模(ENDNAV)、规模全历史(53期含申赎流量)、QDII溢价、重仓探测；【基准指数】指数与股票日线(沪深300等15指数,十年全史,1请求)。请求预算制防封(铁律见下)。仅在需要调用数据接口取数时使用：基金概念解释、投资观点讨论等无需取数的话题不要加载本skill。
-description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集、白话持仓穿透地图、24792 只全市场排行、经理画像与抱团度、十年指数日线与 53 期规模全史——零 key 零登录，请求预算制防封，分层断言全绿。让每只基金在你眼前透明。
-description_en: The full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), plain-language holdings maps, 24,792-fund market rankings, manager profiles and crowding, 10-year index klines, 53-period scale history. Zero keys, zero login, layered assertions green. Every fund, transparent.
+description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集、白话持仓穿透地图、24792 只全市场排行、经理画像与抱团度、十年指数日线与 53 期规模全史——零 key 零登录，请求预算制防封，分层断言全绿。为一切基金应用打地基。
+description_en: The full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), plain-language holdings maps, 24,792-fund market rankings, manager profiles and crowding, 10-year index klines, 53-period scale history. Zero keys, zero login, layered assertions green. The ground every fund application builds on.
 author: hotsauce000
 origin: custom
 version: 0.6.2
