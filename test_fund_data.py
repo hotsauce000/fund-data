@@ -1274,14 +1274,16 @@ def test_l2_smoke():
     # ── V0.6.2 规模全历史（真数据 + 官方锚）──
     _sh_n = fd.TT_REQUEST_COUNT[0]
     shist = fd.fund_scale_history("000312")
-    check("L2", "B2 规模全历史-53期全史+官方锚",
+    # 容前不锁尾（全仓 L2 惯例）：2026-Q4 披露后 shist[-1] 会前移——官方锚按日期定位
+    _anchor = next((x for x in shist if x["date"] == "2026-09-30"), None)
+    check("L2", "B2 规模全历史-全史跨度+官方锚",
           len(shist) >= 40 and shist[0]["date"] == "2013-09-27"
-          and shist[-1]["date"] == "2026-09-30"
-          and abs(shist[-1]["nav_yi"] - 4.30) < 0.01
+          and shist[-1]["date"] >= "2026-09-30"
+          and _anchor is not None and abs(_anchor["nav_yi"] - 4.30) < 0.01
           and shist[0]["subscribe_yi"] is None
           and all(x["shares_yi"] for x in shist),
-          f"{len(shist)} 期 {shist[0]['date']}→{shist[-1]['date']}（募集期→最新季报），"
-          f"末期净资产 {shist[-1]['nav_yi']}亿=官方锚")
+          f"{len(shist)} 期 {shist[0]['date']}→{shist[-1]['date']}（募集期→最新），"
+          f"2026-09-30 锚净资产 {_anchor['nav_yi'] if _anchor else '?'}亿")
     fd.fund_scale_history("000312")
     check("L2", "B2 规模全历史-缓存0请求",
           fd.TT_REQUEST_COUNT[0] == _sh_n, f"二调实发 {fd.TT_REQUEST_COUNT[0] - _sh_n} 次")

@@ -2859,10 +2859,11 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
 
 
 def _js_string_after(s: str, anchor: str) -> Optional[str]:
-    """anchor 后第一个 JS 双引号字符串的值（逐字符扫描，尊重 \\" 转义）。
+    """anchor 后第一个 JS 双引号字符串的值（逐字符扫描，转义序列成对跳过）。
 
     gmbd 响应的 content 后还跟着基金元数据 JSON（含大量引号），贪婪正则会越界——
-    fund_holdings 的 `content:"(.*)"` 模式在 gmbd 上不可复用。"""
+    fund_holdings 的 `content:"(.*)"` 模式在 gmbd 上不可复用。
+    契约：返回 JS 字面量**原文**（转义序列不解码）——消费方按正则消费 HTML 无碍。"""
     i = s.find(anchor)
     if i < 0:
         return None
@@ -2913,29 +2914,30 @@ def fund_scale_history(query: str, force_refresh: bool = False) -> list[dict]:
     heads = [re.sub(r"<[^>]+>|\s+|&nbsp;", "", c)
              for c in re.findall(r"<th[^>]*>(.*?)</th>", thead.group(1) if thead else "",
                                  re.S)]
-    required = ("期末总份额", "期末净资产")
-    if not heads or any(not any(k in h for h in heads) for k in required):
-        raise RuntimeError(f"gmbd 表头缺必需列（{code}）：{heads}——上游结构变更，拒绝盲取")
 
     def col(keyword: str) -> Optional[int]:
+        """表头含 keyword 且带单位词（亿份/亿元）才算命中——防「期间申购确认日」类
+        前缀列静默错列（可选列护不住 None 防线，就护在匹配条件上）。"""
         for i, h in enumerate(heads):
-            if keyword in h:
+            if keyword in h and ("亿份" in h or "亿元" in h):
                 return i
         return None
 
     idx = {k: col(k) for k in
-           ("期间申购", "期间赎回", "期末总份额", "期末净资产", "净资产变动率")}
-    if idx["期末总份额"] is None or idx["期末净资产"] is None:
-        raise RuntimeError(f"gmbd 必需列定位失败（{code}）：{heads}")
+           ("期间申购", "期间赎回", "期末总份额", "期末净资产")}
+    idx["净资产变动率"] = next((i for i, h in enumerate(heads) if "变动率" in h), None)
+    if not heads or idx["期末总份额"] is None or idx["期末净资产"] is None:
+        raise RuntimeError(f"gmbd 必需列定位失败（{code}）：{heads}——上游结构变更，拒绝盲取")
 
     def num(text: str) -> Optional[float]:
-        t = re.sub(r"<[^>]+>|\s+|&nbsp;", "", text).strip()
+        t = re.sub(r"<[^>]+>|\s+|&nbsp;", "", text).strip().replace(",", "")
         if t in ("", "---", "--", "—"):
-            return None
+            return None                                  # 缺失形态（募集期行）
         try:
             return float(t.rstrip("%"))
         except ValueError:
-            return None
+            raise RuntimeError(                          # 不可解析≠缺失，显式报错不静默丢值
+                f"gmbd 数值解析失败（{code}，表头 {heads}）：{text!r}") from None
 
     out = []
     for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", table.group(0), re.S):
