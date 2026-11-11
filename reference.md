@@ -7,7 +7,7 @@
 
 # fund-data 基金底层数据工具包 V0.6.2 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层 + **V0.5 全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.6.2（2026-11-11）：208/208 断言实测通过**（L1单元141 · L2端点smoke 42 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 21 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.6.2（2026-11-11）：208/208 断言实测通过**（L1单元141 · L2端点smoke 42 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 21 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
 
 **V0.6.1 基准指数层（quant-excess 端点层收编，kline_daily 一函数三形态）：**
 - 🟢 **B1 `kline_daily`**：指数/股票日线收盘原语——指数名查表（沪深300/中证500/红利/国证2000/中证2000 等 15 指数、20 别名键）/EM secid/6 位股票码；指数走 push2his 主源（F6 分流）+ 腾讯备胎（市场 2 无腾讯码不降级），股票复用 `_tencent_kline` 腾讯通道；20h 缓存键含 lmt 防窗口截断；实测沪深300 十年 2600 根、二调 0 请求
@@ -2867,6 +2867,121 @@ def manager_rank(pages: int = 1, force_refresh: bool = False) -> list[dict]:
     return out
 ```
 
+## 层 7 · 规模全历史（V0.6.2，F10 规模变动 gmbd 通道）
+
+```python
+# pingzhongdata 的规模史只有 ~5 期（图表数据）；gmbd 是 F10「规模变动」页同一
+# 数据源的全量版（募集期→最新季报，实测 000312 53 期），多出期间申购/赎回流量
+# 列——容量衰减判定与"申购驱动 vs 净值驱动"分析的原料。列序动态映射（P-C 同款
+# 防线），新→旧源序反转为旧→新输出（与 snapshot.scale_history 口径一致）。
+
+
+def _js_string_after(s: str, anchor: str) -> Optional[str]:
+    """anchor 后第一个 JS 双引号字符串的值（逐字符扫描，转义序列成对跳过）。
+
+    gmbd 响应的 content 后还跟着基金元数据 JSON（含大量引号），贪婪正则会越界——
+    fund_holdings 的 `content:"(.*)"` 模式在 gmbd 上不可复用。
+    契约：返回 JS 字面量**原文**（转义序列不解码）——消费方按正则消费 HTML 无碍。"""
+    i = s.find(anchor)
+    if i < 0:
+        return None
+    i = s.find('"', i + len(anchor))
+    if i < 0:
+        return None
+    out, j = [], i + 1
+    while j < len(s):
+        ch = s[j]
+        if ch == "\\" and j + 1 < len(s):              # 尊重转义（\" 等成对取用）
+            out.append(s[j:j + 2])
+            j += 2
+            continue
+        if ch == '"':
+            break
+        out.append(ch)
+        j += 1
+    return "".join(out)
+
+
+def fund_scale_history(query: str, force_refresh: bool = False) -> list[dict]:
+    """基金规模全历史（F10 规模变动 gmbd 通道，1 请求，当日缓存）。
+
+    返回 [{date, subscribe_yi 期间申购(亿份), redeem_yi 期间赎回(亿份),
+    shares_yi 期末总份额(亿), nav_yi 期末净资产(亿), nav_change_pct 净资产变动率}]
+    按【日期升序】（源序新→旧已反转，与 snapshot.scale_history 口径一致）；
+    募集期行无申赎流量（---→None）。1 请求 ≈ N 季全史，容量衰减判定从
+    "近 5 期对比"升级为全历史对比；期间申赎流量还可支撑"申购驱动 vs 净值驱动"
+    归因分析。当日缓存 20h。"""
+    code = resolve_fund_code(query)
+    rel = f"scale_history/{code}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=20)
+        if cached is not None:
+            return cached
+    r = ttfund_get("https://fundf10.eastmoney.com/FundArchivesDatas.aspx",
+                   params={"type": "gmbd", "mode": 0, "code": code},
+                   headers={"Referer": f"https://fundf10.eastmoney.com/tsdata_{code}.html"})
+    assert_not_risk_control(r, "tt", f"gmbd {code}")
+    r.raise_for_status()
+    html = _js_string_after(r.text, "content:")
+    if not html:
+        raise RuntimeError(f"gmbd 响应无 content（{code}）：{r.text[:120]!r}")
+    table = re.search(r"<table[^>]*>.*?</table>", html, re.S)
+    if not table:
+        raise RuntimeError(f"gmbd 规模表为空（{code}）——上游结构变更或该基金无规模披露")
+    thead = re.search(r"<thead[^>]*>(.*?)</thead>", table.group(0), re.S)
+    heads = [re.sub(r"<[^>]+>|\s+|&nbsp;", "", c)
+             for c in re.findall(r"<th[^>]*>(.*?)</th>", thead.group(1) if thead else "",
+                                 re.S)]
+
+    def col(keyword: str) -> Optional[int]:
+        """表头含 keyword 且带单位词（亿份/亿元）才算命中——防「期间申购确认日」类
+        前缀列静默错列（可选列护不住 None 防线，就护在匹配条件上）。"""
+        for i, h in enumerate(heads):
+            if keyword in h and ("亿份" in h or "亿元" in h):
+                return i
+        return None
+
+    idx = {k: col(k) for k in
+           ("期间申购", "期间赎回", "期末总份额", "期末净资产")}
+    # 全名匹配：裸词「变动率」会被「份额变动率」类新列抢走（复审建议，防错列）
+    idx["净资产变动率"] = next(
+        (i for i, h in enumerate(heads) if "净资产变动率" in h), None)
+    if not heads or idx["期末总份额"] is None or idx["期末净资产"] is None:
+        raise RuntimeError(f"gmbd 必需列定位失败（{code}）：{heads}——上游结构变更，拒绝盲取")
+
+    def num(text: str) -> Optional[float]:
+        t = re.sub(r"<[^>]+>|\s+|&nbsp;", "", text).strip().replace(",", "")
+        if t in ("", "---", "--", "—"):
+            return None                                  # 缺失形态（募集期行）
+        try:
+            return float(t.rstrip("%"))
+        except ValueError:
+            raise RuntimeError(                          # 不可解析≠缺失，显式报错不静默丢值
+                f"gmbd 数值解析失败（{code}，表头 {heads}）：{text!r}") from None
+
+    out = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", table.group(0), re.S):
+        cells = [re.sub(r"<[^>]+>|\s+|&nbsp;", "", c)
+                 for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S)]
+        if not cells or not re.match(r"\d{4}-\d{2}-\d{2}", cells[0].strip()):
+            continue                                   # 表头行/空行跳过
+        def cell_at(k):
+            i = idx[k]
+            return num(cells[i]) if i is not None and i < len(cells) else None
+        rate = cell_at("净资产变动率")
+        out.append({"date": cells[0].strip(),
+                    "subscribe_yi": cell_at("期间申购"),
+                    "redeem_yi": cell_at("期间赎回"),
+                    "shares_yi": cell_at("期末总份额"),
+                    "nav_yi": cell_at("期末净资产"),
+                    "nav_change_pct": rate})
+    if len(out) < 2:
+        raise RuntimeError(f"gmbd 规模记录不足（{code} 仅 {len(out)} 期）——新基金或结构变更")
+    out.sort(key=lambda x: x["date"])                  # 源序新→旧 → 反转为升序
+    _cache_write(rel, out)
+    return out
+```
+
 ## 层 8 · 基准指数层（V0.6.1，quant-excess 端点层收编：指数名查表 + 日线原语）
 
 ```python
@@ -3028,121 +3143,6 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
             f"去重后 {len(dedup)} 行")
     _cache_write(rel, dedup)
     return dedup
-```
-
-## 层 7 · 规模全历史（V0.6.2，F10 规模变动 gmbd 通道）
-
-```python
-# pingzhongdata 的规模史只有 ~5 期（图表数据）；gmbd 是 F10「规模变动」页同一
-# 数据源的全量版（募集期→最新季报，实测 000312 53 期），多出期间申购/赎回流量
-# 列——容量衰减判定与"申购驱动 vs 净值驱动"分析的原料。列序动态映射（P-C 同款
-# 防线），新→旧源序反转为旧→新输出（与 snapshot.scale_history 口径一致）。
-
-
-def _js_string_after(s: str, anchor: str) -> Optional[str]:
-    """anchor 后第一个 JS 双引号字符串的值（逐字符扫描，转义序列成对跳过）。
-
-    gmbd 响应的 content 后还跟着基金元数据 JSON（含大量引号），贪婪正则会越界——
-    fund_holdings 的 `content:"(.*)"` 模式在 gmbd 上不可复用。
-    契约：返回 JS 字面量**原文**（转义序列不解码）——消费方按正则消费 HTML 无碍。"""
-    i = s.find(anchor)
-    if i < 0:
-        return None
-    i = s.find('"', i + len(anchor))
-    if i < 0:
-        return None
-    out, j = [], i + 1
-    while j < len(s):
-        ch = s[j]
-        if ch == "\\" and j + 1 < len(s):              # 尊重转义（\" 等成对取用）
-            out.append(s[j:j + 2])
-            j += 2
-            continue
-        if ch == '"':
-            break
-        out.append(ch)
-        j += 1
-    return "".join(out)
-
-
-def fund_scale_history(query: str, force_refresh: bool = False) -> list[dict]:
-    """基金规模全历史（F10 规模变动 gmbd 通道，1 请求，当日缓存）。
-
-    返回 [{date, subscribe_yi 期间申购(亿份), redeem_yi 期间赎回(亿份),
-    shares_yi 期末总份额(亿), nav_yi 期末净资产(亿), nav_change_pct 净资产变动率}]
-    按【日期升序】（源序新→旧已反转，与 snapshot.scale_history 口径一致）；
-    募集期行无申赎流量（---→None）。1 请求 ≈ N 季全史，容量衰减判定从
-    "近 5 期对比"升级为全历史对比；期间申赎流量还可支撑"申购驱动 vs 净值驱动"
-    归因分析。当日缓存 20h。"""
-    code = resolve_fund_code(query)
-    rel = f"scale_history/{code}.json"
-    if not force_refresh:
-        cached = _cache_read(rel, max_age_hours=20)
-        if cached is not None:
-            return cached
-    r = ttfund_get("https://fundf10.eastmoney.com/FundArchivesDatas.aspx",
-                   params={"type": "gmbd", "mode": 0, "code": code},
-                   headers={"Referer": f"https://fundf10.eastmoney.com/tsdata_{code}.html"})
-    assert_not_risk_control(r, "tt", f"gmbd {code}")
-    r.raise_for_status()
-    html = _js_string_after(r.text, "content:")
-    if not html:
-        raise RuntimeError(f"gmbd 响应无 content（{code}）：{r.text[:120]!r}")
-    table = re.search(r"<table[^>]*>.*?</table>", html, re.S)
-    if not table:
-        raise RuntimeError(f"gmbd 规模表为空（{code}）——上游结构变更或该基金无规模披露")
-    thead = re.search(r"<thead[^>]*>(.*?)</thead>", table.group(0), re.S)
-    heads = [re.sub(r"<[^>]+>|\s+|&nbsp;", "", c)
-             for c in re.findall(r"<th[^>]*>(.*?)</th>", thead.group(1) if thead else "",
-                                 re.S)]
-
-    def col(keyword: str) -> Optional[int]:
-        """表头含 keyword 且带单位词（亿份/亿元）才算命中——防「期间申购确认日」类
-        前缀列静默错列（可选列护不住 None 防线，就护在匹配条件上）。"""
-        for i, h in enumerate(heads):
-            if keyword in h and ("亿份" in h or "亿元" in h):
-                return i
-        return None
-
-    idx = {k: col(k) for k in
-           ("期间申购", "期间赎回", "期末总份额", "期末净资产")}
-    # 全名匹配：裸词「变动率」会被「份额变动率」类新列抢走（复审建议，防错列）
-    idx["净资产变动率"] = next(
-        (i for i, h in enumerate(heads) if "净资产变动率" in h), None)
-    if not heads or idx["期末总份额"] is None or idx["期末净资产"] is None:
-        raise RuntimeError(f"gmbd 必需列定位失败（{code}）：{heads}——上游结构变更，拒绝盲取")
-
-    def num(text: str) -> Optional[float]:
-        t = re.sub(r"<[^>]+>|\s+|&nbsp;", "", text).strip().replace(",", "")
-        if t in ("", "---", "--", "—"):
-            return None                                  # 缺失形态（募集期行）
-        try:
-            return float(t.rstrip("%"))
-        except ValueError:
-            raise RuntimeError(                          # 不可解析≠缺失，显式报错不静默丢值
-                f"gmbd 数值解析失败（{code}，表头 {heads}）：{text!r}") from None
-
-    out = []
-    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", table.group(0), re.S):
-        cells = [re.sub(r"<[^>]+>|\s+|&nbsp;", "", c)
-                 for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S)]
-        if not cells or not re.match(r"\d{4}-\d{2}-\d{2}", cells[0].strip()):
-            continue                                   # 表头行/空行跳过
-        def cell_at(k):
-            i = idx[k]
-            return num(cells[i]) if i is not None and i < len(cells) else None
-        rate = cell_at("净资产变动率")
-        out.append({"date": cells[0].strip(),
-                    "subscribe_yi": cell_at("期间申购"),
-                    "redeem_yi": cell_at("期间赎回"),
-                    "shares_yi": cell_at("期末总份额"),
-                    "nav_yi": cell_at("期末净资产"),
-                    "nav_change_pct": rate})
-    if len(out) < 2:
-        raise RuntimeError(f"gmbd 规模记录不足（{code} 仅 {len(out)} 期）——新基金或结构变更")
-    out.sort(key=lambda x: x["date"])                  # 源序新→旧 → 反转为升序
-    _cache_write(rel, out)
-    return out
 ```
 
 ## 使用示例
