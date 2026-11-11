@@ -2925,7 +2925,9 @@ def fund_scale_history(query: str, force_refresh: bool = False) -> list[dict]:
 
     idx = {k: col(k) for k in
            ("期间申购", "期间赎回", "期末总份额", "期末净资产")}
-    idx["净资产变动率"] = next((i for i, h in enumerate(heads) if "变动率" in h), None)
+    # 全名匹配：裸词「变动率」会被「份额变动率」类新列抢走（复审建议，防错列）
+    idx["净资产变动率"] = next(
+        (i for i, h in enumerate(heads) if "净资产变动率" in h), None)
     if not heads or idx["期末总份额"] is None or idx["期末净资产"] is None:
         raise RuntimeError(f"gmbd 必需列定位失败（{code}）：{heads}——上游结构变更，拒绝盲取")
 
