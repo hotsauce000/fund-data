@@ -1053,6 +1053,146 @@ def test_l1_offline():
         fd.ttfund_get = _orig_get8
         fd._cache_read, fd._cache_write = _cw8
 
+    # ── 盲区补测：plain_text_map 渲染（白话输出是产品门面，此前零覆盖）──
+    _pmap = {"fund": "测试白酒基金", "period": "2026-09-30", "topn_weight_pct": 86.0,
+             "themes": [("白酒", 86.0), ("食品饮料", 40.0)],
+             "detail": [
+                 {"stock_name": "贵州茅台", "nav_pct": 9.9,
+                  "quote": {"price": 1439.0, "change_pct": -0.4, "pe_ttm": 22.5, "pb": 8.8}},
+                 {"stock_name": "五粮液", "nav_pct": 5.2,
+                  "quote": {"price": 128.0, "change_pct": 1.1, "pe_ttm": -3.0, "pb": 4.2}}],
+             "pe_median_profitable": 22.5,
+             "failed_stocks": [{"name": "未分类股"}], "unclassified_weight_pct": 3.5}
+    txt = fd.plain_text_map(_pmap)
+    check("L1", "白话地图-标题/一句话/主题排行/PE中位数",
+          "《测试白酒基金 里装了什么》（2026-09-30 季报，前十大占净值 86.0%）" in txt
+          and "主要是白酒（相关持仓权重约 86%）" in txt
+          and "主题词排行: 白酒 86%、食品饮料 40%" in txt
+          and "盈利股 PE 中位数 22.5 倍" in txt and "不高于30 倍参考线" in txt,
+          f"{len(txt)} 字符")
+    check("L1", "白话地图-亏损股PE文案/未分类警示/明细行",
+          "亏损" in txt and "9.9%" in txt and "1439.00" in txt
+          and "⚠ 1 只未参与主题聚合（合计权重 3.5%）: 未分类股" in txt,
+          "负 PE→「亏损」、权重/价格格式、failed_stocks 渲染")
+    _disp = fd.plain_text_map({**_pmap, "themes": [("小主题", 3.0)], "detail": []})
+    check("L1", "白话地图-分散持仓分支",
+          "持仓分散，无明显单一主题。" in _disp and "主题词排行" not in _disp,
+          "top 权重<5 → 分散文案")
+
+    # ── 盲区补测：fund_new_issues 解析/分页/校验（此前仅缓存致盲的真数据调用）──
+    def _ni_page(items, record):
+        arr = ",".join('["01234%s","新发基金%s","测试公司","80000999","混合型-偏股",'
+                       '"2026.09.01-09.28","0.15%%","经理甲"]' % (str(i).zfill(2), i)
+                       for i in items)
+        return ('var datas:[' + arr + '],record:' + str(record) + ",pages:9,curpage:1")
+
+    class _NR:
+        def __init__(self, body):
+            self.status_code = 200
+            self.content = body.encode("utf-8")
+            self.text = body
+
+        def raise_for_status(self):
+            return None
+
+    _orig_get9, _cw9 = fd.ttfund_get, (fd._cache_read, fd._cache_write)
+    _pages = []
+    try:
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda *a, **k: None
+
+        def _get_paged(url, params=None, headers=None, **k):
+            pg = int(str(params.get("page", "1,50")).split(",")[0])
+            _pages.append(pg)
+            return _NR(_ni_page([pg * 10, pg * 10 + 1], 4) if pg == 1
+                       else _ni_page([pg * 10, pg * 10 + 1], 4))
+
+        fd.ttfund_get = _get_paged
+        got = []
+        fd._cache_write = lambda rel, out: got.append((rel, out))
+        # 两页聚合（record=4，每页 2 条 → 第 3 页拉满后 break 于 len>=total 之前?）
+        # record=4：p1→2条 p2→4条 → 第2页后 len(4)>=4 break，共 2 页
+        out = fd.fund_new_issues(force_refresh=True)
+        check("L1", "新发-两页聚合+record达标终止+费率剥离",
+              len(out) == 4 and len(_pages) == 2
+              and out[0]["fee_pct"] == 0.15 and out[0]["company_id"] == "80000999"
+              and got and got[0][0].startswith("new_issues"),
+              f"{len(out)} 条/{len(_pages)} 页（record=4 达标 break），费率 0.15%→0.15")
+        _seq = {"1": _ni_page([1], 3), "2": "var datas:[],record:3,pages:9,curpage:2"}
+        fd.ttfund_get = lambda url, params=None, headers=None, **k: _NR(
+            _seq[str(params["page"]).split(",")[0]])
+        expect_raise("L1", "新发-截断拒绝",
+                     lambda: fd.fund_new_issues(force_refresh=True), "截断拒绝")
+        fd.ttfund_get = lambda *a, **k: _NR("var datas:[],record:9,pages:9,curpage:1")
+        expect_raise("L1", "新发-空列表拒绝(截断拒绝形态)",
+                     lambda: fd.fund_new_issues(force_refresh=True), "截断拒绝")
+        fd.ttfund_get = lambda *a, **k: _NR("var no_datas_here,record:9")
+        expect_raise("L1", "新发-无datas报错",
+                     lambda: fd.fund_new_issues(force_refresh=True), "无 datas")
+        fd.ttfund_get = lambda *a, **k: _NR('var datas:[["a"]],records:9')
+        expect_raise("L1", "新发-无record总数报错",
+                     lambda: fd.fund_new_issues(force_refresh=True), "record 总数")
+    finally:
+        fd.ttfund_get = _orig_get9
+        fd._cache_read, fd._cache_write = _cw9
+
+    # ── 盲区补测：fund_company 公司页解析（_num_near/title 清理/去重/防线）──
+    _co = ("<html><title>中欧基金管理有限公司_主页 _ 天天基金网</title><body>"
+           "管理规模：<span>7,070.33</span>亿元"
+           "<div>基金数量：<span>540</span>只</div><div>经理人数：<span>73</span>人</div>"
+           '<a href="https://fund.eastmoney.com/166002.html">中欧新蓝筹</a>'
+           '<a href="https://fund.eastmoney.com/166002.html">中欧新蓝筹</a>'
+           '<a href="https://fund.eastmoney.com/000001.html">8</a>'
+           '<a href="https://fund.eastmoney.com/161725.html">基金品种</a>'
+           + "<!--" + "x" * 10200 + "--></body></html>")
+    _orig_get10, _cw10 = fd.ttfund_get, (fd._cache_read, fd._cache_write)
+    try:
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda *a, **k: None
+        fd.ttfund_get = lambda *a, **k: _NR(_co)
+        co = fd.fund_company("80000001", force_refresh=True)
+        check("L1", "公司页-千分位/标题清理/去重黑名单",
+              co["name"] == "中欧基金管理有限公司" and co["scope_yi"] == 7070.33
+              and co["fund_count"] == 540 and co["manager_count"] == 73
+              and len(co["funds"]) == 1 and co["funds"][0]["code"] == "166002",
+              f"7,070.33→{co['scope_yi']}，标题下划线截断，重复码/数字名/黑名单剔除")
+        fd.ttfund_get = lambda *a, **k: _NR("<html><title>跳转</title></html>")
+        expect_raise("L1", "公司页-小页防线",
+                     lambda: fd.fund_company("80000002", force_refresh=True), "公司页异常")
+        fd.ttfund_get = lambda *a, **k: _NR("<html><title>" + "y" * 10200 +
+                                            "</title><body>无任何字段</body></html>")
+        expect_raise("L1", "公司页-必需字段缺失拒绝",
+                     lambda: fd.fund_company("80000003", force_refresh=True), "字段解析失败")
+    finally:
+        fd.ttfund_get = _orig_get10
+        fd._cache_read, fd._cache_write = _cw10
+
+    # ── 盲区补测：fund_list 解析结构 + <5000 防线（30 天缓存主键表）──
+    _orig_get11, _cw11 = fd.ttfund_get, (fd._cache_read, fd._cache_write)
+    _mem_backup = list(fd._FUND_LIST_MEM)
+    try:
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda *a, **k: None
+        rows_js = "[" + ",".join(
+            '["c%05d","p%05d","基金%05d","混合型-偏股"]' % (i, i, i)
+            for i in range(12)) + "]"
+        fd.ttfund_get = lambda *a, **k: _NR("var r=" + rows_js)
+        expect_raise("L1", "清单-<5000拒绝缓存脏数据",
+                     lambda: fd.fund_list(force_refresh=True), "疑似上游结构变更")
+        rows_js = "[" + ",".join(
+            '["%06d","p%06d","基金%06d","混合型-偏股"]' % (i, i, i)
+            for i in range(5003)) + "]"
+        fd.ttfund_get = lambda *a, **k: _NR("var r=" + rows_js)
+        got_list = fd.fund_list(force_refresh=True)
+        check("L1", "清单-解析结构与写缓存",
+              len(got_list) == 5003 and got_list[0]["code"] == "000000"
+              and got_list[0]["type"] == "混合型-偏股" and got_list[-1]["pinyin"] == "p005002",
+              f"{len(got_list)} 条全解析")
+    finally:
+        fd.ttfund_get = _orig_get11
+        fd._cache_read, fd._cache_write = _cw11
+        fd._FUND_LIST_MEM[:] = _mem_backup          # mock 清单不得残留进程内存
+
 
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
 def test_l2_smoke():
