@@ -69,7 +69,7 @@ DESCRIPTION = (
     "抱团度(巨潮)、19门类行业配置；"
     "【经理与专项】经理画像(在管清单/任期/回报)、排行、持续性矩阵、固收+画像、"
     "单基金规模(ENDNAV)、规模全历史(53期含申赎流量)、QDII溢价、重仓探测；"
-    "【基准指数】指数与股票日线(沪深300等15指数,十五年全史,1请求)。"
+    "【基准指数】指数与股票日线(沪深300等15指数,十年全史,1请求)。"
     "请求预算制防封(铁律见下)。"
     "仅在需要调用数据接口取数时使用：基金概念解释、投资观点讨论等无需取数的话题不要加载本skill。")
 
@@ -85,7 +85,7 @@ name: fund-data
 display_name: 基金鹰眼 FundHawk · 全域基金数据引擎
 display_name_en: FundHawk · Full-Spectrum Fund Data Engine
 description: {DESCRIPTION}
-description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集、白话持仓穿透地图、24792 只全市场排行、经理画像与抱团度、十年指数日线与 53 期规模全史——零 key 零登录，请求预算制防封，208 断言实测。让每只基金在你眼前透明。
+description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集、白话持仓穿透地图、24792 只全市场排行、经理画像与抱团度、十年指数日线与 53 期规模全史——零 key 零登录，请求预算制防封，分层断言全绿。让每只基金在你眼前透明。
 description_en: The full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), plain-language holdings maps, 24,792-fund market rankings, manager profiles and crowding, 10-year index klines, 53-period scale history. Zero keys, zero login, 208 assertions green. Every fund, transparent.
 author: hotsauce000
 origin: custom
@@ -94,7 +94,7 @@ version: {VERSION}
 
 # fund-data 路由层 V{VERSION}
 
-本文件是**路由层**（≈3K token，激活只加载本文件）。细节/坑区/内嵌代码在同目录 **reference.md（按需读取）**；运行代码 `fund_data.py`（import 用，勿通读）：
+本文件是**路由层**（≈4K token，激活只加载本文件）。细节/坑区/内嵌代码在同目录 **reference.md（按需读取）**；运行代码 `fund_data.py`（import 用，勿通读）：
 
 ```python
 import sys
