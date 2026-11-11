@@ -1,4 +1,4 @@
-# fund-data 完整参考（reference.md · 按需读取层）V0.5.0
+# fund-data 完整参考（reference.md · 按需读取层）V0.6.0
 
 > 本文件按需读取：调试 / 扩展 / 排查坑时才打开，勿随 skill 激活预加载。
 > 路由与签名速查见 SKILL.md；本文件内嵌代码与 fund_data.py 同源直拼（构建时生成）。
@@ -8,6 +8,17 @@
 # fund-data 基金底层数据工具包 V0.5.0 模块全档
 
 天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层 + **V0.5 全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.5.0（2026-11-10）：148/148 断言实测通过**（L1单元96 · L2端点smoke 30 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×8），覆盖 15 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+
+**V0.6.0 经理画像与专项组装层（八函数，源全部一手实测钉死）：**
+- 🟢 **`rank_persistence`**：fund_rank 缓存上算各周期同类分位（≥值口径，桶内最高=100），纳入门槛 ytd+1y 且 ≥4 周期；consistent=全周期 ≥75 分位——零请求「长牛」初筛
+- 🟢 **`fund_scale`**：移动端 `FundMNBasicInformation.ENDNAV` 元精确值（161725 锚 209.47 亿分毫不差，1 请求）——rankhandler/E1 均无规模列（坑P22），**全市场规模榜无聚合源**，榜单场景由调用方对候选逐只富集
+- 🟢 **`bond_plus_profile`**：快照组装权益仓位带（偏债<30/平衡/偏股≥60）+ 回撤带（≤5优/≤10良/≤20中）+ 利率敏感标注（债券≥50% 联动 cb_yield_curve/credit_spread）——零新请求
+- 🟢 **`qdii_premium`**：腾讯市价 ÷ E6 净值 − 1（N 只=2 请求），溢价随 nav_date 一起解读（净值 T-1/T-2 滞后口径，剧烈行情会高估）
+- 🟢 **`nav_divergence`**：净值收益 vs 上季重仓加权收益（腾讯日K前复权，新增 `_tencent_kline` 通道）→ 背离度；冷启 ≤12 请求、当日重跑 0~2；|背离|≤5 一致/≤10 关注/>10 疑似调仓；实测白酒 0.4pp「持仓一致」
+- 🟢 **`fund_manager` / `manager_rank`**：经理主页服务端直出（侯昊：任职9年+82天/现任461.32亿/任期回报92.81%/mgrlists 在管清单）+ dt=14 排行（record≈4384 强校验，50 条/页）；**服务端仅姓名序、姓名→ID 无公开索引（坑P23 诚实边界）**——用基金码转接或经理ID
+- 🔴 **P22 rankhandler 无规模列**：[17][18]=自定义区间收益、[19][20]=申购费原价/折扣价、[22]=优惠费率（双基金锚校准）——规模只能走移动端 ENDNAV
+- 🔴 **P23 经理接口遗存**：旧名单页 404；dt=15 建议接口退化为固定 10 条样本（参数全忽略）；dt=14 的 sc 只认 XML 元素名（abbname），20 个规模/回报候选码全无效；pn 上限 50（88 页=超预算）
+- 🔴 **P24 FOF 底层基金无结构化接口**：东财网页 F10/App/蛋卷/好买/新浪五源实测均只有股票直持仓——基金投资明细仅存季报 PDF，诚实边界
 
 **V0.5.0 全市场数据层（四端点 + cninfo 第四线基础设施，防封为第一约束）：**
 - 🟢 **N1 `fund_rank`**：rankhandler.aspx 全市场 24792 只 **1 请求**（鉴权=Referer fundranking.html，无 cookie）；top=None 全量 20h 缓存，fund_type/sort/ascending 全部本地执行=组合筛选 0 请求；签名上不存在翻页参数（496 页逐页爬的封禁路径从 API 形态上消失）；None 值恒排末尾；字段序经官方 syl 四点校准（161725 近1月/3月/6月/1年分毫不差）
@@ -97,6 +108,12 @@
 | N2 | `fund_new_issues()` | 在发/新成立全量 + 公司名→ID 映射 | .../data/FundNewIssue.aspx | ~7页,缓存0 |
 | N3 | `fund_company(q)` | 公司画像：规模/基金数/经理数/旗下清单（q=8位ID/基金码/公司名） | .../company/{id}.html | 1（基金码+1） |
 | N4 | `fund_crowding(rdate)` / `fund_industry_allocation(rdate)` | 季度重仓股聚合（抱团度）/ 全市场19门类行业配置 | webapi.cninfo.com.cn（第四线） | 1/季,90天缓存 |
+| V6 | `rank_persistence(top,fund_type)` | 业绩持续性矩阵：各周期同类分位+评分+consistent（零请求长牛初筛） | 本地(fund_rank缓存) | 0 |
+| V6 | `fund_scale(q)` | 单基金最新规模（ENDNAV 元精确值）——重叠预警/榜单候选富集 | fundmobapi | 1 |
+| V6 | `bond_plus_profile(q)` | 固收+画像：权益仓位带/回撤带/利率敏感标注 | 本地(快照) | 0 |
+| V6 | `qdii_premium(codes)` | 场内溢价（市价÷净值-1，净值滞后口径标注） | 腾讯+E6 | N只=2 |
+| V6 | `nav_divergence(q)` | 重仓探测：净值 vs 上季重仓加权收益背离度（疑似调仓） | 快照+E4a+腾讯日K | 冷启≤12 |
+| V6 | `fund_manager(q)` / `manager_rank(pages)` | 经理画像（任职/规模/回报/在管清单）/ 排行（姓名序） | eastmoney manager 页+dt=14 | 1·50/页 |
 | 本地 | `adjusted_nav(recs)` | 复权净值（分红再投口径，链式） | 零网络 | 0 |
 | 本地 | `fund_metrics(snap,s,e)` | 区间收益/年化/最大回撤/波动/夏普/卡玛/管理费率标注 | 零网络 | 0 |
 | 本地 | `fund_dca_backtest(snap,...)` | 定投回测 + **XIRR 分期真年化**（naive 对照保留） | 零网络 | 0 |
@@ -138,6 +155,9 @@
 | P19 rankhandler 风控形态 | 被拦=200+「无访问权限」（**无 403**），状态码查不出 | `assert_rankhandler` 内容级断言（前500字符）+ 计入 tt 熔断 |
 | P20 cninfo enckey | Accept-Enckey=AES-CBC(秒级时间戳,固定密钥)；451/"token null"=时效**非风控** | node 子进程计算；451 刷新重试一次不计熔断，仍拒=时钟漂移 |
 | P21 r.text 编码 | 无 charset 头默认 ISO-8859-1，中文正则全失灵 | 新端点一律 `r.content.decode("utf-8", errors="replace")` |
+| P22 rankhandler 无规模列 | [17][18]=自定义区间收益、[19][20]=申购费原/折扣价、[22]=优惠费率——没有规模 | 单基金规模走移动端 ENDNAV（`fund_scale`）；全市场榜无聚合源=诚实边界 |
+| P23 经理接口遗存 | 旧名单页404；dt=15 退化为固定10条样本；dt=14 sc 只认 XML 元素名（20 候选全无效）、pn≤50 | 经理ID/基金码两路进 `fund_manager`；排行如实标注姓名序；姓名→ID 无索引 |
+| P24 FOF 底层无接口 | 五源（东财F10/App/蛋卷/好买/新浪）均只有股票直持仓 | 基金投资明细仅存季报 PDF——诚实边界，FOF 驾驶舱降级为池+仓位史+直持仓穿透 |
 
 ## Prerequisites
 
@@ -154,7 +174,7 @@ pip install requests
 ```python
 # -*- coding: utf-8 -*-
 """
-fund-data V0.5.0 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层）
+fund-data V0.6.0 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤2 请求（1×pingzhongdata，0~1×lsjz）
@@ -213,7 +233,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 
 FUND_CACHE_DIR = Path.home() / ".fund_data_cache"
@@ -763,7 +783,8 @@ def fund_snapshot(query: str, force_refresh: bool = False) -> dict:
         "period_returns_pct": {                        # 官方口径收益率（也是测试 ground truth）
             "1month": _to_float(v.get("syl_1y")), "3month": _to_float(v.get("syl_3y")),
             "6month": _to_float(v.get("syl_6y")), "1year": _to_float(v.get("syl_1n"))},
-        "manager": {"name": mgr_raw.get("name"), "tenure_start": mgr_raw.get("workTime"),
+        "manager": {"name": mgr_raw.get("name"), "manager_id": mgr_raw.get("id"),
+                    "tenure_start": mgr_raw.get("workTime"),
                     "fund_size_yi": mgr_raw.get("fundSize"),
                     "return_pct": mgr_raw.get("profit"), "star": mgr_raw.get("star")},
         "nav_history": nav,                            # 单位净值全史（含每日分红事件）
@@ -2464,6 +2485,364 @@ def fund_industry_allocation(rdate: str = "", force_refresh: bool = False) -> li
     return out
 ```
 
+## V0.6 经理画像与专项组装层（持续性/规模/固收+/溢价/重仓探测/经理三件套）
+
+```python
+# 探针结论（2026-11-10 实测钉死）：
+#   · rankhandler 行【无规模列】——[17][18]=自定义区间收益、[19][20]=申购费原价/折扣价、
+#     [22]=优惠费率（161725/110022 双锚校准）；单基金规模走移动端 ENDNAV（209.47亿精确锚）
+#   · 经理数据两源全通：主页 manager/{id}.html 服务端直出（mgrlists 在管清单+任职+规模+回报）、
+#     dt=14 排行（4384 位，pn≤50 且服务端仅姓名序）；姓名→ID 无公开索引（坑P23 诚实边界）
+#   · FOF 底层基金明细五源实测无结构化接口（坑P24）——只有季报 PDF 有，诚实边界
+
+
+def _tencent_kline(stock_code: str, bars: int = 90,
+                   force_refresh: bool = False) -> list[dict]:
+    """腾讯日K前复权收盘序列 [{date, close}]（nav_divergence 重仓股区间收益用）。
+
+    腾讯线（不封 IP）+ P12 直连 opener 同款 + TENCENT_REQUEST_COUNT 审计入账；
+    仅支持 6 位 A 股码（港股 5 位码由调用方过滤）；当日缓存。"""
+    pre = _tencent_prefix(stock_code)
+    rel = f"kline/{pre}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=20)
+        if cached is not None:
+            return cached
+    url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
+           f"param={pre},day,,,{int(bars)},qfq")
+    req = urllib.request.Request(url, headers={"Referer": "https://gu.qq.com/"})
+    try:
+        TENCENT_REQUEST_COUNT[0] += 1
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        raw = opener.open(req, timeout=10).read().decode("utf-8")
+    except Exception as e:
+        raise RuntimeError(f"腾讯日K请求失败({pre}): {e}") from e
+    try:
+        d = json.loads(raw)
+    except ValueError as e:
+        raise RuntimeError(f"腾讯日K非JSON({pre}): {raw[:80]!r}") from e
+    node = (d.get("data") or {}).get(pre) or {}
+    rows = node.get("qfqday") or node.get("day") or []
+    out = [{"date": x[0], "close": float(x[2])} for x in rows if len(x) >= 3]
+    if len(out) < 2:
+        raise RuntimeError(f"腾讯日K空返回({pre}): {str(d)[:100]}")
+    _cache_write(rel, out)
+    return out
+
+
+def rank_persistence(top: int = 20, fund_type: str = "all",
+                     force_refresh: bool = False) -> list[dict]:
+    """业绩持续性矩阵（零请求）：排行缓存上算各周期同类分位与评分。
+
+    周期 = 1m/3m/6m/ytd/1y/2y/3y；分位在【同类别桶内】算（vs 全市场更公平）；
+    纳入门槛：≥4 个周期有值且必须含 ytd 与 1y（过短的新基不参与）。
+    score_pct = 各周期分位均值；consistent = 全部已覆盖周期 ≥75 分位。
+    top=None 返回全部（按 score 降序）。组合初筛的「长牛」候选直接取前 N。"""
+    if top is not None and top < 1:
+        raise ValueError(f"top 须 ≥1 或 None（全部），收到 {top!r}")
+    rows = fund_rank(fund_type=fund_type, force_refresh=force_refresh)
+    horizons = {"1m": "ret_1m_pct", "3m": "ret_3m_pct", "6m": "ret_6m_pct",
+                "ytd": "ret_ytd_pct", "1y": "ret_1y_pct", "2y": "ret_2y_pct",
+                "3y": "ret_3y_pct"}
+    # 按类别桶分组算分位（本地，零请求）
+    buckets: dict[str, list] = {}
+    for r in rows:
+        buckets.setdefault(_bucket_of(r.get("fund_type")) or "_", []).append(r)
+    import bisect
+    pct_by_code: dict[str, dict] = {}
+    for group in buckets.values():
+        for h, key in horizons.items():
+            vals = sorted(x.get(key) for x in group if x.get(key) is not None)
+            if not vals:
+                continue
+            for x in group:
+                v = x.get(key)
+                if v is None:
+                    continue
+                # ≥该值的比例：桶内最高=100、并列同值同分位（排名分位口径）
+                pct = bisect.bisect_right(vals, v) / len(vals) * 100.0
+                pct_by_code.setdefault(x["code"], {})[h] = round(pct, 1)
+    out = []
+    for r in rows:
+        p = pct_by_code.get(r["code"]) or {}
+        if "ytd" not in p or "1y" not in p or len(p) < 4:
+            continue                       # 纳入门槛：含 ytd+1y 且 ≥4 周期
+        score = sum(p.values()) / len(p)
+        out.append({"code": r["code"], "name": r["name"], "fund_type": r.get("fund_type"),
+                    "score_pct": round(score, 1), "horizon_pct": p,
+                    "covered": len(p),
+                    "consistent": all(v >= 75.0 for v in p.values())})
+    out.sort(key=lambda x: -x["score_pct"])
+    return out if top is None else out[:int(top)]
+
+
+_MOB_COMMON = {"deviceid": "Wap", "plat": "Wap", "product": "EFund", "version": "6.2.8"}
+
+
+def fund_scale(query: str, force_refresh: bool = False) -> dict:
+    """单基金最新规模（1 请求）：移动端 ENDNAV 精确值，20h 缓存。
+
+    rankhandler/E1 都没有规模列（坑P22）——这是全市场唯一免费单基金规模源；
+    ENDNAV 为元精确值（161725 锚 20946896763.35 = 209.47 亿分毫不差）。
+    全市场【规模榜】无聚合源 → 榜单场景由调用方对候选集逐只富集（预算自控），
+    规模重叠预警同理（两只基金 = 2 请求）。"""
+    code = resolve_fund_code(query)
+    rel = f"scale/{code}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=20)
+        if cached is not None:
+            return cached
+    r = ttfund_get("https://fundmobapi.eastmoney.com/FundMNewApi/FundMNBasicInformation",
+                   params={**_MOB_COMMON, "FCODE": code}, timeout=15)
+    assert_not_risk_control(r, "tt", f"fund_scale {code}")
+    try:
+        d = (r.json() or {}).get("Datas") or {}
+    except ValueError as e:
+        raise RuntimeError(f"fund_scale {code} 返回非JSON: {r.content[:80]!r}") from e
+    endnav = d.get("ENDNAV")
+    if endnav in (None, "", 0):
+        raise RuntimeError(f"fund_scale {code} 无 ENDNAV（未披露或结构变更）")
+    name = next((f["name"] for f in fund_list() if f["code"] == code), None)
+    out = {"code": code, "name": name, "scale_yi": round(float(endnav) / 1e8, 2),
+           "company": d.get("JJGS"), "source": "eastmoney/fundmobapi"}
+    _cache_write(rel, out)
+    return out
+
+
+def bond_plus_profile(query: str, force_refresh: bool = False) -> dict:
+    """固收+画像（零新请求）：权益仓位带 + 回撤控制带 + 利率敏感度标签。
+
+    口径：股票占净比（资产配置最新披露期）→ 偏债(<30) / 平衡(30~60) / 偏股(≥60)；
+    回撤带按 fund_metrics 最大回撤绝对值：≤5 优 / ≤10 良 / ≤20 中 / >20 弱；
+    债券占净比 ≥50% 附加利率敏感标注（联动 cb_yield_curve / credit_spread）。"""
+    snap = fund_snapshot(query)
+    aa = snap.get("asset_allocation") or []
+    if not aa:
+        raise RuntimeError(f"固收+画像需要资产配置（{snap.get('name')}）——Data_assetAllocation 缺失")
+    latest = aa[-1]
+    stock_pct = latest.get("股票占净比")
+    bond_pct = latest.get("债券占净比")
+    if stock_pct is None:
+        raise RuntimeError(f"资产配置缺「股票占净比」（{snap.get('name')}）——上游结构变更")
+    m = fund_metrics(snap)
+    mdd = abs(m.get("max_drawdown_pct") or 0.0)
+    grade = "偏股" if stock_pct >= 60 else ("平衡" if stock_pct >= 30 else "偏债")
+    dd_band = ("优" if mdd <= 5 else "良" if mdd <= 10 else "中" if mdd <= 20 else "弱")
+    rate_note = None
+    if (bond_pct or 0) >= 50:
+        rate_note = f"债券占净比 {bond_pct}%——利率敏感，联动 cb_yield_curve / credit_spread 评估债底"
+    pos = snap.get("stock_position_history") or []
+    return {"code": snap["_meta"]["code"], "name": snap.get("name"),
+            "as_of": latest.get("_date"), "stock_pct": stock_pct, "bond_pct": bond_pct,
+            "grade": grade, "max_drawdown_pct": m.get("max_drawdown_pct"),
+            "volatility_ann_pct": m.get("annualized_volatility_pct"),
+            "drawdown_band": dd_band, "rate_note": rate_note,
+            "position_latest_pct": pos[-1]["position_pct"] if pos else None}
+
+
+def qdii_premium(codes: list, force_refresh: bool = False) -> list[dict]:
+    """QDII/ETF 场内溢价（N 只=2 请求）：腾讯市价 ÷ 最新净值 − 1。
+
+    ⚠️ 口径：E6 净值为 T-1/T-2（坑P16 日历差），行情剧烈时段溢价会被高估——
+    结果必须连同 nav_date 一起解读。仅对场内可交易码有意义（5/16 开头）。
+    返回按溢价降序；净值缺失的只标注 error 不中断。"""
+    codes = [str(c).strip() for c in codes if str(c).strip()]
+    if not codes:
+        raise ValueError("codes 不能为空")
+    if len(codes) > 50:
+        raise ValueError(f"单次 ≤50 只（批量净值上限），收到 {len(codes)}")
+    q = tencent_quote(codes)
+    e6 = {x["code"]: x for x in fund_realtime_nav(codes)}
+    out = []
+    for c in codes:
+        tq = q.get(c) or {}
+        navrow = e6.get(c) or {}
+        price, nav = tq.get("price"), navrow.get("nav")
+        row = {"code": c, "name": tq.get("name") or navrow.get("name"),
+               "price": price, "nav": nav, "nav_date": navrow.get("nav_date")}
+        if price and nav:
+            row["premium_pct"] = round((float(price) / float(nav) - 1) * 100, 2)
+            row["note"] = (f"净值 {navrow.get('nav_date')}（T-1/T-2 口径），"
+                           "剧烈行情时段溢价可能被高估")
+        else:
+            row["premium_pct"] = None
+            row["note"] = "市价或净值缺失（非场内码/未披露）"
+        out.append(row)
+    out.sort(key=lambda x: -(x["premium_pct"] if x["premium_pct"] is not None else -9e9))
+    return out
+
+
+def nav_divergence(query: str, force_refresh: bool = False) -> dict:
+    """重仓探测：净值收益 vs 上季重仓加权收益的背离度（疑似调仓信号）。
+
+    窗口 = 最新披露报告期末 → 最新净值日；重仓股走腾讯日K前复权（当日缓存）；
+    权重 = 占净值比不归一（coverage_pct 如实报告前十覆盖度）。
+    预算：冷启 ≤12 请求（快照1+持仓1+K线≤10）；当日重跑 0~2。
+    |背离|≤5pp 持仓一致 / ≤10pp 轻微背离（关注）/ >10pp 疑似调仓或风格漂移。
+    仅支持 6 位 A 股重仓码（港股 5 位码跳过并在 skipped 标注）。
+    ⚠️ 披露滞后：季报持仓天然滞后，背离≠一定调仓（也可能是持仓内涨跌分化）。"""
+    snap = fund_snapshot(query)
+    adj = adjusted_nav(snap["nav_history"])
+    hold = fund_holdings(query)
+    period = hold[0]["period"]
+    rows = [h for h in hold if h["period"] == period]
+    base = next((a for a in adj if a["date"] > period), None)
+    if base is None:
+        raise RuntimeError(f"报告期 {period} 之后无净值（{snap.get('name')}），无法算窗口收益")
+    base_idx = adj.index(base)
+    if base_idx == 0:
+        raise RuntimeError(f"报告期 {period} 前无净值基点（{snap.get('name')}）")
+    fund_ret = (adj[-1]["adj_nav"] / adj[base_idx - 1]["adj_nav"] - 1) * 100
+    days_span = (date.fromisoformat(adj[-1]["date"]) - date.fromisoformat(period)).days
+    bars = min(days_span + 20, 250)
+    weighted, coverage, skipped, used = 0.0, 0.0, [], 0
+    for h in rows:
+        w = (h.get("nav_pct") or 0) / 100.0
+        code6 = str(h.get("stock_code") or "")
+        if not re.fullmatch(r"\d{6}", code6):
+            skipped.append({"code": code6, "name": h.get("stock_name"), "reason": "非6位A股码"})
+            continue
+        k = _tencent_kline(code6, bars=bars, force_refresh=force_refresh)
+        seg = [x for x in k if x["date"] > period]
+        if len(seg) < 2:
+            skipped.append({"code": code6, "name": h.get("stock_name"), "reason": "K线窗口不足"})
+            continue
+        r_i = (seg[-1]["close"] / seg[0]["close"] - 1) * 100
+        weighted += w * r_i
+        coverage += w
+        used += 1
+    if used == 0:
+        raise RuntimeError(f"重仓股无一可取K线（{snap.get('name')}）——拒绝静默返回")
+    div = fund_ret - weighted
+    verdict = ("持仓一致" if abs(div) <= 5
+               else "轻微背离（关注）" if abs(div) <= 10 else "疑似调仓/风格漂移")
+    return {"code": snap["_meta"]["code"], "name": snap.get("name"),
+            "period": period, "window": {"start": period, "end": adj[-1]["date"],
+                                         "days": days_span},
+            "fund_return_pct": round(fund_ret, 2),
+            "holdings_weighted_return_pct": round(weighted, 2),
+            "divergence_pp": round(div, 2), "verdict": verdict,
+            "coverage_pct": round(coverage * 100, 1), "stocks_used": used,
+            "skipped": skipped,
+            "note": "季报披露天然滞后，背离≠一定调仓（持仓内涨跌分化同表象）"}
+
+
+def _manager_page(mid: str) -> dict:
+    """经理主页解析（manager/{id}.html 服务端直出，坑P23 形态）：1 请求。"""
+    r = ttfund_get(f"https://fund.eastmoney.com/manager/{mid}.html",
+                   headers={"Referer": "https://fund.eastmoney.com/"})
+    assert_rankhandler(r, f"经理主页 {mid}")
+    h = r.content.decode("utf-8", errors="replace")
+    if len(h) < 10000:
+        raise RuntimeError(f"经理主页异常（{mid} 仅 {len(h)}B）——ID 无效或结构变更")
+    flat = re.sub(r"<[^>]+>|\s+", "", h)
+    mt = re.search(r"<title>([^<_\-]{2,20})", h)
+    name = (mt.group(1).strip() if mt else "").strip()
+    tenure = re.search(r"累计任职时间[:：]?([0-9年又天]+)", flat)
+    scale = re.search(r"现任基金[^0-9]{0,6}([0-9.]+)亿", flat)
+    ret = re.search(r"任期回报[:：]?([\-0-9.]+)%", flat)
+    mg = re.search(r"var\s+mgrlists\s*=\s*(\[.*?\]);", h, re.S)
+    funds = []
+    if mg:
+        funds = [{"code": c, "name": n, "type": t} for c, n, t in
+                 re.findall(r"\{valueField:'(\d{6})',name:'([^']+)',type:'(\d+)'\}", mg.group(1))]
+    if not name or not funds:
+        raise RuntimeError(f"经理主页解析失败（{mid}）：name={name!r} 在管清单={len(funds)}——上游结构变更")
+    return {"manager_id": mid, "name": name,
+            "tenure": tenure.group(1) if tenure else None,
+            "scale_yi": float(scale.group(1)) if scale else None,
+            "return_since_pct": float(ret.group(1)) if ret else None,
+            "funds": funds, "fund_count": len(funds),
+            "source": "eastmoney/manager-page"}
+
+
+def fund_manager(query: str, force_refresh: bool = False) -> dict:
+    """基金经理画像（1 请求，24h 缓存）：ID 直查或基金码转接现任经理。形态：
+    经理ID（8 位数字，非 80 开头）/ 基金代码或名称（快照现任经理转接——快照已
+    缓存则 0 请求；经理ID 由 pingzhongdata Data_currentFundManager 直出）。
+    返回 {manager_id,name,tenure 累计任职时间,scale_yi 现任基金总规模,
+    return_since_pct 任期回报,funds 在管清单,fund_count}。
+    经理姓名→ID 无公开结构化索引（旧名单页 404、建议接口退化为固定样本、
+    排行接口仅姓名序且全量 88 页超预算，坑P23）——请用基金码转接或经理ID。
+    80 开头的 8 位 ID 是公司，走 fund_company。"""
+    q = str(query).strip()
+    if re.fullmatch(r"\d{8}", q):
+        if q.startswith("80"):
+            raise ValueError(f"{q} 是 80 开头的公司ID——公司画像请用 fund_company")
+        mid = q
+    else:
+        snap = fund_snapshot(q)
+        mgr = snap.get("manager") or {}
+        mid = mgr.get("manager_id")
+        if not mid:
+            raise RuntimeError(f"未找到「{q}」的现任经理（Data_currentFundManager 缺失）"
+                               "——基金可能清算或经理空缺")
+    rel = f"manager/{mid}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=24)
+        if cached is not None:
+            return cached
+    out = _manager_page(mid)
+    _cache_write(rel, out)
+    return out
+
+
+def manager_rank(pages: int = 1, force_refresh: bool = False) -> list[dict]:
+    """经理排行（坑P23：服务端仅姓名序，50 条/页，record 强校验）。
+
+    pages×50 位（record≈4384 校验防截断）。行含在管清单/任职天数/任期回报/
+    在管规模——规模与回报列是【已取页内】字段，本地排序只对已取子集有意义，
+    不等于全市场按规模排行（那需要 88 页，预算不允许；诚实边界）。
+    缓存 20h。"""
+    pages = int(pages)
+    if not 1 <= pages <= 88:
+        raise ValueError(f"pages 须 1~88（record≈4384 ÷ 50），收到 {pages}")
+    rel = f"manager/rank_p{pages}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=20)
+        if cached is not None:
+            return cached
+    out, record = [], None
+    for pi in range(1, pages + 1):
+        r = ttfund_get("https://fund.eastmoney.com/Data/FundDataPortfolio_Interface.aspx",
+                       params={"dt": 14, "mc": "returnjson", "pt": 2, "sc": "abbname",
+                               "st": "desc", "pi": pi, "pn": 50},
+                       headers={"Referer": "https://fund.eastmoney.com/"})
+        assert_rankhandler(r, f"经理排行 p{pi}")
+        text = r.content.decode("utf-8", errors="replace")
+        if record is None:
+            mr = re.search(r"record:(\d+)", text)
+            if not mr:
+                raise RuntimeError("经理排行响应无 record 总数——截断校验不可用")
+            record = int(mr.group(1))
+        # 行形态 ["a","b",...]：组内引号成对出现，需精确匹配引号组序列（坑P23）
+        raw_rows = re.findall(r'\[("[^"]*"(?:,"[^"]*")*)\]', text)
+        for rr in raw_rows:
+            f = [x for x in rr.split('","')]
+            f[0] = f[0].lstrip('"')
+            if f and f[-1].endswith('"'):
+                f[-1] = f[-1].rstrip('"')
+            if len(f) < 12:
+                continue
+            scale_yi = None
+            ms = re.search(r"([0-9.]+)亿", f[10])
+            if ms:
+                scale_yi = float(ms.group(1))
+            out.append({"manager_id": f[0], "name": f[1], "company_id": f[2],
+                        "company": f[3],
+                        "fund_codes": f[4].split(",") if f[4] else [],
+                        "fund_names": f[5].split(",") if f[5] else [],
+                        "tenure_days": int(f[6]) if f[6].isdigit() else None,
+                        "return_pct": _to_float(f[7].rstrip("%")),
+                        "best_fund_code": f[8], "best_fund_name": f[9],
+                        "scale_yi": scale_yi})
+    expected = min(50 * pages, record)
+    if len(out) != expected:
+        raise RuntimeError(f"经理排行校验失败 record={record} 实收 {len(out)}，应收 {expected}")
+    _cache_write(rel, out)
+    return out
+```
+
 ## 使用示例
 
 ```python
@@ -2506,6 +2885,15 @@ fund_company("161725")                       # 基金码→公司画像（基金
 fund_company("80065113")                     # 8 位公司 ID 直取（1 请求）
 fund_crowding()[:10]                         # 抱团度 Top10（1 请求/季，90 天缓存）
 fund_industry_allocation()                   # 19 门类行业配置（巨潮官方口径）
+
+# V0.6 经理画像与专项组装层
+rank_persistence(top=20)                     # 业绩持续性矩阵（0 请求长牛初筛）
+fund_scale("161725")                         # 单基金规模（ENDNAV 精确值）
+bond_plus_profile("007300")                  # 固收+画像（仓位带/回撤带/利率标注）
+qdii_premium(["513100", "513500"])           # 场内溢价（净值滞后口径）
+nav_divergence("161725")                     # 重仓探测（背离度→疑似调仓）
+fund_manager("161725")                       # 基金码→现任经理画像（在管清单）
+manager_rank(pages=1)                        # 经理排行 50 位（服务端仅姓名序）
 ```
 
-**不覆盖（明确边界）**：账户持仓/交易下单（用 ttskill）、港基专项、盘中实时估值、基金经理历任切分（独立评测 skill 的 jjjl 通道）、单基金行业配置史（E2 已停供；全市场季度口径见 `fund_industry_allocation`）、货基万份收益（P15）、债券持仓明细 zqcc。
+**不覆盖（明确边界）**：账户持仓/交易下单（用 ttskill）、港基专项、盘中实时估值、基金经理历任切分（独立评测 skill 的 jjjl 通道）、单基金行业配置史（E2 已停供；全市场季度口径见 `fund_industry_allocation`）、货基万份收益（P15）、债券持仓明细 zqcc、FOF 底层基金明细（五源实测无结构化接口，坑P24）、经理姓名→ID 索引（坑P23）。

@@ -662,6 +662,208 @@ def test_l1_offline():
                      lambda: fd._cninfo_post("p_sysapi1112", {}, "mock"), "两次被拒")
     finally:
         fd.TT_SESSION.post, fd._cninfo_enckey = _orig_post, _orig_key
+
+    # ── V0.6 经理画像与专项组装层离线单元 ──
+    # 持续性矩阵：构造两类别各3只、收益梯度锁分位与纳入门槛
+    _rk_rows = [
+        {"code": "000001", "name": "甲债A", "fund_type": "债券型-长债", "ret_1m_pct": 1.0,
+         "ret_3m_pct": 2.0, "ret_6m_pct": 3.0, "ret_ytd_pct": 4.0, "ret_1y_pct": 5.0,
+         "ret_2y_pct": 6.0, "ret_3y_pct": 7.0},
+        {"code": "000002", "name": "乙债B", "fund_type": "债券型-长债", "ret_1m_pct": 2.0,
+         "ret_3m_pct": 3.0, "ret_6m_pct": 4.0, "ret_ytd_pct": 5.0, "ret_1y_pct": 6.0,
+         "ret_2y_pct": 7.0, "ret_3y_pct": 8.0},
+        {"code": "000003", "name": "丙债C", "fund_type": "债券型-长债", "ret_1m_pct": 3.0,
+         "ret_3m_pct": 4.0, "ret_6m_pct": 5.0, "ret_ytd_pct": 6.0, "ret_1y_pct": 7.0,
+         "ret_2y_pct": 8.0, "ret_3y_pct": 9.0},
+        {"code": "100001", "name": "丁股D", "fund_type": "股票型", "ret_1m_pct": 9.0,
+         "ret_3m_pct": 9.0, "ret_6m_pct": 9.0, "ret_ytd_pct": 9.0, "ret_1y_pct": 9.0,
+         "ret_2y_pct": None, "ret_3y_pct": None},
+        {"code": "100002", "name": "戊股E", "fund_type": "股票型", "ret_1m_pct": None,
+         "ret_3m_pct": None, "ret_6m_pct": None, "ret_ytd_pct": None,
+         "ret_1y_pct": None, "ret_2y_pct": None, "ret_3y_pct": None},
+    ]
+    _orig_rank = fd.fund_rank
+    try:
+        fd.fund_rank = lambda **kw: list(_rk_rows)
+        rp = fd.rank_persistence(top=10)
+        _by = {x["code"]: x for x in rp}
+        check("L1", "持续性-类别内分位梯度",
+              _by["000003"]["score_pct"] == 100.0 and _by["000001"]["score_pct"] == 33.3
+              and _by["000002"]["score_pct"] == 66.7,
+              f"甲33.3/乙66.7/丙100（同桶3只全梯度，≥值口径）")
+        check("L1", "持续性-纳入门槛(ytd+1y且≥4周期)",
+              "100002" not in _by and "100001" in _by
+              and _by["100001"]["covered"] == 5 and _by["100001"]["consistent"] is True,
+              f"戊股全None剔除；丁股5周期覆盖全≥75→consistent")
+    finally:
+        fd.fund_rank = _orig_rank
+
+    # 规模：ENDNAV 元→亿换算锚（209.47亿=20946896763.35 元）
+    class _SC:
+        status_code = 200
+        content = b"{}"
+
+        def json(self):
+            return {"Datas": {"ENDNAV": "20946896763.35", "JJGS": "招商基金", "FCODE": "161725"}}
+
+    _orig_get2, _orig_fl2 = fd.ttfund_get, fd.fund_list
+    try:
+        fd.ttfund_get = lambda *a, **k: _SC()
+        fd.fund_list = lambda: [{"code": "161725", "name": "招商中证白酒指数(LOF)A"}]
+        sc = fd.fund_scale("161725", force_refresh=True)
+        check("L1", "规模-ENDNAV元精确换算",
+              sc["scale_yi"] == 209.47 and sc["company"] == "招商基金"
+              and sc["name"] == "招商中证白酒指数(LOF)A",
+              f"20946896763.35元→{sc['scale_yi']}亿（实测锚分毫不差）")
+        fd.ttfund_get = lambda *a, **k: type("_SC2", (), {
+            "status_code": 200, "content": b"",
+            "json": lambda self: {"Datas": {}}})()
+        expect_raise("L1", "规模-缺ENDNAV显式报错",
+                     lambda: fd.fund_scale("161725", force_refresh=True), "ENDNAV")
+    finally:
+        fd.ttfund_get, fd.fund_list = _orig_get2, _orig_fl2
+
+    # 固收+画像：构造偏债/偏股两形态（快照 mock）
+    def _mk_snap(stock, bond):
+        pos = [{"date": "2026-01-02", "nav": 1.0, "daily_return": 0.0, "dividend": 0},
+               {"date": "2026-07-02", "nav": 0.98, "daily_return": None, "dividend": 0}]
+        return {"_meta": {"code": "007300", "version": "x"}, "name": "测试固收+",
+                "nav_history": pos,
+                "asset_allocation": [{"_date": "2026-09-30", "股票占净比": stock,
+                                      "债券占净比": bond, "现金占净比": 5.0}],
+                "stock_position_history": [{"date": "2026-07-02", "position_pct": 35.0}]}
+
+    _orig_snap, _orig_metrics = fd.fund_snapshot, fd.fund_metrics
+    try:
+        fd.fund_snapshot = lambda q: _mk_snap(25.0, 70.0)
+        fd.fund_metrics = lambda s: {"max_drawdown_pct": -3.2, "annualized_volatility_pct": 4.1}
+        bp = fd.bond_plus_profile("007300")
+        check("L1", "固收+-偏债分级与利率敏感标注",
+              bp["grade"] == "偏债" and bp["stock_pct"] == 25.0 and bp["bond_pct"] == 70.0
+              and bp["drawdown_band"] == "优" and bp["rate_note"] and "cb_yield_curve" in bp["rate_note"],
+              f"股25/债70→偏债，回撤3.2→优，利率标注带出")
+        fd.fund_snapshot = lambda q: _mk_snap(70.0, 10.0)
+        fd.fund_metrics = lambda s: {"max_drawdown_pct": -25.0, "annualized_volatility_pct": 20.0}
+        bp2 = fd.bond_plus_profile("007300")
+        check("L1", "固收+-偏股分级与回撤带",
+              bp2["grade"] == "偏股" and bp2["drawdown_band"] == "弱" and bp2["rate_note"] is None,
+              "股70→偏股，回撤25→弱，债<50 无利率标注")
+    finally:
+        fd.fund_snapshot, fd.fund_metrics = _orig_snap, _orig_metrics
+
+    # QDII 溢价：腾讯+E6 双 mock，溢价数学锚
+    _orig_tq, _orig_e6 = fd.tencent_quote, fd.fund_realtime_nav
+    try:
+        fd.tencent_quote = lambda codes: {c: {"name": "纳指ETF国泰", "price": 2.21} for c in codes}
+        fd.fund_realtime_nav = lambda codes: [{"code": c, "name": "纳指ETF国泰", "nav": 1.8056,
+                                               "nav_date": "2026-11-06"} for c in codes]
+        qp = fd.qdii_premium(["513100"])
+        check("L1", "QDII溢价-数学锚与滞后标注",
+              qp[0]["premium_pct"] == 22.4 and "T-1/T-2" in qp[0]["note"],
+              f"2.21/1.8056-1={qp[0]['premium_pct']}%（实测锚）")
+        fd.tencent_quote = lambda codes: {c: {"name": "X", "price": None} for c in codes}
+        qp2 = fd.qdii_premium(["513100"])
+        check("L1", "QDII溢价-缺价标注不炸",
+              qp2[0]["premium_pct"] is None and "缺失" in qp2[0]["note"], str(qp2[0]["note"]))
+        expect_raise("L1", "QDII溢价-空列表拒绝", lambda: fd.qdii_premium([]), "不能为空")
+    finally:
+        fd.tencent_quote, fd.fund_realtime_nav = _orig_tq, _orig_e6
+
+    # 重仓探测：mock K线/持仓/快照，数学锚（基金+2pp 背离→轻微背离带）
+    class _KL:
+        status_code = 200
+        content = b""
+
+        def json(self):
+            return {"data": {"sz600519": {"qfqday": [
+                ["2026-09-30", "1.0", "100.0", "0", "0", "0"],
+                ["2026-10-31", "1.0", "110.0", "0", "0", "0"]]}}}
+
+    _orig_snap3, _orig_hold3, _orig_kline = fd.fund_snapshot, fd.fund_holdings, fd._tencent_kline
+    try:
+        fd.fund_snapshot = lambda q: {
+            "_meta": {"code": "161725", "version": "x"}, "name": "测试白酒",
+            "nav_history": [{"date": "2026-09-25", "nav": 1.0, "daily_return": None, "dividend": 0},
+                            {"date": "2026-10-01", "nav": 1.02, "daily_return": None, "dividend": 0},
+                            {"date": "2026-10-31", "nav": 1.05, "daily_return": None, "dividend": 0}]}
+        fd.fund_holdings = lambda q, **k: [
+            {"period": "2026-09-30", "stock_code": "600519", "stock_name": "贵州茅台", "nav_pct": 8.04},
+            {"period": "2026-09-30", "stock_code": "00700", "stock_name": "腾讯控股", "nav_pct": 3.0}]
+        fd._tencent_kline = lambda c, bars=90, force_refresh=False: [
+            {"date": "2026-10-08", "close": 100.0}, {"date": "2026-10-31", "close": 108.0}]
+        nd = fd.nav_divergence("161725")
+        # 基点=报告期前最后净值1.0→基金 1.05/1.00-1=5.0%；重仓 108/100-1=8%×权重8.04%
+        # →加权0.64%；背离=5.0-0.64=+4.36pp（≤5 → 持仓一致）
+        check("L1", "重仓探测-背离数学锚与港股跳过",
+              nd["fund_return_pct"] == 5.0 and nd["divergence_pp"] == 4.36
+              and nd["verdict"] == "持仓一致" and nd["stocks_used"] == 1
+              and nd["skipped"] and nd["skipped"][0]["code"] == "00700"
+              and nd["coverage_pct"] == 8.0,
+              f"基{nd['fund_return_pct']}% vs 重仓加权{nd['holdings_weighted_return_pct']}%"
+              f"→背离{nd['divergence_pp']}pp；港股00700进skipped")
+    finally:
+        fd.fund_snapshot, fd.fund_holdings, fd._tencent_kline = _orig_snap3, _orig_hold3, _orig_kline
+
+    # 经理画像：主页 HTML 形态 mock（mgrlists+三标签）+ ID/公司ID分流
+    _pad = "<!--" + "x" * 11000 + "-->"     # 真实主页 ~71KB；mock 需越过 10000B 空壳防线
+    _mgr_html = ('<html><title>侯昊 _ 基金经理档案 _ 天天基金网</title>' + _pad +
+                 '<div>累计任职时间：9年又82天</div><div>现任基金(461.32亿)</div>'
+                 '<div>任期回报：92.81%</div>'
+                 '<script>var mgrlists=[{valueField:\'159243\',name:\'创业板人工智能ETF招商\',type:\'3\'},'
+                 '{valueField:\'016880\',name:\'招商碳中和C\',type:\'3\'}];</script></html>')
+
+    class _MP:
+        status_code = 200
+        content = _mgr_html.encode("utf-8")
+
+    _orig_get4 = fd.ttfund_get
+    _orig_snap4 = fd.fund_snapshot
+    try:
+        fd.ttfund_get = lambda *a, **k: _MP()
+        pg = fd.fund_manager("30379533", force_refresh=True)
+        check("L1", "经理画像-ID路径解析",
+              pg["name"] == "侯昊" and pg["tenure"] == "9年又82天"
+              and pg["scale_yi"] == 461.32 and pg["return_since_pct"] == 92.81
+              and pg["fund_count"] == 2 and pg["funds"][0]["code"] == "159243",
+              "title/任职/现任规模/任期回报/mgrlists 五锚齐")
+        fd.fund_snapshot = lambda q: {"_meta": {"code": "161725", "version": "x"},
+                                      "name": "白酒A", "manager": {"manager_id": "30379533", "name": "侯昊"}}
+        pg2 = fd.fund_manager("161725", force_refresh=True)   # 基金码转接（mock主页同响应）
+        check("L1", "经理画像-基金码转接现任经理",
+              pg2["manager_id"] == "30379533" and pg2["name"] == "侯昊", "快照→ID→主页")
+        expect_raise("L1", "经理画像-80开头公司ID引导",
+                     lambda: fd.fund_manager("80065113"), "fund_company")
+    finally:
+        fd.ttfund_get, fd.fund_snapshot = _orig_get4, _orig_snap4
+        (fd.FUND_CACHE_DIR / "manager" / "30379533.json").unlink(missing_ok=True)  # mock不入真缓存
+
+    # 经理排行：行解析锚（12字段/规模带亿/record校验）
+    _rank_body = ('var returnjson= {data:[["30792181","祝祯哲","80000221","富国基金",'
+                  '"009758,013632","富国可转债C,富国利享回报A","1317","8.30%","009758",'
+                  '"富国可转债C","25.91亿元","8.30%"]],record:1,pages:1,curpage:1}')
+
+    class _MR:
+        status_code = 200
+        content = _rank_body.encode("utf-8")
+
+    _orig_get5 = fd.ttfund_get
+    try:
+        fd.ttfund_get = lambda *a, **k: _MR()
+        mr = fd.manager_rank(pages=1, force_refresh=True)
+        check("L1", "经理排行-行解析与record校验",
+              len(mr) == 1 and mr[0]["manager_id"] == "30792181"
+              and mr[0]["name"] == "祝祯哲" and mr[0]["company"] == "富国基金"
+              and mr[0]["scale_yi"] == 25.91 and mr[0]["return_pct"] == 8.3
+              and mr[0]["fund_codes"] == ["009758", "013632"],
+              "12字段/25.91亿元→25.91/回报8.30%→8.3")
+        expect_raise("L1", "经理排行-record不符拒绝",
+                     lambda: fd.manager_rank(pages=2, force_refresh=True), "校验失败")
+        expect_raise("L1", "经理排行-pages上限",
+                     lambda: fd.manager_rank(pages=89, force_refresh=True), "pages")
+    finally:
+        fd.ttfund_get = _orig_get5
+        (fd.FUND_CACHE_DIR / "manager" / "rank_p1.json").unlink(missing_ok=True)
+
     check("L1", "报告期-归一化与空=最近季末",
           fd._norm_rdate("2026-09-30") == "20260930"
           and fd._norm_rdate("") == fd._latest_quarter_end().replace("-", ""),
@@ -840,6 +1042,44 @@ def test_l2_smoke():
           and ia[0]["weight_pct"] > 10 and ia[0]["market_value_yi"] > 10000,
           f"{len(ia)} 门类，Top1 {ia[0]['industry']} {ia[0]['market_value_yi']}亿/"
           f"{ia[0]['weight_pct']}%")
+
+    # ── V0.6 经理画像与专项组装层 ──
+    rp2 = fd.rank_persistence(top=5)
+    check("L2", "V6 持续性矩阵-真数据结构",
+          len(rp2) == 5 and rp2[0]["score_pct"] >= rp2[-1]["score_pct"]
+          and rp2[0]["covered"] >= 4 and "horizon_pct" in rp2[0],
+          f"Top1 {rp2[0]['name']} {rp2[0]['score_pct']}分 consistent={rp2[0]['consistent']}")
+    fs2 = fd.fund_scale("161725")
+    check("L2", "V6 单基金规模-实测锚",
+          abs(fs2["scale_yi"] - 209.47) < 0.01 and fs2["company"] == "招商基金",
+          f"{fs2['scale_yi']}亿（ENDNAV 元精确值）")
+    bp3 = fd.bond_plus_profile("161725")
+    check("L2", "V6 固收+画像-股票基金形态",
+          bp3["grade"] == "偏股" and bp3["stock_pct"] > 60
+          and bp3["max_drawdown_pct"] < 0 and bp3["drawdown_band"],
+          f"{bp3['name']} 股{bp3['stock_pct']}% 回撤{bp3['max_drawdown_pct']}%→{bp3['drawdown_band']}")
+    qp3 = fd.qdii_premium(["513100"])
+    check("L2", "V6 QDII溢价-真数据",
+          qp3[0]["premium_pct"] is not None and -10 < qp3[0]["premium_pct"] < 60
+          and qp3[0]["nav_date"] and "T-1/T-2" in qp3[0]["note"],
+          f"{qp3[0]['name']} 溢价{qp3[0]['premium_pct']}%（净值{qp3[0]['nav_date']}）")
+    nd2 = fd.nav_divergence("161725")
+    check("L2", "V6 重仓探测-真数据",
+          nd2["stocks_used"] >= 5 and -30 <= nd2["divergence_pp"] <= 30
+          and nd2["coverage_pct"] > 30 and nd2["verdict"] and nd2["window"]["days"] < 120,
+          f"背离{nd2['divergence_pp']}pp {nd2['verdict']}（覆盖{nd2['coverage_pct']}%，"
+          f"{nd2['window']['days']}天窗口）")
+    fm4 = fd.fund_manager("161725")
+    check("L2", "V6 经理画像-基金码路径",
+          fm4["manager_id"] and fm4["name"] and fm4["fund_count"] >= 1
+          and fm4["tenure"] and len(fm4["funds"]) == fm4["fund_count"],
+          f"{fm4['name']}（{fm4['manager_id']}）任职{fm4['tenure']} "
+          f"在管{fm4['fund_count']}只 规模{fm4['scale_yi']}亿")
+    mr2 = fd.manager_rank(pages=1)
+    check("L2", "V6 经理排行-50位完整",
+          len(mr2) == 50 and mr2[0]["manager_id"] and mr2[0]["company"]
+          and mr2[0]["fund_codes"],
+          f"首行 {mr2[0]['name']}/{mr2[0]['company']} 规模{mr2[0]['scale_yi']}亿")
 
 
 # ════════════════════ L3 交叉验证（三源互证）════════════════════
@@ -1043,6 +1283,20 @@ def test_f_cache_band():                             # F4/F7 缓存专项（在�
     fd.fund_crowding()
     cn6 = fd.CNINFO_REQUEST_COUNT[0] - cn5
     check("F4", "抱团度二次调用0请求(cninfo账本)", cn6 == 0, f"实发 {cn6} 次")
+    # V0.6 专项层缓存带
+    n9 = fd.TT_REQUEST_COUNT[0]
+    fd.fund_scale("161725")
+    n10 = fd.TT_REQUEST_COUNT[0] - n9
+    check("F4", "规模二次调用0请求", n10 == 0, f"实发 {n10} 次")
+    fd.fund_manager("161725")
+    n11 = fd.TT_REQUEST_COUNT[0]
+    fd.fund_manager("161725")
+    n12 = fd.TT_REQUEST_COUNT[0] - n11
+    check("F4", "经理画像二次调用0请求", n12 == 0, f"实发 {n12} 次")
+    tc1 = fd.TENCENT_REQUEST_COUNT[0]
+    fd.nav_divergence("161725")
+    tc2 = fd.TENCENT_REQUEST_COUNT[0] - tc1
+    check("F4", "重仓探测当日K线缓存0腾讯请求", tc2 == 0, f"实发 {tc2} 次（当日K线缓存）")
     fd.TT_REQUEST_COUNT[1].clear()          # F 段复位清零后同步清 host 明细，账本打印自洽
 
 
