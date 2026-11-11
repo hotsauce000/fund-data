@@ -241,7 +241,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.6.0"
+__version__ = "0.6.2"
 
 
 FUND_CACHE_DIR = Path.home() / ".fund_data_cache"

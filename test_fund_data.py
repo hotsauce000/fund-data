@@ -527,6 +527,13 @@ def test_l1_offline():
           "def fund_snapshot(query: str, force_refresh: bool = False) -> dict:" in _ref
           and "P18" in _ref and "使用示例" in _ref and "不覆盖" in _ref,
           f"{len(_ref.encode('utf-8'))}B")
+    # 平台分发必填 frontmatter 字段回归锁（workbuddy 曾因缺字段拒包）
+    _fm = _thin.split("---\n")[1]
+    _need = ["name:", "display_name:", "display_name_en:", "description:", "description_zh:",
+             "description_en:", "author:", "version:"]
+    check("L1", "架构-平台必填frontmatter齐全",
+          all(f"\n{k}" in _fm or _fm.startswith(k) for k in _need),
+          f"缺 {[k for k in _need if f'\n{k}' not in _fm and not _fm.startswith(k)]}")
     check("L1", "架构-路由层零内嵌代码",
           _thin.count("```python") == 1 and "import sys" in _thin,
           f"python 代码块 {_thin.count('```python')} 个（应仅 1 个 import 示例）")
