@@ -2319,7 +2319,8 @@ def fund_industry_allocation(rdate: str = "", force_refresh: bool = False) -> li
 #   · rankhandler 行【无规模列】——[17][18]=自定义区间收益、[19][20]=申购费原价/折扣价、
 #     [22]=优惠费率（161725/110022 双锚校准）；单基金规模走移动端 ENDNAV（209.47亿精确锚）
 #   · 经理数据两源全通：主页 manager/{id}.html 服务端直出（mgrlists 在管清单+任职+规模+回报）、
-#     dt=14 排行（4384 位，pn≤50 且服务端仅姓名序）；姓名→ID 无公开索引（坑P23 诚实边界）
+#     dt=14 排行（4384 位，pn≤50 且服务端仅姓名序）；姓名→ID 无公开索引（坑P23：
+#     dt=15 目录页忽略 pi/pn 恒返回拼音前10，FundSearchAPI 不索引经理名——二次实测 2026-11-11）
 #   · FOF 底层基金明细五源实测无结构化接口（坑P24）——只有季报 PDF 有，诚实边界
 
 
@@ -2604,7 +2605,8 @@ def fund_manager(query: str, force_refresh: bool = False) -> dict:
     返回 {manager_id,name,tenure 累计任职时间,scale_yi 现任基金总规模,
     return_since_pct 任期回报,funds 在管清单,fund_count}。
     经理姓名→ID 无公开结构化索引（旧名单页 404、建议接口退化为固定样本、
-    排行接口仅姓名序且全量 88 页超预算，坑P23）——请用基金码转接或经理ID。
+    排行接口仅姓名序且全量 88 页超预算；dt=15 目录页实测恒返回拼音前 10 条
+    且忽略 pi/pn——不可查询，坑P23）——请用基金码转接或经理ID。
     80 开头的 8 位 ID 是公司，走 fund_company。"""
     q = str(query).strip()
     if re.fullmatch(r"\d{8}", q):
@@ -2682,3 +2684,132 @@ def manager_rank(pages: int = 1, force_refresh: bool = False) -> list[dict]:
         raise RuntimeError(f"经理排行校验失败 record={record} 实收 {len(out)}，应收 {expected}")
     _cache_write(rel, out)
     return out
+
+
+# ══════════════════════════════════════════════════════════════════
+# V0.6.1 基准指数层：BENCH_SECID 名称查表 + kline_daily 日线原语
+# ══════════════════════════════════════════════════════════════════
+# 收编自 quant-excess 端点层（实战两轮审查的代码）：指数=EM push2his 主源（tt 线
+# + F6 分流）+ 腾讯 fqkline 备胎；股票=复用 _tencent_kline（腾讯不封 IP）。
+# 缓存键含 lmt——窗口拉大时旧缓存不得静默截断。RiskControlError 绝不降级。
+
+# 跟踪指数名 → EM secid（市场前缀：1=沪 0=深 2=中证指数公司；名称源自 F10 tsdata 官方字段）
+BENCH_SECID = {
+    "沪深300": "1.000300", "沪深300指数": "1.000300",
+    "中证500": "1.000905", "中证500指数": "1.000905",
+    "中证800": "1.000906", "中证1000": "1.000852", "中证1000指数": "1.000852",
+    "中证红利": "1.000922", "上证红利": "1.000015",
+    "创业板综合": "0.399102", "创业板综": "0.399102",
+    "上证50": "1.000016", "科创50": "1.000688",
+    "中证A500": "1.000510",                       # 2024-09 新发宽基（实测 K线可达）
+    "创业板指": "0.399006", "创业板指数": "0.399006",
+    "深证100": "0.399330", "中证全指": "1.000985", "国证2000": "0.399303",
+    "中证2000": "2.932000",
+}
+_SECID_RE = re.compile(r"[012]\.\d{6}")
+
+
+def _kline_resolve(query: str) -> tuple:
+    """kline_daily 入参归一 → ("index", secid) | ("stock", 6位码)。纯函数可离线测。"""
+    q = str(query).strip()
+    if q in BENCH_SECID:
+        return "index", BENCH_SECID[q]
+    if _SECID_RE.fullmatch(q):
+        return "index", q
+    if re.fullmatch(r"(\d{6})", q):
+        return "stock", q
+    if re.fullmatch(r"(sh|sz|bj)\d{6}", q.lower()):
+        return "stock", q.lower()[-6:]
+    supported = "、".join(sorted(set(k for k in BENCH_SECID if "指数" not in k)))
+    raise ValueError(
+        f"kline_daily 不识别 {query!r}——支持：指数名（{supported}…）、secid（如 1.000300）、"
+        f"6位股票代码或 sh/sz/bj 前缀形式")
+
+
+def _secid_tencent_sym(secid: str) -> Optional[str]:
+    """EM secid → 腾讯指数符号；市场 2（中证指数公司发布）无腾讯代码 → None 不降级。"""
+    mkt, code = secid.split(".")
+    if mkt == "1":
+        return f"sh{code}"
+    if mkt == "0":
+        return f"sz{code}"
+    return None
+
+
+def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
+                force_refresh: bool = False) -> list[dict]:
+    """指数/股票日线收盘序列 [{date, close}] 升序（基准指数层原语，坑P25）。
+
+    query 三形态：指数名（BENCH_SECID，如 "沪深300"/"中证红利"/"国证2000"）/
+    EM secid（如 "1.000300"）/ 6 位股票代码（复用 _tencent_kline 腾讯通道）。
+    指数 = EM push2his 主源（tt 线 + F6 分流）+ 腾讯备胎（市场2无腾讯代码不降级）；
+    股票 = 腾讯 fqkline（不封 IP）。20h 缓存、键含 lmt；RiskControlError 不降级。
+    基金诊断用途：基准对照/风格温度/压力测试；个股深度分析仍归 a-stock-data。
+    """
+    lmt = int(lmt)
+    if lmt < 10:
+        raise ValueError(f"lmt 至少 10 根，收到 {lmt}")
+    kind, ident = _kline_resolve(query)
+    if kind == "stock":
+        rows = _tencent_kline(ident, bars=lmt, force_refresh=force_refresh)
+        if len(rows) < min(lmt, 60):
+            raise RuntimeError(f"kline_daily 股票日K不足（{ident} 需≥{min(lmt, 60)} 实收 {len(rows)}）")
+        return rows
+    # 指数路径
+    rel = f"kline/idx_{ident.replace('.', '_')}_lmt{lmt}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=20)
+        if cached is not None:
+            return cached
+    need = min(lmt, 100)
+    rows: list = []
+    try:
+        r = ttfund_get("https://push2his.eastmoney.com/api/qt/stock/kline/get",
+                       params={"secid": ident, "klt": 101, "fqt": 1, "lmt": lmt,
+                               "end": "20500101", "fields1": "f1,f2,f3",
+                               "fields2": "f51,f53"},
+                       headers={"Referer": "https://quote.eastmoney.com/"})
+        assert_not_risk_control(r, "tt", f"kline {ident}")
+        r.raise_for_status()
+        ks = ((r.json() or {}).get("data") or {}).get("klines") or []
+        for line in ks:
+            p = line.split(",")
+            if len(p) >= 2 and re.match(r"\d{4}-\d{2}-\d{2}", p[0]):
+                try:
+                    rows.append({"date": p[0], "close": float(p[1])})
+                except ValueError:
+                    continue
+    except RiskControlError:
+        raise                                          # 风控≠网络故障，绝不降级（F6 契约）
+    except requests.RequestException:
+        rows = []                                      # 网络类故障才走备胎
+    if len(rows) < need and use_tencent_fallback:
+        sym = _secid_tencent_sym(ident)
+        if sym:
+            rows = []                                  # 重置防两源日期重叠污染
+            try:
+                url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
+                       f"param={sym},day,,,{lmt},qfq")
+                req = urllib.request.Request(url, headers={"Referer": "https://gu.qq.com/"})
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                TENCENT_REQUEST_COUNT[0] += 1
+                d = json.loads(opener.open(req, timeout=10).read().decode("utf-8"))
+                node = (d.get("data") or {}).get(sym) or {}
+                for arr in node.get("qfqday") or node.get("day") or []:
+                    if len(arr) >= 3:
+                        rows.append({"date": arr[0], "close": float(arr[2])})
+            except RiskControlError:
+                raise
+            except Exception:
+                pass                                   # 备胎也挂 → 下面统一语义化报错
+    if len(rows) < need:
+        raise RuntimeError(
+            f"指数日线获取失败且备胎不足（{ident}，需≥{need} 实收 {len(rows)}）")
+    rows.sort(key=lambda x: x["date"])
+    seen, dedup = set(), []
+    for r in rows:                                     # 按日期去重（下游收益率序列重复即拒算）
+        if r["date"] not in seen:
+            seen.add(r["date"])
+            dedup.append(r)
+    _cache_write(rel, dedup)
+    return dedup

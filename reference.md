@@ -1,4 +1,4 @@
-# fund-data 完整参考（reference.md · 按需读取层）V0.6.0
+# fund-data 完整参考（reference.md · 按需读取层）V0.6.1
 
 > 本文件按需读取：调试 / 扩展 / 排查坑时才打开，勿随 skill 激活预加载。
 > 路由与签名速查见 SKILL.md；本文件内嵌代码与 fund_data.py 同源直拼（构建时生成）。
@@ -7,7 +7,11 @@
 
 # fund-data 基金底层数据工具包 V0.6.0 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层 + **V0.5 全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.6.0（2026-11-11）：174/174 断言实测通过**（L1单元112 · L2端点smoke 37 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 19 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层 + **V0.5 全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.6.1（2026-11-11）：186/186 断言实测通过**（L1单元121 · L2端点smoke 40 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 20 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+
+**V0.6.1 基准指数层（quant-excess 端点层收编，kline_daily 一函数三形态）：**
+- 🟢 **B1 `kline_daily`**：指数/股票日线收盘原语——指数名查表（沪深300/中证500/红利/国证2000/中证2000 等 17 名）/EM secid/6 位股票码；指数走 push2his 主源（F6 分流）+ 腾讯备胎（市场 2 无腾讯码不降级），股票复用 `_tencent_kline` 腾讯通道；20h 缓存键含 lmt 防窗口截断；实测沪深300 十年 2600 根、二调 0 请求
+- 🔴 **P25 push2his 日K形态**入册；P23 补 dt=15 二次实测（pi/pn 全忽略恒返回拼音前 10）
 
 **V0.6.0 经理画像与专项组装层（八函数，源全部一手实测钉死）：**
 - 🟢 **`rank_persistence`**：fund_rank 缓存上算各周期同类分位（不高于该值占比口径，桶内最高=100），纳入门槛 ytd+1y 且 ≥4 周期；consistent=全周期 ≥75 分位——零请求「长牛」初筛
@@ -77,7 +81,7 @@
 
 **五条铁律：**
 
-1. **请求预算**：单基金深度诊断 ≤2 请求（1×pingzhongdata 当日缓存 + 0~1×lsjz）；全市场筛选只允许列表端点
+1. **请求预算**：单基金深度诊断 ≤2 请求（1×pingzhongdata 当日缓存+0~1×lsjz）；全市场筛选只允许列表端点
 2. **明令禁止** `for fund in all_funds: fund_snapshot(fund)` —— a-stock-data #36 案例 20 小时封禁的复刻路径
 3. **聚合优先**：任何数据先问"pingzhongdata 里有没有"（一次 436KB 覆盖 90% 静态数据），再考虑 F10 窄端点
 4. **所有东财/天天/蛋卷请求必须走 `ttfund_get()`**：强制 HTTPS + 跨进程串行限流（F1）+ 熔断（F2）+ 会话复用 + 瞬态重试1次 + 请求计数；调用方 `raise_for_status()` 前必过 `assert_not_risk_control()`（F6）；rankhandler 家族再过 `assert_rankhandler()`（P19 内容级）；**巨潮 cninfo 只经 `_cninfo_post()`**（独立 flock 节流 1.5s + 独立熔断 + enckey 刷新重试）
@@ -114,6 +118,7 @@
 | V6 | `bond_plus_profile(q)` | 固收+画像：权益仓位带/回撤带/利率敏感标注 | 本地(快照) | 0 |
 | V6 | `qdii_premium(codes)` | 场内溢价（市价÷净值-1，净值滞后口径标注） | 腾讯+E6 | N只=2 |
 | V6 | `nav_divergence(q)` | 重仓探测：净值 vs 上季重仓加权收益背离度（疑似调仓） | 快照+E4a+腾讯日K | 冷启≤12 |
+| B1 | `kline_daily(q,lmt)` | 指数/股票日线收盘 [{date,close}]：指数名查表/secid/股票码三形态 | push2his+腾讯备胎 | 1（缓存0） |
 | V6 | `fund_manager(q)` / `manager_rank(pages)` | 经理画像（任职/规模/回报/在管清单）/ 排行（姓名序） | eastmoney manager 页+dt=14 | 1·50/页 |
 | 本地 | `adjusted_nav(recs)` | 复权净值（分红再投口径，链式） | 零网络 | 0 |
 | 本地 | `fund_metrics(snap,s,e)` | 区间收益/年化/最大回撤/波动/夏普/卡玛/管理费率标注 | 零网络 | 0 |
@@ -159,6 +164,7 @@
 | P22 rankhandler 无规模列 | [17][18]=自定义区间收益、[19][20]=申购费原/折扣价、[22]=优惠费率——没有规模 | 单基金规模走移动端 ENDNAV（`fund_scale`）；全市场榜无聚合源=诚实边界 |
 | P23 经理接口遗存 | 旧名单页404；dt=15 退化为固定10条样本；dt=14 sc 只认 XML 元素名（20 候选全无效）、pn≤50 | 经理ID/基金码两路进 `fund_manager`；排行如实标注姓名序；姓名→ID 无索引 |
 | P24 FOF 底层无接口 | 五源（东财F10/App/蛋卷/好买/新浪）均只有股票直持仓 | 基金投资明细仅存季报 PDF——诚实边界，FOF 驾驶舱降级为池+仓位史+直持仓穿透 |
+| P25 push2his日K形态 | fields2 只取 f51,f53（日期,收盘）；市场2（中证指数公司）无腾讯代码不可备胎；缓存键必须含 lmt 防窗口截断 | `kline_daily` F6 分流（RiskControlError 不降级）+ 日期去重 + need=min(lmt,100) 下限 |
 
 ## Prerequisites
 
@@ -2493,7 +2499,8 @@ def fund_industry_allocation(rdate: str = "", force_refresh: bool = False) -> li
 #   · rankhandler 行【无规模列】——[17][18]=自定义区间收益、[19][20]=申购费原价/折扣价、
 #     [22]=优惠费率（161725/110022 双锚校准）；单基金规模走移动端 ENDNAV（209.47亿精确锚）
 #   · 经理数据两源全通：主页 manager/{id}.html 服务端直出（mgrlists 在管清单+任职+规模+回报）、
-#     dt=14 排行（4384 位，pn≤50 且服务端仅姓名序）；姓名→ID 无公开索引（坑P23 诚实边界）
+#     dt=14 排行（4384 位，pn≤50 且服务端仅姓名序）；姓名→ID 无公开索引（坑P23：
+#     dt=15 目录页忽略 pi/pn 恒返回拼音前10，FundSearchAPI 不索引经理名——二次实测 2026-11-11）
 #   · FOF 底层基金明细五源实测无结构化接口（坑P24）——只有季报 PDF 有，诚实边界
 
 
@@ -2778,7 +2785,8 @@ def fund_manager(query: str, force_refresh: bool = False) -> dict:
     返回 {manager_id,name,tenure 累计任职时间,scale_yi 现任基金总规模,
     return_since_pct 任期回报,funds 在管清单,fund_count}。
     经理姓名→ID 无公开结构化索引（旧名单页 404、建议接口退化为固定样本、
-    排行接口仅姓名序且全量 88 页超预算，坑P23）——请用基金码转接或经理ID。
+    排行接口仅姓名序且全量 88 页超预算；dt=15 目录页实测恒返回拼音前 10 条
+    且忽略 pi/pn——不可查询，坑P23）——请用基金码转接或经理ID。
     80 开头的 8 位 ID 是公司，走 fund_company。"""
     q = str(query).strip()
     if re.fullmatch(r"\d{8}", q):
@@ -2856,6 +2864,135 @@ def manager_rank(pages: int = 1, force_refresh: bool = False) -> list[dict]:
         raise RuntimeError(f"经理排行校验失败 record={record} 实收 {len(out)}，应收 {expected}")
     _cache_write(rel, out)
     return out
+```
+
+## V0.6.1 基准指数层（quant-excess 端点层收编：指数名查表 + 日线原语）
+
+```python
+# 收编自 quant-excess 端点层（实战两轮审查的代码）：指数=EM push2his 主源（tt 线
+# + F6 分流）+ 腾讯 fqkline 备胎；股票=复用 _tencent_kline（腾讯不封 IP）。
+# 缓存键含 lmt——窗口拉大时旧缓存不得静默截断。RiskControlError 绝不降级。
+
+# 跟踪指数名 → EM secid（市场前缀：1=沪 0=深 2=中证指数公司；名称源自 F10 tsdata 官方字段）
+BENCH_SECID = {
+    "沪深300": "1.000300", "沪深300指数": "1.000300",
+    "中证500": "1.000905", "中证500指数": "1.000905",
+    "中证800": "1.000906", "中证1000": "1.000852", "中证1000指数": "1.000852",
+    "中证红利": "1.000922", "上证红利": "1.000015",
+    "创业板综合": "0.399102", "创业板综": "0.399102",
+    "上证50": "1.000016", "科创50": "1.000688",
+    "中证A500": "1.000510",                       # 2024-09 新发宽基（实测 K线可达）
+    "创业板指": "0.399006", "创业板指数": "0.399006",
+    "深证100": "0.399330", "中证全指": "1.000985", "国证2000": "0.399303",
+    "中证2000": "2.932000",
+}
+_SECID_RE = re.compile(r"[012]\.\d{6}")
+
+
+def _kline_resolve(query: str) -> tuple:
+    """kline_daily 入参归一 → ("index", secid) | ("stock", 6位码)。纯函数可离线测。"""
+    q = str(query).strip()
+    if q in BENCH_SECID:
+        return "index", BENCH_SECID[q]
+    if _SECID_RE.fullmatch(q):
+        return "index", q
+    if re.fullmatch(r"(\d{6})", q):
+        return "stock", q
+    if re.fullmatch(r"(sh|sz|bj)\d{6}", q.lower()):
+        return "stock", q.lower()[-6:]
+    supported = "、".join(sorted(set(k for k in BENCH_SECID if "指数" not in k)))
+    raise ValueError(
+        f"kline_daily 不识别 {query!r}——支持：指数名（{supported}…）、secid（如 1.000300）、"
+        f"6位股票代码或 sh/sz/bj 前缀形式")
+
+
+def _secid_tencent_sym(secid: str) -> Optional[str]:
+    """EM secid → 腾讯指数符号；市场 2（中证指数公司发布）无腾讯代码 → None 不降级。"""
+    mkt, code = secid.split(".")
+    if mkt == "1":
+        return f"sh{code}"
+    if mkt == "0":
+        return f"sz{code}"
+    return None
+
+
+def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
+                force_refresh: bool = False) -> list[dict]:
+    """指数/股票日线收盘序列 [{date, close}] 升序（基准指数层原语，坑P25）。
+
+    query 三形态：指数名（BENCH_SECID，如 "沪深300"/"中证红利"/"国证2000"）/
+    EM secid（如 "1.000300"）/ 6 位股票代码（复用 _tencent_kline 腾讯通道）。
+    指数 = EM push2his 主源（tt 线 + F6 分流）+ 腾讯备胎（市场2无腾讯代码不降级）；
+    股票 = 腾讯 fqkline（不封 IP）。20h 缓存、键含 lmt；RiskControlError 不降级。
+    基金诊断用途：基准对照/风格温度/压力测试；个股深度分析仍归 a-stock-data。
+    """
+    lmt = int(lmt)
+    if lmt < 10:
+        raise ValueError(f"lmt 至少 10 根，收到 {lmt}")
+    kind, ident = _kline_resolve(query)
+    if kind == "stock":
+        rows = _tencent_kline(ident, bars=lmt, force_refresh=force_refresh)
+        if len(rows) < min(lmt, 60):
+            raise RuntimeError(f"kline_daily 股票日K不足（{ident} 需≥{min(lmt, 60)} 实收 {len(rows)}）")
+        return rows
+    # 指数路径
+    rel = f"kline/idx_{ident.replace('.', '_')}_lmt{lmt}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=20)
+        if cached is not None:
+            return cached
+    need = min(lmt, 100)
+    rows: list = []
+    try:
+        r = ttfund_get("https://push2his.eastmoney.com/api/qt/stock/kline/get",
+                       params={"secid": ident, "klt": 101, "fqt": 1, "lmt": lmt,
+                               "end": "20500101", "fields1": "f1,f2,f3",
+                               "fields2": "f51,f53"},
+                       headers={"Referer": "https://quote.eastmoney.com/"})
+        assert_not_risk_control(r, "tt", f"kline {ident}")
+        r.raise_for_status()
+        ks = ((r.json() or {}).get("data") or {}).get("klines") or []
+        for line in ks:
+            p = line.split(",")
+            if len(p) >= 2 and re.match(r"\d{4}-\d{2}-\d{2}", p[0]):
+                try:
+                    rows.append({"date": p[0], "close": float(p[1])})
+                except ValueError:
+                    continue
+    except RiskControlError:
+        raise                                          # 风控≠网络故障，绝不降级（F6 契约）
+    except requests.RequestException:
+        rows = []                                      # 网络类故障才走备胎
+    if len(rows) < need and use_tencent_fallback:
+        sym = _secid_tencent_sym(ident)
+        if sym:
+            rows = []                                  # 重置防两源日期重叠污染
+            try:
+                url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
+                       f"param={sym},day,,,{lmt},qfq")
+                req = urllib.request.Request(url, headers={"Referer": "https://gu.qq.com/"})
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                TENCENT_REQUEST_COUNT[0] += 1
+                d = json.loads(opener.open(req, timeout=10).read().decode("utf-8"))
+                node = (d.get("data") or {}).get(sym) or {}
+                for arr in node.get("qfqday") or node.get("day") or []:
+                    if len(arr) >= 3:
+                        rows.append({"date": arr[0], "close": float(arr[2])})
+            except RiskControlError:
+                raise
+            except Exception:
+                pass                                   # 备胎也挂 → 下面统一语义化报错
+    if len(rows) < need:
+        raise RuntimeError(
+            f"指数日线获取失败且备胎不足（{ident}，需≥{need} 实收 {len(rows)}）")
+    rows.sort(key=lambda x: x["date"])
+    seen, dedup = set(), []
+    for r in rows:                                     # 按日期去重（下游收益率序列重复即拒算）
+        if r["date"] not in seen:
+            seen.add(r["date"])
+            dedup.append(r)
+    _cache_write(rel, dedup)
+    return dedup
 ```
 
 ## 使用示例

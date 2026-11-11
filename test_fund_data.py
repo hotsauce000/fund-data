@@ -883,6 +883,75 @@ def test_l1_offline():
           and fd._bucket_of(None) is None and fd._bucket_of("商品型") is None,
           "fund_rank 本地过滤的映射依据")
 
+    # ── V0.6.1 基准指数层离线单元（kline_daily 四路解析 + F6 不降级 + 防线）──
+    check("L1", "K线-入参归一四形态",
+          fd._kline_resolve("沪深300") == ("index", "1.000300")
+          and fd._kline_resolve("中证A500") == ("index", "1.000510")
+          and fd._kline_resolve("1.000905") == ("index", "1.000905")
+          and fd._kline_resolve("600519") == ("stock", "600519")
+          and fd._kline_resolve("SZ300308") == ("stock", "300308"),
+          "指数名/secid/股票码/带前缀码")
+    expect_raise("L1", "K线-未知名拒绝",
+                 lambda: fd._kline_resolve("纳斯达克"), "不识别")
+    check("L1", "K线-secid→腾讯符号(市场2不降级)",
+          fd._secid_tencent_sym("1.000300") == "sh000300"
+          and fd._secid_tencent_sym("0.399006") == "sz399006"
+          and fd._secid_tencent_sym("2.932000") is None,
+          "中证指数公司发布的指数无腾讯代码")
+    expect_raise("L1", "K线-lmt下限", lambda: fd.kline_daily("沪深300", lmt=5), "lmt")
+
+    class _KL:                                     # push2his mock（含重复日期行）
+        def __init__(self, klines):
+            self.status_code = 200
+            self._k = klines
+            self.content = b"{}"
+
+        def json(self):
+            return {"data": {"klines": self._k}}
+
+        def raise_for_status(self):
+            return None
+
+    _orig_get6, _tx0 = fd.ttfund_get, fd.TENCENT_REQUEST_COUNT[0]
+    _cache_rw = (fd._cache_read, fd._cache_write)
+    try:
+        fd._cache_read = lambda *a, **k: None       # L1 不读不写真缓存（防 mock 数据落盘污染）
+        fd._cache_write = lambda *a, **k: None
+        # lmt=10 → floor=10；12 行 mock（10 有效+1 重复+1 脏）去重后恰好过线；
+        # fallback 关闭 = 纯解析路径，零腾讯请求
+        fd.ttfund_get = lambda *a, **k: _KL(["2026-01-02,3000.5", "2026-01-02,3000.5",
+                                             "2026-01-03,3001.0", "bad,xx"]
+                                            + [f"2026-01-{d:02d},{3000 + d}.0"
+                                               for d in range(4, 13)])
+        rows = fd.kline_daily("1.000905", lmt=10, force_refresh=True,
+                              use_tencent_fallback=False)
+        check("L1", "K线-EM解析+按日期去重",
+              len(rows) == 11 and rows[0]["date"] == "2026-01-02"
+              and rows[-1]["date"] == "2026-01-12",
+              f"{len(rows)} 根（重复日期行+脏行剔除，01-02 只留一条）")
+        fd.ttfund_get = lambda *a, **k: _KL(["2026-01-02,3000.5"] * 5)
+        expect_raise("L1", "K线-样本不足语义化报错",
+                     lambda: fd.kline_daily("1.000905", lmt=10, force_refresh=True,
+                                            use_tencent_fallback=False), "备胎不足")
+
+        def _raise_rc(*a, **k):                        # 差分锁：EM 403 → RiskControlError
+            raise fd.RiskControlError("mock 403")      # 必须原样上抛且绝不触发腾讯备胎
+
+        fd.ttfund_get = _raise_rc
+        expect_raise("L1", "K线-风控不降级",
+                     lambda: fd.kline_daily("1.000905", force_refresh=True), "mock 403")
+        check("L1", "K线-风控路径零腾讯请求",
+              fd.TENCENT_REQUEST_COUNT[0] == _tx0, f"腾讯账本 {fd.TENCENT_REQUEST_COUNT[0]}")
+    finally:
+        fd.ttfund_get = _orig_get6
+        fd._cache_read, fd._cache_write = _cache_rw
+        fd.TENCENT_REQUEST_COUNT[0] = _tx0
+
+    # P23 实测补充：dt=15 目录页忽略 pi/pn，恒返回拼音前10——姓名路径不可查询（诚实边界）
+    check("L1", "P23-dt15目录页陷阱入册",
+          "dt=15" in (Path(__file__).parent / "fund_data.py").read_text(encoding="utf-8"),
+          "fund_manager docstring/坑区标注 dt=15 忽略分页")
+
 
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
 def test_l2_smoke():
@@ -1081,6 +1150,25 @@ def test_l2_smoke():
           len(mr2) == 50 and mr2[0]["manager_id"] and mr2[0]["company"]
           and mr2[0]["fund_codes"],
           f"首行 {mr2[0]['name']}/{mr2[0]['company']} 规模{mr2[0]['scale_yi']}亿")
+
+    # ── V0.6.1 基准指数层 ──
+    idx300 = fd.kline_daily("沪深300")
+    _n_tt, _n_tx = fd.TT_REQUEST_COUNT[0], fd.TENCENT_REQUEST_COUNT[0]
+    fd.kline_daily("沪深300")                       # 二次必命中当日缓存
+    check("L2", "B1 沪深300-十年全史+缓存0请求",
+          len(idx300) >= 2000 and idx300[0]["date"] < idx300[-1]["date"]
+          and idx300[-1]["close"] > 1000
+          and fd.TT_REQUEST_COUNT[0] == _n_tt and fd.TENCENT_REQUEST_COUNT[0] == _n_tx,
+          f"{len(idx300)} 根 {idx300[0]['date']}→{idx300[-1]['date']} "
+          f"最新收盘 {idx300[-1]['close']}（二调实发 tt/tx 0/0）")
+    idxdvd = fd.kline_daily("中证红利", lmt=300)
+    check("L2", "B1 中证红利-secid市场1通道",
+          len(idxdvd) >= 250 and idxdvd[-1]["close"] > 1000,
+          f"{len(idxdvd)} 根，最新 {idxdvd[-1]['close']}")
+    k519 = fd.kline_daily("600519", lmt=120)
+    check("L2", "B1 股票日K-复用腾讯通道",
+          len(k519) >= 100 and k519[-1]["close"] > 100 and k519[0]["date"] < k519[-1]["date"],
+          f"{len(k519)} 根，最新收盘 {k519[-1]['close']}")
 
 
 # ════════════════════ L3 交叉验证（三源互证）════════════════════
