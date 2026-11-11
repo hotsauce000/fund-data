@@ -690,7 +690,7 @@ def test_l1_offline():
         check("L1", "持续性-类别内分位梯度",
               _by["000003"]["score_pct"] == 100.0 and _by["000001"]["score_pct"] == 33.3
               and _by["000002"]["score_pct"] == 66.7,
-              f"甲33.3/乙66.7/丙100（同桶3只全梯度，≥值口径）")
+              f"甲33.3/乙66.7/丙100（同桶3只全梯度，不高于该值占比口径）")
         check("L1", "持续性-纳入门槛(ytd+1y且≥4周期)",
               "100002" not in _by and "100001" in _by
               and _by["100001"]["covered"] == 5 and _by["100001"]["consistent"] is True,
@@ -722,6 +722,7 @@ def test_l1_offline():
                      lambda: fd.fund_scale("161725", force_refresh=True), "ENDNAV")
     finally:
         fd.ttfund_get, fd.fund_list = _orig_get2, _orig_fl2
+        (fd.FUND_CACHE_DIR / "scale" / "161725.json").unlink(missing_ok=True)  # mock不入真缓存
 
     # 固收+画像：构造偏债/偏股两形态（快照 mock）
     def _mk_snap(stock, bond):
@@ -735,14 +736,14 @@ def test_l1_offline():
 
     _orig_snap, _orig_metrics = fd.fund_snapshot, fd.fund_metrics
     try:
-        fd.fund_snapshot = lambda q: _mk_snap(25.0, 70.0)
+        fd.fund_snapshot = lambda q, **k: _mk_snap(25.0, 70.0)
         fd.fund_metrics = lambda s: {"max_drawdown_pct": -3.2, "annualized_volatility_pct": 4.1}
         bp = fd.bond_plus_profile("007300")
         check("L1", "固收+-偏债分级与利率敏感标注",
               bp["grade"] == "偏债" and bp["stock_pct"] == 25.0 and bp["bond_pct"] == 70.0
               and bp["drawdown_band"] == "优" and bp["rate_note"] and "cb_yield_curve" in bp["rate_note"],
               f"股25/债70→偏债，回撤3.2→优，利率标注带出")
-        fd.fund_snapshot = lambda q: _mk_snap(70.0, 10.0)
+        fd.fund_snapshot = lambda q, **k: _mk_snap(70.0, 10.0)
         fd.fund_metrics = lambda s: {"max_drawdown_pct": -25.0, "annualized_volatility_pct": 20.0}
         bp2 = fd.bond_plus_profile("007300")
         check("L1", "固收+-偏股分级与回撤带",
@@ -781,7 +782,7 @@ def test_l1_offline():
 
     _orig_snap3, _orig_hold3, _orig_kline = fd.fund_snapshot, fd.fund_holdings, fd._tencent_kline
     try:
-        fd.fund_snapshot = lambda q: {
+        fd.fund_snapshot = lambda q, **k: {
             "_meta": {"code": "161725", "version": "x"}, "name": "测试白酒",
             "nav_history": [{"date": "2026-09-25", "nav": 1.0, "daily_return": None, "dividend": 0},
                             {"date": "2026-10-01", "nav": 1.02, "daily_return": None, "dividend": 0},

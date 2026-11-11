@@ -5,12 +5,12 @@
 
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 
-# fund-data 基金底层数据工具包 V0.5.0 模块全档
+# fund-data 基金底层数据工具包 V0.6.0 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层 + **V0.5 全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.5.0（2026-11-10）：148/148 断言实测通过**（L1单元96 · L2端点smoke 30 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×8），覆盖 15 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层 + **V0.5 全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.6.0（2026-11-11）：174/174 断言实测通过**（L1单元112 · L2端点smoke 37 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 19 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
 
 **V0.6.0 经理画像与专项组装层（八函数，源全部一手实测钉死）：**
-- 🟢 **`rank_persistence`**：fund_rank 缓存上算各周期同类分位（≥值口径，桶内最高=100），纳入门槛 ytd+1y 且 ≥4 周期；consistent=全周期 ≥75 分位——零请求「长牛」初筛
+- 🟢 **`rank_persistence`**：fund_rank 缓存上算各周期同类分位（不高于该值占比口径，桶内最高=100），纳入门槛 ytd+1y 且 ≥4 周期；consistent=全周期 ≥75 分位——零请求「长牛」初筛
 - 🟢 **`fund_scale`**：移动端 `FundMNBasicInformation.ENDNAV` 元精确值（161725 锚 209.47 亿分毫不差，1 请求）——rankhandler/E1 均无规模列（坑P22），**全市场规模榜无聚合源**，榜单场景由调用方对候选逐只富集
 - 🟢 **`bond_plus_profile`**：快照组装权益仓位带（偏债<30/平衡/偏股≥60）+ 回撤带（≤5优/≤10良/≤20中）+ 利率敏感标注（债券≥50% 联动 cb_yield_curve/credit_spread）——零新请求
 - 🟢 **`qdii_premium`**：腾讯市价 ÷ E6 净值 − 1（N 只=2 请求），溢价随 nav_date 一起解读（净值 T-1/T-2 滞后口径，剧烈行情会高估）
@@ -19,6 +19,7 @@
 - 🔴 **P22 rankhandler 无规模列**：[17][18]=自定义区间收益、[19][20]=申购费原价/折扣价、[22]=优惠费率（双基金锚校准）——规模只能走移动端 ENDNAV
 - 🔴 **P23 经理接口遗存**：旧名单页 404；dt=15 建议接口退化为固定 10 条样本（参数全忽略）；dt=14 的 sc 只认 XML 元素名（abbname），20 个规模/回报候选码全无效；pn 上限 50（88 页=超预算）
 - 🔴 **P24 FOF 底层基金无结构化接口**：东财网页 F10/App/蛋卷/好买/新浪五源实测均只有股票直持仓——基金投资明细仅存季报 PDF，诚实边界
+- 🟡 快照缓存按版本失效：0.5.0→0.6.0 首跑会重取所有诊断过的基金快照（批量诊断首日预算翻倍，预期行为非 bug）
 
 **V0.5.0 全市场数据层（四端点 + cninfo 第四线基础设施，防封为第一约束）：**
 - 🟢 **N1 `fund_rank`**：rankhandler.aspx 全市场 24792 只 **1 请求**（鉴权=Referer fundranking.html，无 cookie）；top=None 全量 20h 缓存，fund_type/sort/ascending 全部本地执行=组合筛选 0 请求；签名上不存在翻页参数（496 页逐页爬的封禁路径从 API 形态上消失）；None 值恒排末尾；字段序经官方 syl 四点校准（161725 近1月/3月/6月/1年分毫不差）
@@ -2503,7 +2504,7 @@ def _tencent_kline(stock_code: str, bars: int = 90,
     腾讯线（不封 IP）+ P12 直连 opener 同款 + TENCENT_REQUEST_COUNT 审计入账；
     仅支持 6 位 A 股码（港股 5 位码由调用方过滤）；当日缓存。"""
     pre = _tencent_prefix(stock_code)
-    rel = f"kline/{pre}.json"
+    rel = f"kline/{pre}_{int(bars)}.json"   # bars 入键：窗口根数随基金/日期漂移，防跨窗口串缓存
     if not force_refresh:
         cached = _cache_read(rel, max_age_hours=20)
         if cached is not None:
@@ -2511,12 +2512,17 @@ def _tencent_kline(stock_code: str, bars: int = 90,
     url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
            f"param={pre},day,,,{int(bars)},qfq")
     req = urllib.request.Request(url, headers={"Referer": "https://gu.qq.com/"})
-    try:
-        TENCENT_REQUEST_COUNT[0] += 1
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        raw = opener.open(req, timeout=10).read().decode("utf-8")
-    except Exception as e:
-        raise RuntimeError(f"腾讯日K请求失败({pre}): {e}") from e
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    raw = None
+    for attempt in (1, 2):                        # 瞬态重试1次（对齐 tencent_quote 同通道）
+        try:
+            TENCENT_REQUEST_COUNT[0] += 1
+            raw = opener.open(req, timeout=10).read().decode("utf-8")
+            break
+        except OSError as e:
+            if attempt == 2:
+                raise RuntimeError(f"腾讯日K请求失败({pre}): {e}") from e
+            time.sleep(0.5)
     try:
         d = json.loads(raw)
     except ValueError as e:
@@ -2537,6 +2543,7 @@ def rank_persistence(top: int = 20, fund_type: str = "all",
     周期 = 1m/3m/6m/ytd/1y/2y/3y；分位在【同类别桶内】算（vs 全市场更公平）；
     纳入门槛：≥4 个周期有值且必须含 ytd 与 1y（过短的新基不参与）。
     score_pct = 各周期分位均值；consistent = 全部已覆盖周期 ≥75 分位。
+    bucket_n = 所属类别桶有值基金数——桶过小（<5）时恒高/低分位参考意义有限，自行降权。
     top=None 返回全部（按 score 降序）。组合初筛的「长牛」候选直接取前 N。"""
     if top is not None and top < 1:
         raise ValueError(f"top 须 ≥1 或 None（全部），收到 {top!r}")
@@ -2550,6 +2557,7 @@ def rank_persistence(top: int = 20, fund_type: str = "all",
         buckets.setdefault(_bucket_of(r.get("fund_type")) or "_", []).append(r)
     import bisect
     pct_by_code: dict[str, dict] = {}
+    size_by_code: dict[str, int] = {}
     for group in buckets.values():
         for h, key in horizons.items():
             vals = sorted(x.get(key) for x in group if x.get(key) is not None)
@@ -2559,9 +2567,10 @@ def rank_persistence(top: int = 20, fund_type: str = "all",
                 v = x.get(key)
                 if v is None:
                     continue
-                # ≥该值的比例：桶内最高=100、并列同值同分位（排名分位口径）
+                # 不高于该值的占比（含并列）：桶内最高=100、最低≈1/n（排名分位口径）
                 pct = bisect.bisect_right(vals, v) / len(vals) * 100.0
                 pct_by_code.setdefault(x["code"], {})[h] = round(pct, 1)
+                size_by_code[x["code"]] = len(group)
     out = []
     for r in rows:
         p = pct_by_code.get(r["code"]) or {}
@@ -2570,7 +2579,7 @@ def rank_persistence(top: int = 20, fund_type: str = "all",
         score = sum(p.values()) / len(p)
         out.append({"code": r["code"], "name": r["name"], "fund_type": r.get("fund_type"),
                     "score_pct": round(score, 1), "horizon_pct": p,
-                    "covered": len(p),
+                    "covered": len(p), "bucket_n": size_by_code.get(r["code"]),
                     "consistent": all(v >= 75.0 for v in p.values())})
     out.sort(key=lambda x: -x["score_pct"])
     return out if top is None else out[:int(top)]
@@ -2600,10 +2609,14 @@ def fund_scale(query: str, force_refresh: bool = False) -> dict:
     except ValueError as e:
         raise RuntimeError(f"fund_scale {code} 返回非JSON: {r.content[:80]!r}") from e
     endnav = d.get("ENDNAV")
-    if endnav in (None, "", 0):
-        raise RuntimeError(f"fund_scale {code} 无 ENDNAV（未披露或结构变更）")
+    try:
+        endnav_f = float(endnav)
+    except (TypeError, ValueError):
+        endnav_f = None
+    if not endnav_f or endnav_f <= 0:
+        raise RuntimeError(f"fund_scale {code} 无有效 ENDNAV（未披露或结构变更）：{endnav!r}")
     name = next((f["name"] for f in fund_list() if f["code"] == code), None)
-    out = {"code": code, "name": name, "scale_yi": round(float(endnav) / 1e8, 2),
+    out = {"code": code, "name": name, "scale_yi": round(endnav_f / 1e8, 2),
            "company": d.get("JJGS"), "source": "eastmoney/fundmobapi"}
     _cache_write(rel, out)
     return out
@@ -2615,7 +2628,7 @@ def bond_plus_profile(query: str, force_refresh: bool = False) -> dict:
     口径：股票占净比（资产配置最新披露期）→ 偏债(<30) / 平衡(30~60) / 偏股(≥60)；
     回撤带按 fund_metrics 最大回撤绝对值：≤5 优 / ≤10 良 / ≤20 中 / >20 弱；
     债券占净比 ≥50% 附加利率敏感标注（联动 cb_yield_curve / credit_spread）。"""
-    snap = fund_snapshot(query)
+    snap = fund_snapshot(query, force_refresh=force_refresh)
     aa = snap.get("asset_allocation") or []
     if not aa:
         raise RuntimeError(f"固收+画像需要资产配置（{snap.get('name')}）——Data_assetAllocation 缺失")
@@ -2640,7 +2653,7 @@ def bond_plus_profile(query: str, force_refresh: bool = False) -> dict:
             "position_latest_pct": pos[-1]["position_pct"] if pos else None}
 
 
-def qdii_premium(codes: list, force_refresh: bool = False) -> list[dict]:
+def qdii_premium(codes: list) -> list[dict]:
     """QDII/ETF 场内溢价（N 只=2 请求）：腾讯市价 ÷ 最新净值 − 1。
 
     ⚠️ 口径：E6 净值为 T-1/T-2（坑P16 日历差），行情剧烈时段溢价会被高估——
@@ -2684,6 +2697,8 @@ def nav_divergence(query: str, force_refresh: bool = False) -> dict:
     snap = fund_snapshot(query)
     adj = adjusted_nav(snap["nav_history"])
     hold = fund_holdings(query)
+    if not hold:
+        raise RuntimeError(f"无股票持仓记录（{snap.get('name')}）——货币基金或上游空表，重仓探测不适用")
     period = hold[0]["period"]
     rows = [h for h in hold if h["period"] == period]
     base = next((a for a in adj if a["date"] > period), None)
@@ -2703,7 +2718,7 @@ def nav_divergence(query: str, force_refresh: bool = False) -> dict:
             skipped.append({"code": code6, "name": h.get("stock_name"), "reason": "非6位A股码"})
             continue
         k = _tencent_kline(code6, bars=bars, force_refresh=force_refresh)
-        seg = [x for x in k if x["date"] > period]
+        seg = [x for x in k if period < x["date"] <= adj[-1]["date"]]   # 终点对齐净值日，防股票腿超前
         if len(seg) < 2:
             skipped.append({"code": code6, "name": h.get("stock_name"), "reason": "K线窗口不足"})
             continue

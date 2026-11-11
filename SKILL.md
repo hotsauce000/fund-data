@@ -102,7 +102,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | `rank_persistence(top=20, fund_type='all', force_refresh=False)` | 业绩持续性矩阵（零请求）：排行缓存上算各周期同类分位与评分 |
 | `fund_scale(query, force_refresh=False)` | 单基金最新规模（1 请求）：移动端 ENDNAV 精确值，20h 缓 |
 | `bond_plus_profile(query, force_refresh=False)` | 固收+画像（零新请求）：权益仓位带 + 回撤控制带 + 利率敏感度标 |
-| `qdii_premium(codes, force_refresh=False)` | QDII/ETF 场内溢价（N 只=2 请求）：腾讯市价 ÷ 最新净 |
+| `qdii_premium(codes)` | QDII/ETF 场内溢价（N 只=2 请求）：腾讯市价 ÷ 最新净 |
 | `nav_divergence(query, force_refresh=False)` | 重仓探测：净值收益 vs 上季重仓加权收益的背离度（疑似调仓信号） |
 | `fund_manager(query, force_refresh=False)` | 基金经理画像（1 请求，24h 缓存）：ID 直查或基金码转接现任经 |
 | `manager_rank(pages=1, force_refresh=False)` | 经理排行（坑P23：服务端仅姓名序，50 条/页，record 强校 |
