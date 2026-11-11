@@ -998,6 +998,61 @@ def test_l1_offline():
           "dt=15" in (Path(__file__).parent / "fund_data.py").read_text(encoding="utf-8"),
           "fund_manager docstring/坑区标注 dt=15 忽略分页")
 
+    # ── V0.6.2 规模全历史（gmbd 通道）离线单元 ──
+    _gmbd = ('var gmbd_apidata={ content:"<table class=\'w782\'><thead><tr>'
+             '<th>日期</th><th>期间申购（亿份）</th><th>期间赎回（亿份）</th>'
+             '<th>期末总份额（亿份）</th><th>期末净资产（亿元）</th><th>净资产变动率</th>'
+             '</tr></thead><tbody>'
+             '<tr><td>2026-09-30</td><td>0.15</td><td>0.36</td><td>1.73</td><td>4.30</td>'
+             '<td>-21.51%</td></tr>'
+             '<tr><td>2026-06-30</td><td>0.28</td><td>0.32</td><td>1.94</td><td>5.48</td>'
+             '<td>13.79%</td></tr>'
+             '<tr><td>2013-09-27</td><td>---</td><td>---</td><td>0.36</td><td>---</td>'
+             '<td>---</td></tr>'
+             '</tbody></table>", "FSRQ" : "华安沪深300增强A", "ABBNAME" : "HAHS300ZQA" }')
+
+    class _GR:
+        def __init__(self, text):
+            self.status_code, self.text, self.content = 200, text, text.encode("utf-8")
+
+        def raise_for_status(self):
+            return None
+
+    _orig_get8, _cw8 = fd.ttfund_get, (fd._cache_read, fd._cache_write)
+    try:
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda *a, **k: None
+        fd.ttfund_get = lambda *a, **k: _GR(_gmbd)
+        sh3 = fd.fund_scale_history("000312", force_refresh=True)
+        check("L1", "规模全史-解析+升序反转+None形态",
+              len(sh3) == 3 and sh3[0]["date"] == "2013-09-27"
+              and sh3[-1]["date"] == "2026-09-30"
+              and sh3[0]["shares_yi"] == 0.36 and sh3[0]["nav_yi"] is None
+              and sh3[2]["subscribe_yi"] == 0.15
+              and sh3[2]["nav_change_pct"] == -21.51,
+              f"源序新→旧已反转：{[x['date'] for x in sh3]}（募集期 ---→None）")
+        bad_head = _gmbd.replace("<th>期末净资产（亿元）</th>", "")
+        fd.ttfund_get = lambda *a, **k: _GR(bad_head)
+        expect_raise("L1", "规模全史-缺必需列拒绝(动态列映射)",
+                     lambda: fd.fund_scale_history("000312", force_refresh=True), "必需列")
+        thin1 = ('var gmbd_apidata={ content:"<table><thead><tr><th>日期</th>'
+                 '<th>期末总份额（亿份）</th><th>期末净资产（亿元）</th></tr></thead>'
+                 '<tbody><tr><td>2026-09-30</td><td>1.73</td><td>4.30</td></tr>'
+                 '</tbody></table>", "FSRQ" : "x" }')
+        fd.ttfund_get = lambda *a, **k: _GR(thin1)
+        expect_raise("L1", "规模全史-单期记录不足拒绝",
+                     lambda: fd.fund_scale_history("000312", force_refresh=True), "记录不足")
+
+        def _raise_rc2(*a, **k):
+            raise fd.RiskControlError("mock gmbd 403")
+
+        fd.ttfund_get = _raise_rc2
+        expect_raise("L1", "规模全史-风控不降级",
+                     lambda: fd.fund_scale_history("000312", force_refresh=True), "mock gmbd 403")
+    finally:
+        fd.ttfund_get = _orig_get8
+        fd._cache_read, fd._cache_write = _cw8
+
 
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
 def test_l2_smoke():
@@ -1215,6 +1270,21 @@ def test_l2_smoke():
     check("L2", "B1 股票日K-复用腾讯通道",
           len(k519) >= 100 and k519[-1]["close"] > 100 and k519[0]["date"] < k519[-1]["date"],
           f"{len(k519)} 根，最新收盘 {k519[-1]['close']}")
+
+    # ── V0.6.2 规模全历史（真数据 + 官方锚）──
+    _sh_n = fd.TT_REQUEST_COUNT[0]
+    shist = fd.fund_scale_history("000312")
+    check("L2", "B2 规模全历史-53期全史+官方锚",
+          len(shist) >= 40 and shist[0]["date"] == "2013-09-27"
+          and shist[-1]["date"] == "2026-09-30"
+          and abs(shist[-1]["nav_yi"] - 4.30) < 0.01
+          and shist[0]["subscribe_yi"] is None
+          and all(x["shares_yi"] for x in shist),
+          f"{len(shist)} 期 {shist[0]['date']}→{shist[-1]['date']}（募集期→最新季报），"
+          f"末期净资产 {shist[-1]['nav_yi']}亿=官方锚")
+    fd.fund_scale_history("000312")
+    check("L2", "B2 规模全历史-缓存0请求",
+          fd.TT_REQUEST_COUNT[0] == _sh_n, f"二调实发 {fd.TT_REQUEST_COUNT[0] - _sh_n} 次")
 
 
 # ════════════════════ L3 交叉验证（三源互证）════════════════════

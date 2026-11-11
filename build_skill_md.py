@@ -55,7 +55,7 @@ def _sig_rows() -> list:
     return rows
 
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 DESCRIPTION = (
     "写代码实际获取基金领域底层数据时使用——基金全量清单(~2.8万只)、净值全史(单位/累计/复权/分红)、"
     "单基金一站式快照(pingzhongdata 436KB→20+数据集:规模变动/持有人结构/现任经理/重仓股+债/资产配置/仓位史/同类百分位史/"
@@ -65,8 +65,9 @@ DESCRIPTION = (
     "相对表现(vs沪深300或同类平均:相对收益+β+相关性)，以及L6跨域穿透:重仓股实时行情+板块归属+主题聚合,一键输出'这只基金主要是白酒约86%'白话地图；"
     "L7宏观利率层:中债曲线族40+条(1请求=1曲线1年日频)、信用利差、国债/SHIBOR/基准利率史、GC007、国债盘中实时；"
     "V0.5全市场层:排行/初筛(2.4万只1请求,过滤排序本地0请求)、新发全量、公司画像、季度抱团度与行业配置(巨潮)；"
-    "V0.6专项层:业绩持续性矩阵、单基金规模、固收+画像、QDII场内溢价、重仓探测(净值背离)、经理画像与经理排行；"
-    "V0.6.1基准指数层:指数日线(沪深300/红利等)与股票日K,基准对照地基。"
+    "V0.6专项层:持续性/规模/固收+/溢价/重仓探测/经理画像与排行/指数日线与股票日K；"
+    ""
+    "V0.6.2规模全史(gmbd,53期含申赎流量)。"
     "请求预算制防封:单基金诊断≤2请求、当日磁盘缓存命中0请求、全市场筛选只走列表端点、巨潮独立限流线(1.5s+enckey)。"
     "仅在需要调用数据接口取数时使用：基金概念解释、投资观点讨论等无需取数的话题不要加载本skill。")
 
@@ -102,8 +103,8 @@ THIN.append("""## 防封铁律（先读，违反=封禁20+小时）
 1. **请求预算**：单基金深度诊断 ≤2 请求（1×pingzhongdata 当日缓存+0~1×lsjz）；当日缓存命中 0 请求
 2. **明令禁止** `for fund in all: fund_snapshot(fund)`（全量循环=封禁路径）；全市场排行已内置全量单请求
 3. **聚合优先**：先问 pingzhongdata（1 请求=90% 静态数据），再考虑窄端点
-4. **东财/天天/蛋卷请求必须走 `ttfund_get()`**（F1锁+F2熔断+F6分流+P12直连）；批量≥10只把 TT_MIN_INTERVAL 调 2~3s；巨潮走第四线 _cninfo_post（1.5s节流+enckey）
-5. 缓存 TTL：fund_list 30天 / snapshot·持仓·宏观·排行·新发·规模·K线 当日 / 公司·经理画像 24h / 抱团度·行业配置 90天/ lsjz 不缓存
+4. **东财/天天/蛋卷请求必须走 `ttfund_get()`**（F1锁+F2熔断+F6分流+P12直连）；批量≥10只把 TT_MIN_INTERVAL 调 2~3s；巨潮走 _cninfo_post（1.5s节流）
+5. 缓存 TTL：fund_list 30天 / snapshot·持仓·宏观·排行·新发·规模·规模全史·K线 当日 / 公司·经理画像 24h / 抱团度·行业配置 90天/ lsjz 不缓存
 """)
 
 THIN.append("""## 场景路由（我想做 X → 调什么）
@@ -111,7 +112,7 @@ THIN.append("""## 场景路由（我想做 X → 调什么）
 | 场景 | 调用链 | 请求 |
 |---|---|---|
 | 诊断一只基金 | `fund_snapshot`→`fund_metrics`+评测三件套 | 1 |
-| 全市场排行/初筛 | `fund_rank()`（全量1请求）→过滤排序本地0请求 | 1（缓存0） |
+| 全市场排行/初筛 | `fund_rank()` 全量1请求，过滤排序本地 | 1（缓存0） |
 | 定投测算 | `fund_snapshot`→`fund_dca_backtest`（XIRR） | 1 |
 | 这基金买了什么 | `penetrate` → `plain_text_map`（白话地图） | 冷启≤13/重跑1 |
 | 名称/拼音找代码 | `norm_fund_code`（列候选不猜）/ `resolve_fund_code` | 0 |
@@ -121,7 +122,7 @@ THIN.append("""## 场景路由（我想做 X → 调什么）
 | 基金公司画像 | `fund_company(基金码或8位公司ID)` | 1（基金码+1） |
 | 抱团度/行业配置 | `fund_crowding()` / `fund_industry_allocation()`（季度巨潮） | 1/季（90天） |
 | 业绩持续性/固收+画像 | `rank_persistence()` / `bond_plus_profile(q)`（零请求） | 0 |
-| 规模/QDII溢价/重仓探测 | `fund_scale(q)` · `qdii_premium(codes)` · `nav_divergence(q)` | 1·2·冷启≤12 |
+| 规模·全史/溢价/重仓探测 | `fund_scale(q)` · `fund_scale_history(q)` · `qdii_premium(codes)` · `nav_divergence(q)` | 1·1·2·冷启≤12 |
 | 经理画像/排行 | `fund_manager(基金码或经理ID)` · `manager_rank(pages)`（仅姓名序） | 0~1·50/页 |
 | 指数日线 | `kline_daily("沪深300")`（指数名/股票码） | 1（缓存0） |
 | 债基利率敏感度 | `cb_yield_curve` + `credit_spread` / `treasury_yield_daily` | 1~2 |
@@ -149,12 +150,12 @@ THIN.append(f"""## 函数速查（{_sig_rows().__len__()} 个，构建时自动�
 
 THIN.append("""## When to Activate
 
-基金净值/复权/回撤/夏普、诊断评测、穿透地图、定投回测、基金档案、批量净值、利率利差。关键词：基金净值、复权、回撤、定投、持仓穿透、白话地图、利差、全市场排行、抱团度、公司画像、新发基金、经理画像、业绩持续性、固收+、QDII溢价、重仓探测、指数日线。
+基金净值/复权/回撤/夏普、诊断评测、穿透地图、定投回测、档案、批量净值、利率。关键词：基金净值、复权、回撤、定投、持仓穿透、白话地图、利差、全市场排行、抱团度、公司画像、新发基金、经理画像、持续性、固收+、溢价、重仓探测、指数日线、规模全史。
 
 ## 深读与边界（按需）
 
 - 实现细节/坑区 P1~P25/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
-- 不覆盖：账户持仓/交易下单（ttskill）、盘中实时估值、货基万份收益、单基金行业史（E2停供；季度口径有 `fund_industry_allocation`）、语义主题/事件选基、FOF底层基金明细与经理姓名→ID索引（P23/P24 诚实边界）
+- 不覆盖：账户持仓/交易下单（ttskill）、盘中实时估值、货基万份收益、单基金行业史（E2停供）、语义选基、FOF底层明细与经理姓名索引（P23/P24）
 - 个股深度 → a-stock-data；holding_map() 是官方桥
 """)
 
@@ -173,7 +174,7 @@ REF.append(f"""# fund-data 完整参考（reference.md · 按需读取层）V{VE
 
 REF.append("""# fund-data 基金底层数据工具包 V0.6.0 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层 + **V0.5 全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.6.1（2026-11-11）：189/189 断言实测通过**（L1单元124 · L2端点smoke 40 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 20 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + L6 跨域穿透 + L7 宏观利率层 + **V0.5 全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.6.2（2026-11-11）：195/195 断言实测通过**（L1单元128 · L2端点smoke 42 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 21 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
 
 **V0.6.1 基准指数层（quant-excess 端点层收编，kline_daily 一函数三形态）：**
 - 🟢 **B1 `kline_daily`**：指数/股票日线收盘原语——指数名查表（沪深300/中证500/红利/国证2000/中证2000 等 15 指数（20 别名键））/EM secid/6 位股票码；指数走 push2his 主源（F6 分流）+ 腾讯备胎（市场 2 无腾讯码不降级），股票复用 `_tencent_kline` 腾讯通道；20h 缓存键含 lmt 防窗口截断；实测沪深300 十年 2600 根、二调 0 请求
@@ -287,6 +288,7 @@ REF.append("""## 端点路由速查（按需定位，不必通读）
 | V6 | `qdii_premium(codes)` | 场内溢价（市价÷净值-1，净值滞后口径标注） | 腾讯+E6 | N只=2 |
 | V6 | `nav_divergence(q)` | 重仓探测：净值 vs 上季重仓加权收益背离度（疑似调仓） | 快照+E4a+腾讯日K | 冷启≤12 |
 | B1 | `kline_daily(q,lmt)` | 指数/股票日线收盘 [{date,close}]：指数名查表/secid/股票码三形态 | push2his+腾讯备胎 | 1（缓存0） |
+| B2 | `fund_scale_history(q)` | 规模全历史：募集期→最新季报（期间申购/赎回流量+份额+净资产+变动率，升序） | F10 gmbd | 1（缓存0） |
 | V6 | `fund_manager(q)` / `manager_rank(pages)` | 经理画像（任职/规模/回报/在管清单）/ 排行（姓名序） | eastmoney manager 页+dt=14 | 1·50/页 |
 | 本地 | `adjusted_nav(recs)` | 复权净值（分红再投口径，链式） | 零网络 | 0 |
 | 本地 | `fund_metrics(snap,s,e)` | 区间收益/年化/最大回撤/波动/夏普/卡玛/管理费率标注 | 零网络 | 0 |
@@ -369,6 +371,8 @@ REF.append("## V0.6 经理画像与专项组装层（持续性/规模/固收+/�
 REF.append(code(sections["V0.6 经理画像与专项组装层：持续性/规模/固收+/溢价/重仓探测/经理三件套"]))
 REF.append("## V0.6.1 基准指数层（quant-excess 端点层收编：指数名查表 + 日线原语）\n")
 REF.append(code(sections[next(k for k in sections if k.startswith("V0.6.1"))]))
+REF.append("## V0.6.2 规模全历史（F10 规模变动 gmbd 通道）\n")
+REF.append(code(sections[next(k for k in sections if k.startswith("V0.6.2"))]))
 
 REF.append("""## 使用示例
 
@@ -441,7 +445,8 @@ assert "def fund_snapshot(query: str, force_refresh: bool = False) -> dict:" in 
 assert all(p in ref_text for p in ("P19", "P20", "P21"))          # 坑区三层齐全
 assert "def fund_rank(top: Optional[int] = None" in ref_text      # V0.5 内嵌同源
 assert "def fund_crowding(rdate: str = \"\", force_refresh: bool = False)" in ref_text
-assert "def kline_daily(query: str" in ref_text                       # V0.6.1 基准指数层内嵌同源
+assert "def kline_daily(query: str" in ref_text                       # V0.6.1 内嵌同源
+assert "def fund_scale_history(query: str" in ref_text                # V0.6.2 内嵌同源
 assert "P25" in ref_text
 assert "def fund_manager(query: str, force_refresh: bool = False) -> dict:" in ref_text  # V0.6 内嵌同源
 assert all(p2 in ref_text for p2 in ("P22", "P23", "P24"))                     # 坑区 V0.6 齐全
