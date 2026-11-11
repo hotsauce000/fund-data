@@ -1070,10 +1070,11 @@ def test_l1_offline():
           and "主题词排行: 白酒 86%、食品饮料 40%" in txt
           and "盈利股 PE 中位数 22.5 倍" in txt and "不高于30 倍参考线" in txt,
           f"{len(txt)} 字符")
+    _wly_line = [l for l in txt.splitlines() if "五粮液" in l][0]
     check("L1", "白话地图-亏损股PE文案/未分类警示/明细行",
-          "亏损" in txt and "9.9%" in txt and "1439.00" in txt
+          "亏损" in _wly_line and "9.9%" in txt and "1439.00" in txt
           and "⚠ 1 只未参与主题聚合（合计权重 3.5%）: 未分类股" in txt,
-          "负 PE→「亏损」、权重/价格格式、failed_stocks 渲染")
+          "负 PE→明细行「亏损」（按行断言防'已剔除亏损股'恒真）、格式、failed 渲染")
     _disp = fd.plain_text_map({**_pmap, "themes": [("小主题", 3.0)], "detail": []})
     check("L1", "白话地图-分散持仓分支",
           "持仓分散，无明显单一主题。" in _disp and "主题词排行" not in _disp,
@@ -1104,13 +1105,12 @@ def test_l1_offline():
         def _get_paged(url, params=None, headers=None, **k):
             pg = int(str(params.get("page", "1,50")).split(",")[0])
             _pages.append(pg)
-            return _NR(_ni_page([pg * 10, pg * 10 + 1], 4) if pg == 1
-                       else _ni_page([pg * 10, pg * 10 + 1], 4))
+            return _NR(_ni_page([pg * 10, pg * 10 + 1], 4))
 
         fd.ttfund_get = _get_paged
         got = []
         fd._cache_write = lambda rel, out: got.append((rel, out))
-        # 两页聚合（record=4，每页 2 条 → 第 3 页拉满后 break 于 len>=total 之前?）
+        # 两页聚合（record=4，每页 2 条 → 第 2 页后 len(out)=4>=total 即 break）
         # record=4：p1→2条 p2→4条 → 第2页后 len(4)>=4 break，共 2 页
         out = fd.fund_new_issues(force_refresh=True)
         check("L1", "新发-两页聚合+record达标终止+费率剥离",
@@ -1142,7 +1142,7 @@ def test_l1_offline():
            "<div>基金数量：<span>540</span>只</div><div>经理人数：<span>73</span>人</div>"
            '<a href="https://fund.eastmoney.com/166002.html">中欧新蓝筹</a>'
            '<a href="https://fund.eastmoney.com/166002.html">中欧新蓝筹</a>'
-           '<a href="https://fund.eastmoney.com/000001.html">8</a>'
+           '<a href="https://fund.eastmoney.com/000001.html">88</a>'
            '<a href="https://fund.eastmoney.com/161725.html">基金品种</a>'
            + "<!--" + "x" * 10200 + "--></body></html>")
     _orig_get10, _cw10 = fd.ttfund_get, (fd._cache_read, fd._cache_write)
