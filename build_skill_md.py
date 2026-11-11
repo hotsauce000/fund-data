@@ -86,7 +86,7 @@ display_name: 基金鹰眼 FundHawk · 全域基金数据引擎
 display_name_en: FundHawk · Full-Spectrum Fund Data Engine
 description: {DESCRIPTION}
 description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集、白话持仓穿透地图、24792 只全市场排行、经理画像与抱团度、十年指数日线与 53 期规模全史——零 key 零登录，请求预算制防封，分层断言全绿。让每只基金在你眼前透明。
-description_en: The full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), plain-language holdings maps, 24,792-fund market rankings, manager profiles and crowding, 10-year index klines, 53-period scale history. Zero keys, zero login, 208 assertions green. Every fund, transparent.
+description_en: The full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), plain-language holdings maps, 24,792-fund market rankings, manager profiles and crowding, 10-year index klines, 53-period scale history. Zero keys, zero login, layered assertions green. Every fund, transparent.
 author: hotsauce000
 origin: custom
 version: {VERSION}

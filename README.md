@@ -343,7 +343,7 @@ python3 test_fund_data.py                  # 全链路 208 条（真数据，约
 - **预算审计**（L4）：每次跑完打印四线请求账本（基金域东财含分 host 明细/股票域东财/腾讯/巨潮）
 - **独立审查**：每个版本经 code-reviewer 独立审查闭环（V0.4.1 经三轮：初审 APPROVE → 建议落地 → 双通道复核 APPROVE）
 
-部署形态：本仓库与 `~/.agents/skills/fund-data/` 两处逐字节同步（另有 licai-map 本地服务端副本按需手动同步，属独立应用不入库），由 `build_skill_md.py` 从模块自动组装**双层文档**——SKILL.md 路由层（≈3K token，激活省 ~90%）+ reference.md 全量参考（按需读取）；函数签名速查由 ast 自动生成防漂移，构建时强校验体积上限与签名覆盖。
+部署形态：本仓库与 `~/.agents/skills/fund-data/` 两处逐字节同步（另有 licai-map 本地服务端副本按需手动同步，属独立应用不入库），由 `build_skill_md.py` 从模块自动组装**双层文档**——SKILL.md 路由层（≈4K token，激活省 ~88%）+ reference.md 全量参考（按需读取）；函数签名速查由 ast 自动生成防漂移，构建时强校验体积上限与签名覆盖。
 
 ## 版本历史
 
@@ -379,7 +379,7 @@ python3 test_fund_data.py                  # 全链路 208 条（真数据，约
 fund_data.py        # 核心模块（可直接 import；47 个公开函数）
 test_fund_data.py   # 208 条分层回归测试（支持 --offline-only 离线跑）
 build_skill_md.py   # 从模块自动组装双层文档（内嵌代码与源码同源直拼）
-SKILL.md            # Agent skill 路由层（build 产物·瘦入口 ~12KB/≈3K token）：铁律/场景路由/失效路由/签名速查
+SKILL.md            # Agent skill 路由层（build 产物·瘦入口 ~12KB/≈4K token）：铁律/场景路由/失效路由/签名速查
 reference.md        # 全量参考（按需读取层）：完整内嵌代码/P1~P25 坑区/端点路由/使用示例/版本记录
 PLAN-V0.4.0.md      # V0.4.0 规划与执行记录（含一手探测数据）
 archive/            # 已并入主模块的原型存档
