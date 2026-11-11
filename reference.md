@@ -175,7 +175,7 @@ pip install requests
 
 硬依赖 requests + 系统 curl（L7 中债通道需要，P11；macOS/Linux 自带）+ 系统 node（V0.5 巨潮抱团度/行业配置线的 enckey 计算，macOS/Linux 常见自带；无 node 时该两函数显式报错不静默）。pandas 可选。L6 穿透自带内嵌股票域通道，无需 a-stock-data 即可跑通；个股深度再加载 a-stock-data。
 
-## L1 前置层：统一入口 + 主键表
+## 层 1 · 前置层：统一入口 + 主键表（模块 L1）
 
 所有端点的前置依赖：
 
@@ -423,7 +423,7 @@ def _cache_write(rel: str, payload: "dict | list") -> None:
     tmp.replace(p)
 ```
 
-## L1 前置层：全量基金清单 + 归一化
+## 层 1 · 前置层：全量基金清单 + 归一化
 
 ```python
 
@@ -509,7 +509,7 @@ def resolve_fund_code(query: str) -> str:
     raise ValueError(f"{query!r} 有多个候选：{cands} ...")
 ```
 
-## 端点层
+## 层 2 · 端点层（模块 L4 + V0.1 端点）
 
 ### fund_snapshot（E2 ⭐主端点 + 自动降级）
 
@@ -1076,7 +1076,7 @@ def fund_realtime_nav(codes: list[str]) -> list[dict]:
     return out
 ```
 
-## 本地计算层（零网络）
+## 层 3 · 本地计算层（模块 L5，零网络）
 
 ```python
 
@@ -1406,7 +1406,7 @@ def holding_map(snapshot: dict, topn: int = 10) -> dict:
     }
 ```
 
-## L6 跨域穿透层（V0.2.0：重仓股 → 股票域 → 白话地图）
+## 层 4 · 跨域穿透层（模块 L6，V0.2.0：重仓股 → 股票域 → 白话地图）
 
 ```python
 # 通道来源与防封纪律均沿用 a-stock-data：腾讯批量行情（不封IP，1请求）+
@@ -1668,7 +1668,7 @@ def plain_text_map(p: dict) -> str:
     return "\n".join(lines)
 ```
 
-## L7 宏观利率层（V0.3.0：中债曲线族 + 东财利率报表 + 腾讯回购代理）
+## 层 5 · 宏观利率层（模块 L7，V0.3.0：中债曲线族 + 东财利率报表 + 腾讯回购代理）
 
 ```python
 # 服务基金域分析：债基利率敏感度解释 / 理财波动地图 / 期限匹配 / 信用利差监控。
@@ -2035,7 +2035,7 @@ def cn_treasury_realtime() -> dict:
     return out
 ```
 
-## V0.5 全市场数据层（rankhandler 排行底座 + 新发 + 公司画像 + 巨潮抱团度/行业配置）
+## 层 6 · 全市场数据层（V0.5：rankhandler 排行底座 + 新发 + 公司画像 + 巨潮抱团度/行业配置）
 
 ```python
 # 防封设计（第一约束，2026-11-10 实测钉死）：
@@ -2493,7 +2493,7 @@ def fund_industry_allocation(rdate: str = "", force_refresh: bool = False) -> li
     return out
 ```
 
-## V0.6 经理画像与专项组装层（持续性/规模/固收+/溢价/重仓探测/经理三件套）
+## 层 7 · 经理画像与专项组装层（V0.6：持续性/规模/固收+/溢价/重仓探测/经理三件套）
 
 ```python
 # 探针结论（2026-11-10 实测钉死）：
@@ -2867,7 +2867,7 @@ def manager_rank(pages: int = 1, force_refresh: bool = False) -> list[dict]:
     return out
 ```
 
-## V0.6.1 基准指数层（quant-excess 端点层收编：指数名查表 + 日线原语）
+## 层 8 · 基准指数层（V0.6.1，quant-excess 端点层收编：指数名查表 + 日线原语）
 
 ```python
 # 收编自 quant-excess 端点层（实战两轮审查的代码）：指数=EM push2his 主源（tt 线
@@ -3030,7 +3030,7 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
     return dedup
 ```
 
-## V0.6.2 规模全历史（F10 规模变动 gmbd 通道）
+## 层 7 · 规模全历史（V0.6.2，F10 规模变动 gmbd 通道）
 
 ```python
 # pingzhongdata 的规模史只有 ~5 期（图表数据）；gmbd 是 F10「规模变动」页同一

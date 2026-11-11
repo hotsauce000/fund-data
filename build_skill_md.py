@@ -62,9 +62,9 @@ DESCRIPTION = (
     "基准三曲线(本基金-同类平均-沪深300)/申赎状态/费率)、季度前十大持仓、区间净值+每日申赎状态、批量实时净值"
     "(N只1请求)、蛋卷跨域备胎，零网络的本地计算:复权净值(分红再投)/区间收益/最大回撤/波动/夏普/卡玛/管理费率标注/"
     "定投回测(XIRR真年化)/仓位史解读(加减仓信号)/同类百分位解读(一年前对照)/"
-    "相对表现(vs沪深300或同类平均:相对收益+β+相关性)，以及L6跨域穿透:重仓股实时行情+板块归属+主题聚合,一键输出'这只基金主要是白酒约86%'白话地图；"
-    "L7宏观利率层:中债曲线族40+条(1请求=1曲线1年日频)、信用利差、国债/SHIBOR/基准利率史、GC007、国债盘中实时；"
-    "V0.5全市场层:排行/初筛(2.4万只1请求,过滤排序本地0请求)、新发全量、公司画像、季度抱团度与行业配置(巨潮)；"
+    "相对表现(vs沪深300或同类平均:相对收益+β+相关性)，以及跨域穿透:重仓股实时行情+板块归属+主题聚合,一键输出'这只基金主要是白酒约86%'白话地图；"
+    "宏观利率层:中债曲线族40+条(1请求=1曲线1年日频)、信用利差、国债/SHIBOR/基准利率史、GC007、国债盘中实时；"
+    "全市场数据层:排行/初筛(2.4万只1请求,过滤排序本地0请求)、新发全量、公司画像、季度抱团度与行业配置(巨潮)；"
     "V0.6专项层:持续性/规模/固收+/溢价/重仓探测/经理画像与排行/指数日线与股票日K；"
     "V0.6.2规模全史(gmbd,53期含申赎流量)。"
     "请求预算制防封:单基金诊断≤2请求、当日磁盘缓存命中0请求、全市场筛选只走列表端点、巨潮独立限流线(1.5s+enckey)。"
@@ -344,11 +344,11 @@ pip install requests
 硬依赖 requests + 系统 curl（L7 中债通道需要，P11；macOS/Linux 自带）+ 系统 node（V0.5 巨潮抱团度/行业配置线的 enckey 计算，macOS/Linux 常见自带；无 node 时该两函数显式报错不静默）。pandas 可选。L6 穿透自带内嵌股票域通道，无需 a-stock-data 即可跑通；个股深度再加载 a-stock-data。
 """)
 
-REF.append("## L1 前置层：统一入口 + 主键表\n\n所有端点的前置依赖：\n")
+REF.append("## 层 1 · 前置层：统一入口 + 主键表（模块 L1）\n\n所有端点的前置依赖：\n")
 REF.append(code(header_code + sections["L1 前置层：限流入口 / 缓存目录 / 请求计数"]))
-REF.append("## L1 前置层：全量基金清单 + 归一化\n")
+REF.append("## 层 1 · 前置层：全量基金清单 + 归一化\n")
 REF.append(code(sections["L1 前置层：全量基金清单（主键表，缓存 30 天）"]))
-REF.append("## 端点层\n\n### fund_snapshot（E2 ⭐主端点 + 自动降级）\n")
+REF.append("## 层 2 · 端点层（模块 L4 + V0.1 端点）\n\n### fund_snapshot（E2 ⭐主端点 + 自动降级）\n")
 REF.append(code(sections["L4 解析层 + V0.1 端点：fund_snapshot（E2 主端点，1 请求 = 90% 静态数据）"]))
 REF.append("### fund_nav_history（E3 补充端点：区间 + 每日申赎状态）\n")
 REF.append(code(sections["V0.1 端点：fund_nav_history（E3 补充端点：区间 + 每日申赎状态）"]))
@@ -358,19 +358,19 @@ REF.append("### fund_detail_danjuan（D1 蛋卷跨域备胎）\n")
 REF.append(code(sections["V0.1 端点：蛋卷备胎（D1 档案 / 唯一跨域活路）"]))
 REF.append("### fund_realtime_nav（E6 批量实时净值，N 只 = 1 请求）\n")
 REF.append(code(sections["V0.1 端点：fund_realtime_nav（E6 批量实时净值，N 只 = 1 请求）"]))
-REF.append("## 本地计算层（零网络）\n")
+REF.append("## 层 3 · 本地计算层（模块 L5，零网络）\n")
 REF.append(code(sections["L5 本地计算层（零网络）"]))
-REF.append("## L6 跨域穿透层（V0.2.0：重仓股 → 股票域 → 白话地图）\n")
+REF.append("## 层 4 · 跨域穿透层（模块 L6，V0.2.0：重仓股 → 股票域 → 白话地图）\n")
 REF.append(code(sections[next(k for k in sections if k.startswith("L6"))]))
-REF.append("## L7 宏观利率层（V0.3.0：中债曲线族 + 东财利率报表 + 腾讯回购代理）\n")
+REF.append("## 层 5 · 宏观利率层（模块 L7，V0.3.0：中债曲线族 + 东财利率报表 + 腾讯回购代理）\n")
 REF.append(code(sections[next(k for k in sections if k.startswith("L7"))]))
-REF.append("## V0.5 全市场数据层（rankhandler 排行底座 + 新发 + 公司画像 + 巨潮抱团度/行业配置）\n")
+REF.append("## 层 6 · 全市场数据层（V0.5：rankhandler 排行底座 + 新发 + 公司画像 + 巨潮抱团度/行业配置）\n")
 REF.append(code(sections["V0.5 全市场数据层：rankhandler 排行/初筛 + 新发 + 公司 + cninfo 抱团度/行业配置"]))
-REF.append("## V0.6 经理画像与专项组装层（持续性/规模/固收+/溢价/重仓探测/经理三件套）\n")
+REF.append("## 层 7 · 经理画像与专项组装层（V0.6：持续性/规模/固收+/溢价/重仓探测/经理三件套）\n")
 REF.append(code(sections["V0.6 经理画像与专项组装层：持续性/规模/固收+/溢价/重仓探测/经理三件套"]))
-REF.append("## V0.6.1 基准指数层（quant-excess 端点层收编：指数名查表 + 日线原语）\n")
+REF.append("## 层 8 · 基准指数层（V0.6.1，quant-excess 端点层收编：指数名查表 + 日线原语）\n")
 REF.append(code(sections[next(k for k in sections if k.startswith("V0.6.1"))]))
-REF.append("## V0.6.2 规模全历史（F10 规模变动 gmbd 通道）\n")
+REF.append("## 层 7 · 规模全历史（V0.6.2，F10 规模变动 gmbd 通道）\n")
 REF.append(code(sections[next(k for k in sections if k.startswith("V0.6.2"))]))
 
 REF.append("""## 使用示例
