@@ -517,8 +517,8 @@ def test_l1_offline():
     _thin = (_repo / "SKILL.md").read_text(encoding="utf-8")
     _ref = (_repo / "reference.md").read_text(encoding="utf-8")
     _thin_b = len(_thin.encode("utf-8"))
-    check("L1", "架构-瘦SKILL体积上限", _thin_b < 12000,
-          f"{_thin_b}B（超重=有人往路由层塞长文，移 reference.md）")
+    check("L1", "架构-瘦SKILL体积上限", _thin_b < 13000,
+          f"{_thin_b}B/上限13000（含平台必填市场元数据~0.5KB；超重=往路由层塞长文，移 reference.md）")
     _pub = [n.name for n in _ast.parse((_repo / "fund_data.py").read_text(encoding="utf-8")).body
             if isinstance(n, _ast.FunctionDef) and not n.name.startswith("_")]
     check("L1", "架构-签名速查全覆盖", len(_pub) >= 32 and all(f"| `{n}(" in _thin for n in _pub),
