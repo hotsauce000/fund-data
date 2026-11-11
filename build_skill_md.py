@@ -82,6 +82,8 @@ _sig_md = "\n".join(f"| `{n}({a})` | {d[:34]} |" for n, a, d in _sig_rows())
 THIN = []
 THIN.append(f"""---
 name: fund-data
+slug: fund-data
+displayName: 基金数据底座 FundBase
 display_name: 基金数据底座 FundBase
 display_name_en: FundBase · The Data Foundation for China Funds
 description: {DESCRIPTION}
