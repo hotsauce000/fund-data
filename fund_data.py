@@ -2707,19 +2707,32 @@ BENCH_SECID = {
     "中证2000": "2.932000",
 }
 _SECID_RE = re.compile(r"[012]\.\d{6}")
+_TENCENT_KLINE_CAP = 800                       # 腾讯 fqkline 实测：≤800 全量返回；1000~2000
+                                               # 静默截断~641；≥2100 param error（sh600519 扫描，P25）
 
 
 def _kline_resolve(query: str) -> tuple:
-    """kline_daily 入参归一 → ("index", secid) | ("stock", 6位码)。纯函数可离线测。"""
+    """kline_daily 入参归一 → ("index", secid) | ("stock", 代码或带前缀符号)。纯函数离线可测。
+
+    前缀形态保留市场信息（审查实测：sh000016 若剥前缀会被按深市重推导成深康佳A——
+    沪指 000xxx 与深股 000xxx 大面积碰撞，静默错数据）；sh/sz 前缀 + 码值命中
+    BENCH_SECID 值域时路由回 index 走 EM 主源；399xxx 深指号段无股票冲突直路由指数。"""
     q = str(query).strip()
     if q in BENCH_SECID:
         return "index", BENCH_SECID[q]
     if _SECID_RE.fullmatch(q):
         return "index", q
-    if re.fullmatch(r"(\d{6})", q):
+    if re.fullmatch(r"399\d{3}", q):
+        return "index", "0." + q
+    if re.fullmatch(r"\d{6}", q):
         return "stock", q
-    if re.fullmatch(r"(sh|sz|bj)\d{6}", q.lower()):
-        return "stock", q.lower()[-6:]
+    m = re.fullmatch(r"(sh|sz|bj)(\d{6})", q.lower())
+    if m:
+        pref, code = m.group(1), m.group(2)
+        secid = ("1." if pref == "sh" else "0.") + code
+        if secid in set(BENCH_SECID.values()):
+            return "index", secid
+        return "stock", f"{pref}{code}"
     supported = "、".join(sorted(set(k for k in BENCH_SECID if "指数" not in k)))
     raise ValueError(
         f"kline_daily 不识别 {query!r}——支持：指数名（{supported}…）、secid（如 1.000300）、"
@@ -2742,8 +2755,9 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
 
     query 三形态：指数名（BENCH_SECID，如 "沪深300"/"中证红利"/"国证2000"）/
     EM secid（如 "1.000300"）/ 6 位股票代码（复用 _tencent_kline 腾讯通道）。
-    指数 = EM push2his 主源（tt 线 + F6 分流）+ 腾讯备胎（市场2无腾讯代码不降级）；
-    股票 = 腾讯 fqkline（不封 IP）。20h 缓存、键含 lmt；RiskControlError 不降级。
+    指数 = EM push2his 主源（tt 线 + F6 分流）+ 腾讯备胎（市场2无腾讯代码不降级；
+    腾讯 fqkline 实测上限 800 根，超过会静默截断/param error，备胎窗口自动钳制，P25）；
+    股票 = 腾讯 fqkline（不封 IP，lmt>800 显式报错引导指数形态）。20h 缓存、键含 lmt；RiskControlError 不降级。
     基金诊断用途：基准对照/风格温度/压力测试；个股深度分析仍归 a-stock-data。
     """
     lmt = int(lmt)
@@ -2751,7 +2765,18 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
         raise ValueError(f"lmt 至少 10 根，收到 {lmt}")
     kind, ident = _kline_resolve(query)
     if kind == "stock":
-        rows = _tencent_kline(ident, bars=lmt, force_refresh=force_refresh)
+        if lmt > _TENCENT_KLINE_CAP:
+            raise ValueError(
+                f"股票日K腾讯通道实测上限 {_TENCENT_KLINE_CAP} 根（更大会静默截断或 param error，"
+                f"P25）——更长窗口请用指数名或 secid 形态（EM 主源支持更大 lmt），收到 {lmt}")
+        try:
+            rows = _tencent_kline(ident, bars=lmt, force_refresh=force_refresh)
+        except RuntimeError as e:
+            hints = [c for c in ("0." + ident[-6:], "1." + ident[-6:])
+                     if c in BENCH_SECID.values()]
+            msg = str(e) + (f"——若 {ident[-6:]} 是指数，请用指数名或 secid 形态（如 {hints[0]}）"
+                            if hints else "")
+            raise RuntimeError(msg) from e
         if len(rows) < min(lmt, 60):
             raise RuntimeError(f"kline_daily 股票日K不足（{ident} 需≥{min(lmt, 60)} 实收 {len(rows)}）")
         return rows
@@ -2763,6 +2788,8 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
             return cached
     need = min(lmt, 100)
     rows: list = []
+    em_rows = 0
+    fb_note = "未启用"
     try:
         r = ttfund_get("https://push2his.eastmoney.com/api/qt/stock/kline/get",
                        params={"secid": ident, "klt": 101, "fqt": 1, "lmt": lmt,
@@ -2783,13 +2810,19 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
         raise                                          # 风控≠网络故障，绝不降级（F6 契约）
     except requests.RequestException:
         rows = []                                      # 网络类故障才走备胎
-    if len(rows) < need and use_tencent_fallback:
+    em_rows = len(rows)
+    if em_rows < need and use_tencent_fallback:
         sym = _secid_tencent_sym(ident)
-        if sym:
-            rows = []                                  # 重置防两源日期重叠污染
+        if sym is None:
+            fb_note = "备胎不可用（市场2中证指数无腾讯代码）"
+        else:
+            fb_note = "备胎失败"
+            eff = min(lmt, _TENCENT_KLINE_CAP)         # 腾讯 fqkline 上限（P25）：超限恒返空
+            kept = rows
+            rows = []                                  # 重置防两源日期/复权基线混拼
             try:
                 url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
-                       f"param={sym},day,,,{lmt},qfq")
+                       f"param={sym},day,,,{eff},qfq")
                 req = urllib.request.Request(url, headers={"Referer": "https://gu.qq.com/"})
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                 TENCENT_REQUEST_COUNT[0] += 1
@@ -2798,18 +2831,19 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
                 for arr in node.get("qfqday") or node.get("day") or []:
                     if len(arr) >= 3:
                         rows.append({"date": arr[0], "close": float(arr[2])})
-            except RiskControlError:
-                raise
-            except Exception:
-                pass                                   # 备胎也挂 → 下面统一语义化报错
-    if len(rows) < need:
-        raise RuntimeError(
-            f"指数日线获取失败且备胎不足（{ident}，需≥{need} 实收 {len(rows)}）")
+            except Exception as e:
+                fb_note = f"备胎失败（{str(e)[:40]}）"
+            if len(rows) < need:                       # 备胎也不够 → 回用 EM 有效行（诚实留痕）
+                rows = kept
     rows.sort(key=lambda x: x["date"])
     seen, dedup = set(), []
     for r in rows:                                     # 按日期去重（下游收益率序列重复即拒算）
         if r["date"] not in seen:
             seen.add(r["date"])
             dedup.append(r)
+    if len(dedup) < need:                              # 去重后过线（审查建议：防重复行虚过）
+        raise RuntimeError(
+            f"指数日线不足（{ident} 需≥{need}）：EM 实收 {em_rows} 行，{fb_note}，"
+            f"去重后 {len(dedup)} 行")
     _cache_write(rel, dedup)
     return dedup

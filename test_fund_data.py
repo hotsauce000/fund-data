@@ -889,8 +889,8 @@ def test_l1_offline():
           and fd._kline_resolve("中证A500") == ("index", "1.000510")
           and fd._kline_resolve("1.000905") == ("index", "1.000905")
           and fd._kline_resolve("600519") == ("stock", "600519")
-          and fd._kline_resolve("SZ300308") == ("stock", "300308"),
-          "指数名/secid/股票码/带前缀码")
+          and fd._kline_resolve("SZ300308") == ("stock", "sz300308"),
+          "指数名/secid/股票码/带前缀码（前缀保留市场信息）")
     expect_raise("L1", "K线-未知名拒绝",
                  lambda: fd._kline_resolve("纳斯达克"), "不识别")
     check("L1", "K线-secid→腾讯符号(市场2不降级)",
@@ -932,7 +932,7 @@ def test_l1_offline():
         fd.ttfund_get = lambda *a, **k: _KL(["2026-01-02,3000.5"] * 5)
         expect_raise("L1", "K线-样本不足语义化报错",
                      lambda: fd.kline_daily("1.000905", lmt=10, force_refresh=True,
-                                            use_tencent_fallback=False), "备胎不足")
+                                            use_tencent_fallback=False), "指数日线不足")
 
         def _raise_rc(*a, **k):                        # 差分锁：EM 403 → RiskControlError
             raise fd.RiskControlError("mock 403")      # 必须原样上抛且绝不触发腾讯备胎
@@ -946,6 +946,52 @@ def test_l1_offline():
         fd.ttfund_get = _orig_get6
         fd._cache_read, fd._cache_write = _cache_rw
         fd.TENCENT_REQUEST_COUNT[0] = _tx0
+
+    # 审查必须项回归锁：sh000xxx 沪指与深股 000xxx 碰撞（实测 sh000016 曾静默错成深康佳A）
+    check("L1", "K线-前缀命中基准值域回index",
+          fd._kline_resolve("sh000016") == ("index", "1.000016")
+          and fd._kline_resolve("sh000001") == ("stock", "sh000001")
+          and fd._kline_resolve("sz000016") == ("stock", "sz000016")
+          and fd._kline_resolve("399006") == ("index", "0.399006"),
+          "前缀保留市场信息+值域回index+399深指号段")
+    expect_raise("L1", "K线-股票超腾讯上限语义化报错",
+                 lambda: fd.kline_daily("600519", lmt=801), "上限")
+
+    # 备胎成功回落路径（审查覆盖缺口）：EM 短返 1 行 → 腾讯 mock 满 10 行
+    import types as _types
+    import urllib.request as _u
+    _orig_get7, _orig_bo = fd.ttfund_get, _u.build_opener
+    _tx7 = fd.TENCENT_REQUEST_COUNT[0]
+    _cw7 = (fd._cache_read, fd._cache_write)
+    try:
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda *a, **k: None
+        fd.ttfund_get = lambda *a, **k: _KL(["2026-01-02,3000.5"])
+
+        class _FakeOpen:
+            def open(self, req, timeout=None):
+                payload = {"data": {"sz000905": {"qfqday": [
+                    ["2026-01-02", "1", "3.0"], ["2026-01-03", "1", "3.1"],
+                    ["2026-01-06", "1", "3.2"], ["2026-01-07", "1", "3.3"],
+                    ["2026-01-08", "1", "3.4"], ["2026-01-09", "1", "3.5"],
+                    ["2026-01-10", "1", "3.6"], ["2026-01-13", "1", "3.7"],
+                    ["2026-01-14", "1", "3.8"], ["2026-01-15", "1", "3.9"]]}},
+                    "code": 0}
+                return _types.SimpleNamespace(
+                    read=lambda: json.dumps(payload).encode("utf-8"))
+
+        _u.build_opener = lambda *a, **k: _types.SimpleNamespace(
+            open=lambda req, timeout=None: _FakeOpen().open(req, timeout))
+        rows = fd.kline_daily("0.000905", lmt=10, force_refresh=True)
+        check("L1", "K线-EM短返→腾讯备胎成功回落",
+              len(rows) == 10 and rows[0]["date"] == "2026-01-02"
+              and fd.TENCENT_REQUEST_COUNT[0] == _tx7 + 1,
+              f"{len(rows)} 根来自备胎（腾讯账本 +{fd.TENCENT_REQUEST_COUNT[0] - _tx7}）")
+    finally:
+        fd.ttfund_get = _orig_get7
+        _u.build_opener = _orig_bo
+        fd._cache_read, fd._cache_write = _cw7
+        fd.TENCENT_REQUEST_COUNT[0] = _tx7
 
     # P23 实测补充：dt=15 目录页忽略 pi/pn，恒返回拼音前10——姓名路径不可查询（诚实边界）
     check("L1", "P23-dt15目录页陷阱入册",
