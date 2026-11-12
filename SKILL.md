@@ -124,6 +124,6 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 
 ## 深读与边界（按需）
 
-- 实现细节/坑区 P1~P25/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
+- 实现细节/坑区 P1~P26/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
 - 不覆盖：账户持仓/交易下单（ttskill）、盘中实时估值、货基万份收益、单基金行业史（E2停供）、语义选基、FOF底层明细与经理姓名索引（P23/P24）
 - 个股深度 → a-stock-data；holding_map() 是官方桥
