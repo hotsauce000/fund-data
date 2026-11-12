@@ -9,10 +9,10 @@ description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集�
 description_en: The full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), plain-language holdings maps, 24,792-fund market rankings, manager profiles and crowding, 10-year index klines, 53-period scale history. Zero keys, zero login, layered assertions green. The ground every fund application builds on.
 author: hotsauce000
 origin: custom
-version: 0.7.0
+version: 0.7.1
 ---
 
-# fund-data 路由层 V0.7.0
+# fund-data 路由层 V0.7.1
 
 本文件是**路由层**（≈4K token，激活只加载本文件）。细节/坑区/内嵌代码在同目录 **reference.md（按需读取）**；运行代码 `fund_data.py`（import 用，勿通读）：
 
@@ -114,7 +114,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | `nav_divergence(query, force_refresh=False)` | 重仓探测：净值收益 vs 上季重仓加权收益的背离度（疑似调仓信号） |
 | `fund_manager(query, force_refresh=False)` | 基金经理画像（1 请求，24h 缓存）：ID 直查或基金码转接现任经 |
 | `manager_rank(pages=1, force_refresh=False)` | 经理排行（坑P23：服务端仅姓名序，50 条/页，record 强校 |
-| `kline_daily(query, lmt=2600, use_tencent_fallback=True, force_refresh=False)` | 指数/股票日线收盘序列 [{date, close}] 升序（基准指 |
+| `kline_daily(query, lmt=2600, use_tencent_fallback=True, force_refresh=False)` | 指数/股票日线收盘序列 [{date, close, source? |
 | `fund_scale_history(query, force_refresh=False)` | 基金规模全历史（F10 规模变动 gmbd 通道，1 请求，当日缓存 |
 | `fund_fees(query, force_refresh=False)` | 基金费率全表（F10 购买信息 jjfl 页，1 请求，当日缓存） |
 

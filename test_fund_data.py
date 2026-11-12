@@ -937,8 +937,9 @@ def test_l1_offline():
                               use_tencent_fallback=False)
         check("L1", "K线-EM解析+按日期去重",
               len(rows) == 11 and rows[0]["date"] == "2026-01-02"
-              and rows[-1]["date"] == "2026-01-12",
-              f"{len(rows)} 根（重复日期行+脏行剔除，01-02 只留一条）")
+              and rows[-1]["date"] == "2026-01-12"
+              and rows[0]["source"] == "push2his",
+              f"{len(rows)} 根（重复日期行+脏行剔除，01-02 只留一条，source=push2his）")
         fd._push2_get = _kl_mock(["2026-01-02,3000.5"] * 5)
         expect_raise("L1", "K线-样本不足语义化报错",
                      lambda: fd.kline_daily("1.000905", lmt=10, force_refresh=True,
@@ -975,8 +976,9 @@ def test_l1_offline():
         fb_rows = fd.kline_daily("1.000905", lmt=10, force_refresh=True)
         _u6.build_opener = _orig_bo6                 # 用毕即还（后续块免受污染）
         check("L1", "K线-通道网络失败落腾讯备胎(P26主干)",
-              len(fb_rows) == 11 and fd.TENCENT_REQUEST_COUNT[0] == _tx0 + 1,
-              f"mock 备胎供 {len(fb_rows)} 根（腾讯账本 +1，零真实网络）")
+              len(fb_rows) == 11 and fb_rows[0]["source"] == "tencent"
+              and fd.TENCENT_REQUEST_COUNT[0] == _tx0 + 1,
+              f"mock 备胎供 {len(fb_rows)} 根（腾讯账本 +1，零真实网络，source=tencent）")
     finally:
         fd._push2_get = _orig_p2g
         fd._cache_read, fd._cache_write = _cache_rw
@@ -989,6 +991,164 @@ def test_l1_offline():
           and fd._kline_resolve("sz000016") == ("stock", "sz000016")
           and fd._kline_resolve("399006") == ("index", "0.399006"),
           "前缀保留市场信息+值域回index+399深指号段")
+
+    # ── V0.7.1 tencent_quote 指数路由派生锁（_SH_INDEX_Q 从 BENCH_SECID 派生）──
+    # 旧手工集合漏 000922/000906/000015/000510/000985——裸码曾被误路由 sz 深股
+    # （sh000016 同族静默错数据）；派生后单一事实源，加指数不再漂移
+    check("L1", "路由-中证沪指码派生覆盖",
+          fd._tencent_prefix("000922") == "sh000922"
+          and fd._tencent_prefix("000906") == "sh000906"
+          and fd._tencent_prefix("000015") == "sh000015"
+          and fd._tencent_prefix("000510") == "sh000510"
+          and fd._tencent_prefix("000985") == "sh000985"
+          and fd._tencent_prefix("000300") == "sh000300"
+          and fd._tencent_prefix("000010") == "sh000010",
+          "5 个此前误路由码全部回沪（历史成员 000010 保留）")
+    check("L1", "路由-股票码不受派生影响",
+          fd._tencent_prefix("000001") == "sz000001"
+          and fd._tencent_prefix("600519") == "sh600519"
+          and fd._tencent_prefix("300308") == "sz300308",
+          "深股/沪股/创业板原路由不变")
+
+    # ── V0.7.1 push2 连接级熔断（坑P26：IP 缓释桶）离线单元 ──
+    import tempfile as _tempfile7
+    import shutil as _shutil7
+    _tmpdir7 = Path(_tempfile7.mkdtemp())
+    _connf7 = fd._push2_conn_file
+    _jit7, _thr7, _cbchk7 = fd._PUSH2_JITTER, fd._cross_proc_throttle, fd._cbreak_check
+    _sess7, _fails7 = fd.requests.Session, fd._push2_conn_fails[0]
+    _mk7 = [0]
+
+    class _ConnFailSess7:                          # 连接级失败（RemoteDisconnected mock）
+        def __init__(self):
+            _mk7[0] += 1
+            self.trust_env = True
+            self.headers = {}
+
+        def get(self, *a, **k):
+            raise fd.requests.RequestException("RemoteDisconnected mock")
+
+        def close(self):
+            pass
+
+    class _OkResp7:
+        status_code = 200
+        text = '{"rc":0}'
+
+        def json(self):
+            return {"rc": 0}
+
+    class _OkSess7:
+        def __init__(self):
+            _mk7[0] += 1
+            self.trust_env = True
+            self.headers = {}
+
+        def get(self, *a, **k):
+            return _OkResp7()
+
+        def close(self):
+            pass
+
+    try:
+        fd._push2_conn_file = lambda: _tmpdir7 / ".cbreak_push2conn"   # 标记重定向 tmp
+        fd._PUSH2_JITTER = (0.0, 0.0)             # 零抖动（离线快跑）
+        fd._cross_proc_throttle = lambda *a, **k: None
+        fd._cbreak_check = lambda *a, **k: None    # F2 真标记隔离（本机在线跑挂过不污染）
+        fd._push2_conn_fails[0] = 0
+        fd.requests.Session = _ConnFailSess7
+        expect_raise("L1", "熔断-首败上抛通道错",
+                     lambda: fd._push2_get("http://x", context="t1"), "push2 通道失败")
+        check("L1", "熔断-首败仅计数不落盘",
+              not fd._push2_conn_file().exists() and fd._push2_conn_fails[0] == 1
+              and _mk7[0] == 1,
+              f"Session 建 {_mk7[0]} 次，连败计数 1（未触发停机）")
+        expect_raise("L1", "熔断-二连败触发停机",
+                     lambda: fd._push2_get("http://x", context="t2"), "push2 通道失败")
+        check("L1", "熔断-停机标记落盘",
+              fd._push2_conn_file().exists() and _mk7[0] == 2,
+              f".cbreak_push2conn 已写（Session 建 {_mk7[0]} 次，独立于 F2 标记文件）")
+        _mk_before = _mk7[0]
+        expect_raise("L1", "熔断-停机期零网络直通",
+                     lambda: fd._push2_get("http://x", context="t3"), "熔断中")
+        check("L1", "熔断-停机期不再发请求",
+              _mk7[0] == _mk_before,
+              f"停机期 Session 新建 {_mk7[0] - _mk_before} 次（应为 0——降级链接管）")
+        # 成功清零语义：删标记 → 1 败 → 1 成功（清零）→ 再 1 败 → 不落盘
+        fd._push2_conn_file().unlink()
+        fd._push2_conn_fails[0] = 0
+        expect_raise("L1", "熔断-清零场景首败",
+                     lambda: fd._push2_get("http://x", context="t4"), "push2 通道失败")
+        fd.requests.Session = _OkSess7
+        d7 = fd._push2_get("http://x", context="ok")
+        check("L1", "熔断-成功清零+期满自愈放行",
+              d7 == {"rc": 0} and fd._push2_conn_fails[0] == 0
+              and not fd._push2_conn_file().exists(),
+              "成功响应清零连败计数；过/删标记后正常放行")
+        fd.requests.Session = _ConnFailSess7
+        expect_raise("L1", "熔断-清零后孤立失败",
+                     lambda: fd._push2_get("http://x", context="t5"), "push2 通道失败")
+        check("L1", "熔断-孤立失败不累积停机",
+              fd._push2_conn_fails[0] == 1 and not fd._push2_conn_file().exists(),
+              "成功清零后单次失败重新从 1 计（不误停机）")
+        # 过期标记自动复位（有界试探：写远过去 until → check 复位放行）
+        fd._push2_conn_file().write_text("1000")
+        fd.requests.Session = _OkSess7
+        d7b = fd._push2_get("http://x", context="heal")
+        check("L1", "熔断-过期标记自动复位",
+              d7b == {"rc": 0} and not fd._push2_conn_file().exists(),
+              "停机期满自动复位放行（每小时探测有界）")
+    finally:
+        fd._push2_conn_file = _connf7
+        fd._PUSH2_JITTER, fd._cross_proc_throttle = _jit7, _thr7
+        fd._cbreak_check = _cbchk7
+        fd.requests.Session = _sess7
+        fd._push2_conn_fails[0] = 0
+        _shutil7.rmtree(_tmpdir7, ignore_errors=True)
+
+    # ── V0.7.1 国债实时短缓存 + 值域守卫 + 脏值降级（离线）──
+    _p2g7b, _cw7b = fd._push2_get, (fd._cache_read, fd._cache_write)
+    _cbcurve7 = fd.cb_yield_curve
+    _calls7b, _store7b = [0], {}
+    try:
+        def _fake_p2g7b(url, params=None, context=""):
+            _calls7b[0] += 1
+            return {"data": {"f43": 16059, "f58": "中国10年期国债",
+                             "f169": -34, "f170": -21}}
+
+        fd._push2_get = _fake_p2g7b
+        fd._cache_read = lambda rel, max_age_hours=None: _store7b.get(rel)
+        fd._cache_write = lambda rel, payload: _store7b.__setitem__(rel, payload)
+        rt7 = fd.cn_treasury_realtime()
+        rt7b = fd.cn_treasury_realtime()           # 300s 内二调：命中短缓存 0 请求
+        check("L1", "国债实时-短缓存二调0请求",
+              _calls7b[0] == 4 and rt7["10y"]["yield_pct"] == 1.6059
+              and rt7["as_of"] == "盘中(push2)"
+              and "treasury/realtime_push2" in next(iter(_store7b), "")
+              and rt7b["time"] == rt7["time"],
+              f"一调 {_calls7b[0]} 请求（4 期限）、二调 0（300s 短缓存），"
+              f"10y={rt7['10y']['yield_pct']}")
+        # 值域守卫：f43=200000 → y=20 越界 → 拒绝静默脏值 → 降级中债收盘（不写缓存）
+        def _fake_dirty7b(url, params=None, context=""):
+            _calls7b[0] += 1
+            return {"data": {"f43": 200000}}
+
+        fd._push2_get = _fake_dirty7b
+        fd.cb_yield_curve = lambda curve, year=None: {"points": [
+            {"date": "2026-11-11", "term": t, "yield_pct": 1.5 + i * 0.1}
+            for i, t in enumerate(["2y", "5y", "10y", "30y"])]}
+        _store7b.clear()
+        _calls7b[0] = 0
+        rt7c = fd.cn_treasury_realtime()
+        check("L1", "国债实时-脏值守卫降级不写缓存",
+              "收盘(降级" in rt7c["as_of"] and rt7c["10y"]["change"] is None
+              and not _store7b and _calls7b[0] == 1,
+              f"首期限越界即触发降级（{_calls7b[0]} 请求后走中债收盘，短缓存未写）")
+    finally:
+        fd._push2_get = _p2g7b
+        fd._cache_read, fd._cache_write = _cw7b
+        fd.cb_yield_curve = _cbcurve7
+
     expect_raise("L1", "K线-股票超腾讯上限语义化报错",
                  lambda: fd.kline_daily("600519", lmt=801), "上限")
 
@@ -1020,8 +1180,9 @@ def test_l1_offline():
         rows = fd.kline_daily("0.000905", lmt=10, force_refresh=True)
         check("L1", "K线-EM短返→腾讯备胎成功回落",
               len(rows) == 10 and rows[0]["date"] == "2026-01-02"
+              and rows[0]["source"] == "tencent"
               and fd.TENCENT_REQUEST_COUNT[0] == _tx7 + 1,
-              f"{len(rows)} 根来自备胎（腾讯账本 +{fd.TENCENT_REQUEST_COUNT[0] - _tx7}）")
+              f"{len(rows)} 根来自备胎（腾讯账本 +{fd.TENCENT_REQUEST_COUNT[0] - _tx7}，source=tencent）")
     finally:
         fd.ttfund_get = _orig_get7
         _u.build_opener = _orig_bo
@@ -1486,13 +1647,17 @@ def test_l2_smoke():
     _n_tt, _n_tx = fd.TT_REQUEST_COUNT[0], fd.TENCENT_REQUEST_COUNT[0]
     _n_em = fd.EM_REQUEST_COUNT[0]
     fd.kline_daily("沪深300")                       # 二次必命中当日缓存
-    check("L2", "B1 沪深300-全史+缓存0请求(P26双形态)",
-          len(idx300) >= 800            # 主源自愈≈2600 / 冷却期腾讯备胎=800（P25上限）
+    _src300 = idx300[0].get("source", "")           # V0.7.1：行内 source 标注（旧缓存无键容错）
+    check("L2", "B1 沪深300-全史+缓存0请求(P26双形态+source)",
+          len(idx300) >= 800            # 主源≈2600 / 缓释桶空期腾讯备胎=800（P25上限）
+          and (_src300 == "tencent"                 # 备胎形态：800 根窗口如实标注
+               or (_src300 == "push2his" and len(idx300) >= 2000)   # 主源形态收紧=十年全史回归
+               or _src300 == "")                    # ≤20h 旧缓存行无 source（升级过渡期）
           and idx300[0]["date"] < idx300[-1]["date"]
           and idx300[-1]["close"] > 1000
           and fd.TT_REQUEST_COUNT[0] == _n_tt and fd.TENCENT_REQUEST_COUNT[0] == _n_tx
           and fd.EM_REQUEST_COUNT[0] == _n_em,   # P26 后主源走 em 线（三账本全 0）
-          f"{len(idx300)} 根 {idx300[0]['date']}→{idx300[-1]['date']} "
+          f"{len(idx300)} 根 source={_src300 or '旧缓存'} {idx300[0]['date']}→{idx300[-1]['date']} "
           f"最新收盘 {idx300[-1]['close']}（二调 tt/tx/em 0/0/0）")
     idxdvd = fd.kline_daily("中证红利", lmt=300)
     check("L2", "B1 中证红利-secid市场1通道",

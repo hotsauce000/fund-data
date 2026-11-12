@@ -1,13 +1,20 @@
-# fund-data 完整参考（reference.md · 按需读取层）V0.7.0
+# fund-data 完整参考（reference.md · 按需读取层）V0.7.1
 
 > 本文件按需读取：调试 / 扩展 / 排查坑时才打开，勿随 skill 激活预加载。
 > 路由与签名速查见 SKILL.md；本文件内嵌代码与 fund_data.py 同源直拼（构建时生成）。
 
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 
-# fund-data 基金底层数据工具包 V0.7.0 模块全档
+# fund-data 基金底层数据工具包 V0.7.1 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.7.0（2026-11-12）：217/217 断言实测通过**（L1单元147 · L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.7.1（2026-11-12）：232/232 断言实测通过**（L1单元162 · L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+
+**V0.7.1 push2 防复发加固（IP 缓释桶定案，五发探针实证）：**
+- 🔴 **P26 定性修正**：封锁=**IP 级缓释桶限流**——健康期容量大（treasury 4 连发数周无事）、惩罚期容量极小（3 连发即放空、第 4 发 RST）且恢复慢；12:16 三连过（同栈同 UA）**证伪「TLS 指纹永久黑名单」**，12:22/12:23 两连挂定案重触机制（上午 12 连发 0/6、1/6 是热窗观测，混淆了冷却与指纹）。教训：**诊断行为本身会烧 IP 额度——排查封锁先 ≤5 次小样本，绝不做几十连发**
+- 🟢 **连接级熔断（新防线）**：`_push2_get` 单发即弃（删内部重试——1 调用=1 网络命中）+ 连续 2 败写独立停机标记（`.cbreak_push2conn`，与 F2 分工：F2 管 403/429 显式风控、本线管 RST/超时/空体无状态码形态）停机 3600s——停机期零网络直通 RuntimeError，降级链自动接管（国债→中债收盘/kline→腾讯备胎/板块→穿透单股降级）；期满自然恢复，每小时真实请求 ≤2 次
+- 🟢 **`cn_treasury_realtime` 300s 盘中短缓存**（5 分钟内重复调用 0 请求）+ 值域守卫 0<y<15（拒脏值，ulist 式全零源即死于此）；`kline_daily` 指数路径行内 `source` 字段（push2his/tencent 诚实标注——主源健康但历史短的指数不能按长度推断来源）
+- 🟢 **`concept_blocks` 迁入 `_push2_get`**（原走 em_get 无防线裸奔同域——上午全量测试崩溃的漏列暴露点）+ **`_SH_INDEX_Q` 从 BENCH_SECID 派生**（修 tencent_quote 裸码路由 000922→sz 深股静默错数据，5 码补齐）
+- ⚪ ulist.np 批量方案实证否决：对 171 债券 secid 只回全零值（午休 tick 缺失或源未接线，两说未定案）且与单发共享同一 IP 桶——批量收益抵不过触桶风险
 
 **V0.6.1 基准指数层（quant-excess 端点层收编，kline_daily 一函数三形态）：**
 - 🟢 **B1 `kline_daily`**：指数/股票日线收盘原语——指数名查表（沪深300/中证500/红利/国证2000/中证2000 等 15 指数、20 别名键）/EM secid/6 位股票码；指数走 push2his 主源（F6 分流）+ 腾讯备胎（市场 2 无腾讯码不降级），股票复用 `_tencent_kline` 腾讯通道；20h 缓存键含 lmt 防窗口截断；实测沪深300 十年 2600 根、二调 0 请求
@@ -17,7 +24,7 @@
 - 🔴 **字段名不副实清偿**：`fund_metrics().mgmt_fee_pct` 实为现申购费→改名 `subscription_fee_pct`（源端点实证：E2 fund_Rate=0.15 申购现价；管理费 1.20 只在 F10）；snapshot.manager 三字段改名——`tenure_start`→`total_tenure`（累计时长文本非日期，EM 原名 workTime）、`fund_size_yi`→`current_scale_text`（带单位字符串非 float）、`return_pct`→`return_chart`（三系列图表对象非标量）。旧键除名不双写（破坏性升级）
 - 🟢 **B3 `fund_fees`**：F10 jjfl 费率全表——运作费三率（管理/托管/销售服务，每年%）+ 认购/申购（原/天天优惠）/赎回三阶梯（表头特征分派防插表错列；固定费档保原文）。赎回阶梯直接回答「拿多久赎回才划算」。实测 005001：管理1.20/托管0.20/申购<200万 1.50/0.15/赎回五档至 ≥730天免
 - ✅ **syl 四窗口源端点实证无误**：005001 本地复权交叉对照——近3月/近6月/近1年吻合、近1月=官方20交易日口径（残差0.03）；fees 三标量验证正确
-- 🔴 **P26 push2 系 TLS 指纹墙应急**：requests 栈整体被识别（新建 Session 无效、curl 亦封）——`_push2_get` 探测通道 + kline 自动落腾讯备胎 + 国债实时中债收盘降级（as_of 口径标注）
+- 🔴 **P26 push2 系封锁应急**（V0.7.0 当时定性「TLS 指纹墙」，V0.7.1 经五发探针修正为 IP 缓释桶，见上）：`_push2_get` 探测通道 + kline 自动落腾讯备胎 + 国债实时中债收盘降级（as_of 口径标注）
 
 **V0.6.0 经理画像与专项组装层（八函数，源全部一手实测钉死）：**
 - 🟢 **`rank_persistence`**：fund_rank 缓存上算各周期同类分位（不高于该值占比口径，桶内最高=100），纳入门槛 ytd+1y 且 ≥4 周期；consistent=全周期 ≥75 分位——零请求「长牛」初筛
@@ -173,7 +180,7 @@
 | P23 经理接口遗存 | 旧名单页404；dt=15 退化为固定10条样本；dt=14 sc 只认 XML 元素名（20 候选全无效）、pn≤50 | 经理ID/基金码两路进 `fund_manager`；排行如实标注姓名序；姓名→ID 无索引 |
 | P24 FOF 底层无接口 | 五源（东财F10/App/蛋卷/好买/新浪）均只有股票直持仓 | 基金投资明细仅存季报 PDF——诚实边界，FOF 驾驶舱降级为池+仓位史+直持仓穿透 |
 | P25 push2his日K形态 | fields2 只取 f51,f53（日期,收盘）；市场2（中证指数公司）无腾讯代码不可备胎；缓存键必须含 lmt 防窗口截断 | `kline_daily` F6 分流（RiskControlError 不降级）+ 日期去重 + need=min(lmt,100) 下限 |
-| P26 push2系TLS指纹墙 | requests 栈（urllib3/OpenSSL）整体被识别——新建 Session 亦全挂（12 连发实验 0/6、1/6），「裸 requests 偶通」只是计数运气；curl 亦被掐；另有按 IP 渐进冷却 | `_push2_get` 探测通道（每次新建 Session）+ kline 自动落腾讯备胎 + 国债实时中债收盘降级（as_of 标注）；⏳ 待办：冷却后重探（httpx[h2] 换栈/curl 持久进程/代理池） |
+| P26 push2系IP缓释桶 | 封锁=**IP 级缓释桶**：惩罚期容量极小（3 连发即放空、第 4 发 RST）、恢复慢（小时级续量）、溢出全客户端全掐（curl 亦然）；健康期容量大（4 连发数周无事）。12:16 三连过证伪「TLS 指纹永久黑名单」，12:22/12:23 两连挂定案重触（上午 12 连发系热窗观测）。教训：诊断行为本身烧 IP 额度，排查先 ≤5 次小样本 | `_push2_get` 单发即弃 + flock 地板 + 0.5~3.0s 抖动 + **连接级熔断**（2 连败停 1h，独立标记 `.cbreak_push2conn`，停机期零网络）+ 降级链（kline→腾讯备胎/国债→中债收盘 300s 短缓存+值域守卫/板块→穿透单股降级）；TLS 指纹假说未排除但不伪装（不军备竞赛） |
 
 ## Prerequisites
 
@@ -249,7 +256,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 
 FUND_CACHE_DIR = Path.home() / ".fund_data_cache"
@@ -1449,53 +1456,97 @@ def em_get(url: str, params: Optional[dict] = None,
             time.sleep(2.0)
 
 
+# ── push2 系连接级熔断（V0.7.1，坑 P26：IP 缓释桶限流）─────────────────
+# 与 F2（403/429 显式风控）分工：这里管连接层失败（RST/超时/空体/非 JSON——
+# 无状态码，F2 看不见）。2026-11-12 五发探针实测：IP 缓释桶惩罚期容量极小
+# （3 连发即放空重触），诊断期 50+ 连发无人拦截即此缺口。连续 2 败即停机
+# 3600s——停机期零网络直通 RuntimeError，既有降级链自动接管（国债→中债收盘、
+# kline→腾讯备胎、concept_blocks→penetrate 单股降级）；期满自然恢复，
+# 每小时真实请求 ≤2 次，不自己放空桶。
+_PUSH2_JITTER = (0.5, 3.0)          # flock 地板之上叠加的随机抖动（打掉节拍器特征；测试置 (0,0)）
+_push2_conn_fails = [0]             # 连续连接级失败计数（成功清零；调用级口径）
+_PUSH2CONN_COOLDOWN = 3600          # 停机 1 小时
+
+
+def _push2_conn_file() -> Path:
+    return FUND_CACHE_DIR / ".cbreak_push2conn"
+
+
+def _push2_conn_check():
+    """连接级熔断检查：停机期内零网络直接 RuntimeError（降级链自动接管）。"""
+    f = _push2_conn_file()
+    if f.exists():
+        try:
+            until = float((f.read_text().split() or ["0"])[0])
+        except (ValueError, OSError):                # 与写侧对称：IO 故障视为无标记
+            until = 0.0
+        if until > time.time():
+            remain = int(until - time.time())
+            raise RuntimeError(
+                f"push2 系连接级熔断中（疑似 IP 缓释桶额度耗尽，已自动停机保护），"
+                f"剩 {remain}s。停机期零网络——降级链自动接管（国债→中债收盘、"
+                f"kline→腾讯备胎）；继续请求只会延长封锁，稍后再试。")
+        f.unlink(missing_ok=True)                    # 期满自动复位
+        _push2_conn_fails[0] = 0
+
+
+def _push2_conn_fail(why: str):
+    """记录一次连接级失败；连续 2 次写停机标记（本次调用照常抛错，下次起零网络）。"""
+    _push2_conn_fails[0] += 1
+    if _push2_conn_fails[0] >= 2:
+        try:
+            _push2_conn_file().parent.mkdir(parents=True, exist_ok=True)
+            # 标记内容「到期时间戳 + 触发原因」——运维 cat 即知何时为何停机
+            _push2_conn_file().write_text(f"{time.time() + _PUSH2CONN_COOLDOWN:.0f} {why}")
+        except OSError:
+            pass
+        _push2_conn_fails[0] = 0
+
+
 def _push2_get(url: str, params: Optional[dict] = None, context: str = "") -> dict:
-    """push2/push2his 专用「每次新建 Session」通道（坑P26）。
+    """push2/push2his 专用「单发即弃」通道（坑 P26：IP 缓释桶限流）。
 
-    2026-11-12 定案实验（12 连发）：push2/push2his 对 requests 栈（urllib3/OpenSSL
-    TLS 指纹）**整体识别**——新建 Session 亦 0/6、1/6 全挂（早先"裸 requests 200"
-    只是计数未达阈值的运气）；curl 亦被掐。⏳ 待办：待 IP/指纹冷却后重探（长期候选：
-    换 TLS 栈 httpx[h2]、curl 持久进程、或代理池）。
-    当前定位：**探测通道**——冷却自愈后可恢复主源地位；冷却期失败自动落腾讯备胎
-    （kline）或中债收盘降级（国债实时），调用方无感。防封：em 线全套防线照走
-    （熔断检查 + flock 节流 + EM_REQUEST_COUNT 账本）；403/429 → RiskControlError
-    计熔断不重试；网络类失败重试 1 次后落备胎，绝不轰炸。"""
-    last_err = ""
-    for attempt in (1, 2):
-        _cbreak_check("em")
-        _cross_proc_throttle("em", EM_MIN_INTERVAL)
-        EM_REQUEST_COUNT[0] += 1
-        sess = requests.Session()
-        sess.trust_env = False                          # P12 直连
-        sess.headers.update({"User-Agent": UA})         # 与 EM_SESSION 同 UA——重探时
-        try:                                            # 不把 UA 层拦截误判为 TLS 指纹
-            r = sess.get(url, params=params, timeout=10,
-                         headers={"Referer": "https://quote.eastmoney.com/"})
-        except requests.RequestException as e:
-            last_err = f"{type(e).__name__}: {str(e)[:60]}"
-            if attempt == 2:
-                break
-            time.sleep(1.0)
-            continue
-        finally:
-            sess.close()
-        if r.status_code in (403, 429):
-            _cbreak_signal("em", f"HTTP {r.status_code} push2 {context}")
-            raise RiskControlError(          # 风控信号不重试（对齐 em_get 调用方语义）
-                f"HTTP {r.status_code}（push2 {context}）：疑似{_line_label('em')}风控信号，已计入熔断")
-        if r.status_code == 200 and r.text.strip():
-            try:
-                return r.json()
-            except ValueError:
-                last_err = f"非JSON: {r.text[:60]!r}"
-        else:
-            last_err = f"HTTP {r.status_code} {r.text[:60]!r}"
-        if attempt == 1:
-            time.sleep(1.0)
-    raise RuntimeError(f"push2 通道失败（{context}）: {last_err}")
-
-
-_SH_INDEX_Q = {"000300", "000905", "000016", "000688", "000852", "000010"}
+    2026-11-12 五发探针定案：封锁=IP 级缓释桶——健康期容量大（4 连发数周无事），
+    惩罚期（烧穿后）容量极小（3 连发即放空、第 4 发 RST）且恢复慢（小时级续量）；
+    12:16 三连过（同栈同 UA）证伪「TLS 指纹永久黑名单」，12:22/12:23 两连挂定案
+    重触机制。对策（不跟指纹识别军备竞赛）：单发即弃（1 调用=1 网络命中）+
+    flock 跨进程地板 + 随机抖动 + 连接级熔断（2 连败停 1h）——桶满正常用、桶空
+    自动退避，调用方无感（降级链接管）。403/429 → RiskControlError 计 F2 熔断
+    不重试不降级（F6 契约）。"""
+    _push2_conn_check()                              # 连接级熔断：停机期零网络直通
+    _cbreak_check("em")                              # F2：403/429 显式风控熔断（独立标记）
+    _cross_proc_throttle("em", EM_MIN_INTERVAL)      # F1 跨进程地板（P12 直连）
+    if _PUSH2_JITTER[1] > 0:
+        # 抖动打掉节拍器特征。注：sleep 在 flock 释放后——跨进程相邻请求发起间隔
+        # 下界=EM_MIN_INTERVAL-jitter_max（非严格 1.0s），单发即弃+连接级熔断兜底
+        # 下的有意取舍（单进程内间隔仍恒 ≥1.5s）
+        time.sleep(random.uniform(*_PUSH2_JITTER))
+    EM_REQUEST_COUNT[0] += 1
+    sess = requests.Session()
+    sess.trust_env = False                           # P12 直连（不读系统/环境代理）
+    sess.headers.update({"User-Agent": UA})          # 与 EM_SESSION 同 UA——重探时
+    try:                                            # UA 层拦截不被误判为指纹层
+        r = sess.get(url, params=params, timeout=10,
+                     headers={"Referer": "https://quote.eastmoney.com/"})
+    except requests.RequestException as e:
+        _push2_conn_fail(f"{type(e).__name__} {context}")
+        raise RuntimeError(f"push2 通道失败（{context}）: {type(e).__name__}: {str(e)[:60]}")
+    finally:
+        sess.close()
+    if r.status_code in (403, 429):
+        _cbreak_signal("em", f"HTTP {r.status_code} push2 {context}")
+        raise RiskControlError(          # 风控信号不重试不降级（对齐 em_get 调用方语义）
+            f"HTTP {r.status_code}（push2 {context}）：疑似{_line_label('em')}风控信号，已计入熔断")
+    if r.status_code == 200 and r.text.strip():
+        try:
+            d = r.json()
+        except ValueError:
+            _push2_conn_fail(f"非JSON {context}")
+            raise RuntimeError(f"push2 通道失败（{context}）: 非JSON: {r.text[:60]!r}")
+        _push2_conn_fails[0] = 0                     # 成功清零（孤立抖动不累积停机）
+        return d
+    _push2_conn_fail(f"HTTP {r.status_code}/空体 {context}")
+    raise RuntimeError(f"push2 通道失败（{context}）: HTTP {r.status_code} {r.text[:60]!r}")
 
 
 def _tencent_prefix(code: str) -> str:
@@ -1588,10 +1639,10 @@ def concept_blocks(stock_code: str, use_cache: bool = True) -> list[str]:
               "secid": f"{em_market_code(stock_code)}.{stock_code}",
               "spt": "3", "pi": "0", "pz": "200", "po": "1",
               "fields": "f12,f14,f3,f128"}
-    r = em_get("https://push2.eastmoney.com/api/qt/slist/get", params=params,
-               headers={"User-Agent": UA, "Referer": "https://quote.eastmoney.com/"})
-    assert_not_risk_control(r, "em", "push2 slist")
-    d = r.json()
+    # V0.7.1 迁入 _push2_get（同域吃 IP 缓释桶，自动获得连接级熔断+抖动；
+    # 403/429→RiskControlError 语义不变）
+    d = _push2_get("https://push2.eastmoney.com/api/qt/slist/get", params,
+                   f"板块 {stock_code}")
     diff = (d.get("data") or {}).get("diff") or {}
     items = diff.values() if isinstance(diff, dict) else diff
     tags = [it.get("f14", "") for it in items if it.get("f14")]
@@ -2073,10 +2124,18 @@ def repo_rate_gc() -> dict:
 def cn_treasury_realtime() -> dict:
     """国债收益率盘中（push2 全球债券行情 CN2Y/5Y/10Y/30Y）。
 
-    push2 主域有按 IP 渐进冷却（坑P26：高频后短时全客户端挂）——失败自动降级
+    push2 系为 IP 缓释桶限流（坑P26：惩罚期 3 连发即放空）——健康形态写 **300s
+    短缓存**（5 分钟内重复调用 0 请求，不让同型四连发放空桶）；失败自动降级
     【中债最新收盘】（cb_yield_curve 既有 curl 通道+当日缓存，不轰炸重试），
-    返回 as_of 标注 "盘中(push2)" / "中债最新收盘(降级)"，降级不写缓存。"""
+    as_of 标注 "盘中(push2)" / "中债最新收盘(降级)"，降级不写缓存。
+    值域守卫：任一期限收益率 ∉(0,15) → RuntimeError 拒绝静默脏值
+    （缩放错位/上游喂零一并兜住，ulist 式全零源即死于此）。"""
+    rel = "treasury/realtime_push2.json"
+    cached = _cache_read(rel, max_age_hours=300 / 3600)
+    if cached is not None:
+        return cached
     out = {}
+    degraded = False
     try:
         for term, sec in [("2y", "CN2Y"), ("5y", "CN5Y"), ("10y", "CN10Y"), ("30y", "CN30Y")]:
             d = _push2_get("https://push2.eastmoney.com/api/qt/stock/get",
@@ -2084,7 +2143,10 @@ def cn_treasury_realtime() -> dict:
                            f"国债实时 {sec}").get("data") or {}
             if not d or not d.get("f43"):
                 raise RuntimeError(f"{sec} 实时行情为空（f43 缺失），拒绝静默空")
-            out[term] = {"yield_pct": d["f43"] / 10000,
+            y = d["f43"] / 10000
+            if not (0 < y < 15):
+                raise RuntimeError(f"{sec} 收益率异常 {y}（f43={d['f43']}），拒绝静默脏值")
+            out[term] = {"yield_pct": y,
                          "change": (d.get("f169") or 0) / 10000,
                          "change_pct": (d.get("f170") or 0) / 100}
         out["source"] = "eastmoney/push2-globalbond"
@@ -2092,8 +2154,9 @@ def cn_treasury_realtime() -> dict:
     except RiskControlError:
         raise                                          # 风控信号绝不降级（F6 契约）
     except RuntimeError as e:
-        # P26：push2 主域 IP 冷却——降级中债最新收盘（cb_yield_curve 当日缓存通道，
-        # 失败不重试轰炸）；盘中/收盘口径差异由 as_of 显式标注
+        # P26：push2 缓释桶额度耗尽/连接级熔断——降级中债最新收盘（cb_yield_curve
+        # 当日缓存通道，失败不重试轰炸）；盘中/收盘口径差异由 as_of 显式标注
+        degraded = True
         pts = cb_yield_curve("treasury")["points"]
         last_date = pts[-1]["date"]
         by_term = {q["term"]: q for q in pts if q["date"] == last_date}
@@ -2105,6 +2168,8 @@ def cn_treasury_realtime() -> dict:
         out["source"] = f"chinabond/收盘降级（push2 冷却: {str(e)[:40]}）"
         out["as_of"] = f"中债最新收盘(降级,{last_date})"
     out["time"] = datetime.now(_BJ_TZ).isoformat(timespec="seconds")
+    if not degraded:
+        _cache_write(rel, out)                         # 仅健康形态写 300s 短缓存
     return out
 ```
 
@@ -3155,8 +3220,9 @@ def fund_fees(query: str, force_refresh: bool = False) -> dict:
 ## 层 8 · 基准指数层（V0.6.1，quant-excess 端点层收编：指数名查表 + 日线原语）
 
 ```python
-# 收编自 quant-excess 端点层（实战两轮审查的代码）：指数=EM push2his 主源（tt 线
-# + F6 分流）+ 腾讯 fqkline 备胎；股票=复用 _tencent_kline（腾讯不封 IP）。
+# 收编自 quant-excess 端点层（实战两轮审查的代码）：指数=EM push2his 主源
+# （_push2_get 线：单发即弃+连接级熔断+抖动，F6 分流）+ 腾讯 fqkline 备胎；
+# 股票=复用 _tencent_kline（腾讯不封 IP）。
 # 缓存键含 lmt——窗口拉大时旧缓存不得静默截断。RiskControlError 绝不降级。
 
 # 跟踪指数名 → EM secid（市场前缀：1=沪 0=深 2=中证指数公司；名称源自 F10 tsdata 官方字段）
@@ -3172,6 +3238,12 @@ BENCH_SECID = {
     "深证100": "0.399330", "中证全指": "1.000985", "国证2000": "0.399303",
     "中证2000": "2.932000",
 }
+# 沪市指数码集合（_tencent_prefix 路由用，V0.7.1）：从 BENCH_SECID 市场 1 值域
+# 自动派生（单一事实源——此前手工维护漏了 000922/000906 等，裸 6 位中证沪指码
+# 曾被误路由 sz000922 深股=静默错数据，sh000016 同族）；000010 等非 BENCH_SECID
+# 历史成员显式保留。
+_SH_INDEX_Q = ({v.split(".")[1] for v in BENCH_SECID.values() if v.startswith("1.")}
+               | {"000010"})
 _SECID_RE = re.compile(r"[012]\.\d{6}")
 _TENCENT_KLINE_CAP = 800                       # 腾讯 fqkline 实测：≤800 全量返回；1000~2000
                                                # 静默截断~641；≥2100 param error（sh600519 扫描，P25）
@@ -3217,13 +3289,17 @@ def _secid_tencent_sym(secid: str) -> Optional[str]:
 
 def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
                 force_refresh: bool = False) -> list[dict]:
-    """指数/股票日线收盘序列 [{date, close}] 升序（基准指数层原语，坑P25）。
+    """指数/股票日线收盘序列 [{date, close, source?}] 升序（基准指数层原语，坑P25）。
 
     query 三形态：指数名（BENCH_SECID，如 "沪深300"/"中证红利"/"国证2000"）/
     EM secid（如 "1.000300"）/ 6 位股票代码（复用 _tencent_kline 腾讯通道）。
-    指数 = EM push2his 主源（tt 线 + F6 分流）+ 腾讯备胎（市场2无腾讯代码不降级；
-    腾讯 fqkline 实测上限 800 根，超过会静默截断/param error，备胎窗口自动钳制，P25）；
-    股票 = 腾讯 fqkline（不封 IP，lmt>800 显式报错引导指数形态）。20h 缓存、键含 lmt；RiskControlError 不降级。
+    指数 = EM push2his 主源（_push2_get 线 + F6 分流）+ 腾讯备胎（市场2无腾讯代码
+    不降级；腾讯 fqkline 实测上限 800 根，超过会静默截断/param error，备胎窗口自动
+    钳制，P25）；指数路径行内带 **source** 字段（"push2his"|"tencent"——诚实标注
+    当前来自哪条通道，主源健康但历史短的指数如中证A500 不能按长度推断来源）；
+    股票 = 腾讯 fqkline（不封 IP，lmt>800 显式报错引导指数形态，单一来源不带
+    source）。20h 缓存、键含 lmt（≤20h 旧缓存行可能无 source 键，消费方用 .get）；
+    RiskControlError 不降级。
     基金诊断用途：基准对照/风格温度/压力测试；个股深度分析仍归 a-stock-data。
     """
     lmt = int(lmt)
@@ -3266,13 +3342,13 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
             p = line.split(",")
             if len(p) >= 2 and re.match(r"\d{4}-\d{2}-\d{2}", p[0]):
                 try:
-                    rows.append({"date": p[0], "close": float(p[1])})
+                    rows.append({"date": p[0], "close": float(p[1]), "source": "push2his"})
                 except ValueError:
                     continue
     except RiskControlError:
         raise                                          # 风控≠网络故障，绝不降级（F6 契约）
     except RuntimeError:
-        rows = []                                      # curl 通道网络类故障才走备胎（P26）
+        rows = []                                      # _push2_get 网络类故障才走备胎（P26）
     em_rows = len(rows)
     if em_rows < need and use_tencent_fallback:
         sym = _secid_tencent_sym(ident)
@@ -3293,7 +3369,8 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
                 node = (d.get("data") or {}).get(sym) or {}
                 for arr in node.get("qfqday") or node.get("day") or []:
                     if len(arr) >= 3:
-                        rows.append({"date": arr[0], "close": float(arr[2])})
+                        rows.append({"date": arr[0], "close": float(arr[2]),
+                                     "source": "tencent"})
             except Exception as e:
                 fb_note = f"备胎失败（{str(e)[:40]}）"
             if len(rows) < need:                       # 备胎也不够 → 回用 EM 有效行（诚实留痕）

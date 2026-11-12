@@ -55,7 +55,7 @@ def _sig_rows() -> list:
     return rows
 
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 DESCRIPTION = (
     "写代码实际获取基金领域底层数据时使用——零key零登录，八层能力："
     "【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:"
@@ -181,9 +181,16 @@ REF.append(f"""# fund-data 完整参考（reference.md · 按需读取层）V{VE
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 """)
 
-REF.append("""# fund-data 基金底层数据工具包 V0.7.0 模块全档
+REF.append("""# fund-data 基金底层数据工具包 V0.7.1 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.7.0（2026-11-12）：217/217 断言实测通过**（L1单元147 · L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.7.1（2026-11-12）：232/232 断言实测通过**（L1单元162 · L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+
+**V0.7.1 push2 防复发加固（IP 缓释桶定案，五发探针实证）：**
+- 🔴 **P26 定性修正**：封锁=**IP 级缓释桶限流**——健康期容量大（treasury 4 连发数周无事）、惩罚期容量极小（3 连发即放空、第 4 发 RST）且恢复慢；12:16 三连过（同栈同 UA）**证伪「TLS 指纹永久黑名单」**，12:22/12:23 两连挂定案重触机制（上午 12 连发 0/6、1/6 是热窗观测，混淆了冷却与指纹）。教训：**诊断行为本身会烧 IP 额度——排查封锁先 ≤5 次小样本，绝不做几十连发**
+- 🟢 **连接级熔断（新防线）**：`_push2_get` 单发即弃（删内部重试——1 调用=1 网络命中）+ 连续 2 败写独立停机标记（`.cbreak_push2conn`，与 F2 分工：F2 管 403/429 显式风控、本线管 RST/超时/空体无状态码形态）停机 3600s——停机期零网络直通 RuntimeError，降级链自动接管（国债→中债收盘/kline→腾讯备胎/板块→穿透单股降级）；期满自然恢复，每小时真实请求 ≤2 次
+- 🟢 **`cn_treasury_realtime` 300s 盘中短缓存**（5 分钟内重复调用 0 请求）+ 值域守卫 0<y<15（拒脏值，ulist 式全零源即死于此）；`kline_daily` 指数路径行内 `source` 字段（push2his/tencent 诚实标注——主源健康但历史短的指数不能按长度推断来源）
+- 🟢 **`concept_blocks` 迁入 `_push2_get`**（原走 em_get 无防线裸奔同域——上午全量测试崩溃的漏列暴露点）+ **`_SH_INDEX_Q` 从 BENCH_SECID 派生**（修 tencent_quote 裸码路由 000922→sz 深股静默错数据，5 码补齐）
+- ⚪ ulist.np 批量方案实证否决：对 171 债券 secid 只回全零值（午休 tick 缺失或源未接线，两说未定案）且与单发共享同一 IP 桶——批量收益抵不过触桶风险
 
 **V0.6.1 基准指数层（quant-excess 端点层收编，kline_daily 一函数三形态）：**
 - 🟢 **B1 `kline_daily`**：指数/股票日线收盘原语——指数名查表（沪深300/中证500/红利/国证2000/中证2000 等 15 指数、20 别名键）/EM secid/6 位股票码；指数走 push2his 主源（F6 分流）+ 腾讯备胎（市场 2 无腾讯码不降级），股票复用 `_tencent_kline` 腾讯通道；20h 缓存键含 lmt 防窗口截断；实测沪深300 十年 2600 根、二调 0 请求
@@ -193,7 +200,7 @@ REF.append("""# fund-data 基金底层数据工具包 V0.7.0 模块全档
 - 🔴 **字段名不副实清偿**：`fund_metrics().mgmt_fee_pct` 实为现申购费→改名 `subscription_fee_pct`（源端点实证：E2 fund_Rate=0.15 申购现价；管理费 1.20 只在 F10）；snapshot.manager 三字段改名——`tenure_start`→`total_tenure`（累计时长文本非日期，EM 原名 workTime）、`fund_size_yi`→`current_scale_text`（带单位字符串非 float）、`return_pct`→`return_chart`（三系列图表对象非标量）。旧键除名不双写（破坏性升级）
 - 🟢 **B3 `fund_fees`**：F10 jjfl 费率全表——运作费三率（管理/托管/销售服务，每年%）+ 认购/申购（原/天天优惠）/赎回三阶梯（表头特征分派防插表错列；固定费档保原文）。赎回阶梯直接回答「拿多久赎回才划算」。实测 005001：管理1.20/托管0.20/申购<200万 1.50/0.15/赎回五档至 ≥730天免
 - ✅ **syl 四窗口源端点实证无误**：005001 本地复权交叉对照——近3月/近6月/近1年吻合、近1月=官方20交易日口径（残差0.03）；fees 三标量验证正确
-- 🔴 **P26 push2 系 TLS 指纹墙应急**：requests 栈整体被识别（新建 Session 无效、curl 亦封）——`_push2_get` 探测通道 + kline 自动落腾讯备胎 + 国债实时中债收盘降级（as_of 口径标注）
+- 🔴 **P26 push2 系封锁应急**（V0.7.0 当时定性「TLS 指纹墙」，V0.7.1 经五发探针修正为 IP 缓释桶，见上）：`_push2_get` 探测通道 + kline 自动落腾讯备胎 + 国债实时中债收盘降级（as_of 口径标注）
 
 **V0.6.0 经理画像与专项组装层（八函数，源全部一手实测钉死）：**
 - 🟢 **`rank_persistence`**：fund_rank 缓存上算各周期同类分位（不高于该值占比口径，桶内最高=100），纳入门槛 ytd+1y 且 ≥4 周期；consistent=全周期 ≥75 分位——零请求「长牛」初筛
@@ -351,7 +358,7 @@ REF.append("""## 端点路由速查（按需定位，不必通读）
 | P23 经理接口遗存 | 旧名单页404；dt=15 退化为固定10条样本；dt=14 sc 只认 XML 元素名（20 候选全无效）、pn≤50 | 经理ID/基金码两路进 `fund_manager`；排行如实标注姓名序；姓名→ID 无索引 |
 | P24 FOF 底层无接口 | 五源（东财F10/App/蛋卷/好买/新浪）均只有股票直持仓 | 基金投资明细仅存季报 PDF——诚实边界，FOF 驾驶舱降级为池+仓位史+直持仓穿透 |
 | P25 push2his日K形态 | fields2 只取 f51,f53（日期,收盘）；市场2（中证指数公司）无腾讯代码不可备胎；缓存键必须含 lmt 防窗口截断 | `kline_daily` F6 分流（RiskControlError 不降级）+ 日期去重 + need=min(lmt,100) 下限 |
-| P26 push2系TLS指纹墙 | requests 栈（urllib3/OpenSSL）整体被识别——新建 Session 亦全挂（12 连发实验 0/6、1/6），「裸 requests 偶通」只是计数运气；curl 亦被掐；另有按 IP 渐进冷却 | `_push2_get` 探测通道（每次新建 Session）+ kline 自动落腾讯备胎 + 国债实时中债收盘降级（as_of 标注）；⏳ 待办：冷却后重探（httpx[h2] 换栈/curl 持久进程/代理池） |
+| P26 push2系IP缓释桶 | 封锁=**IP 级缓释桶**：惩罚期容量极小（3 连发即放空、第 4 发 RST）、恢复慢（小时级续量）、溢出全客户端全掐（curl 亦然）；健康期容量大（4 连发数周无事）。12:16 三连过证伪「TLS 指纹永久黑名单」，12:22/12:23 两连挂定案重触（上午 12 连发系热窗观测）。教训：诊断行为本身烧 IP 额度，排查先 ≤5 次小样本 | `_push2_get` 单发即弃 + flock 地板 + 0.5~3.0s 抖动 + **连接级熔断**（2 连败停 1h，独立标记 `.cbreak_push2conn`，停机期零网络）+ 降级链（kline→腾讯备胎/国债→中债收盘 300s 短缓存+值域守卫/板块→穿透单股降级）；TLS 指纹假说未排除但不伪装（不军备竞赛） |
 
 ## Prerequisites
 
@@ -469,6 +476,10 @@ assert "def fund_crowding(rdate: str = \"\", force_refresh: bool = False)" in re
 assert "def kline_daily(query: str" in ref_text                       # V0.6.1 内嵌同源
 assert "def fund_scale_history(query: str" in ref_text                # V0.6.2 内嵌同源
 assert "def fund_fees(query: str" in ref_text                          # V0.7.0 内嵌同源
+assert "_push2_conn_file" in ref_text                                  # V0.7.1 连接级熔断内嵌
+assert "IP 缓释桶" in ref_text                                          # P26 修正定性入册
+assert 'rows.append({"date": p[0], "close": float(p[1]), "source": "push2his"})' in ref_text  # source 标注
+assert "_SH_INDEX_Q = ({v.split" in ref_text                            # 指数路由派生
 assert "P25" in ref_text
 assert "def fund_manager(query: str, force_refresh: bool = False) -> dict:" in ref_text  # V0.6 内嵌同源
 assert all(p2 in ref_text for p2 in ("P22", "P23", "P24"))                     # 坑区 V0.6 齐全
