@@ -59,7 +59,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.6.2"
+__version__ = "0.7.0"
 
 # ══════════════════════════════════════════════════════════════════
 # L1 前置层：限流入口 / 缓存目录 / 请求计数
@@ -611,9 +611,10 @@ def fund_snapshot(query: str, force_refresh: bool = False) -> dict:
             "1month": _to_float(v.get("syl_1y")), "3month": _to_float(v.get("syl_3y")),
             "6month": _to_float(v.get("syl_6y")), "1year": _to_float(v.get("syl_1n"))},
         "manager": {"name": mgr_raw.get("name"), "manager_id": mgr_raw.get("id"),
-                    "tenure_start": mgr_raw.get("workTime"),
-                    "fund_size_yi": mgr_raw.get("fundSize"),
-                    "return_pct": mgr_raw.get("profit"), "star": mgr_raw.get("star")},
+                    "total_tenure": mgr_raw.get("workTime"),          # 累计任职时长文本（EM workTime）
+                    "current_scale_text": mgr_raw.get("fundSize"),   # "66.83亿(6只基金)" 带单位字符串
+                    "return_chart": mgr_raw.get("profit"),           # 任期收益图表对象（三系列）
+                    "star": mgr_raw.get("star")},
         "nav_history": nav,                            # 单位净值全史（含每日分红事件）
         "ac_nav_history": [{"date": datetime.fromtimestamp(int(p["x"]) / 1000, _BJ_TZ).strftime("%Y-%m-%d"),
                             "ac_nav": float(p["y"])}
@@ -975,8 +976,8 @@ def fund_metrics(snapshot: dict, start: str = "", end: str = "",
     rf_daily = (1 + risk_free_annual) ** (1 / 252) - 1
     sharpe = ((sum(daily) / len(daily) - rf_daily) / (var ** 0.5)) * (252 ** 0.5) if var > 0 else None
     calmar = annual_ret / abs(max_dd) if max_dd < 0 else None
-    fee = None                                         # 管理费率（费后净值已含费用，仅标注）
-    try:
+    fee = None                                         # 现申购费率（E2 fund_Rate；注意不是管理费——
+    try:                                              # 管理费/托管费/赎回阶梯走 fund_fees）
         fee = float(snapshot.get("fees", {}).get("current_rate"))
     except (TypeError, ValueError):
         pass
@@ -989,7 +990,7 @@ def fund_metrics(snapshot: dict, start: str = "", end: str = "",
         "annualized_volatility_pct": round(vol_annual * 100, 4),
         "sharpe": round(sharpe, 4) if sharpe is not None else None,
         "calmar": round(calmar, 4) if calmar is not None else None,
-        "mgmt_fee_pct": fee,                           # None=档案缺失；sharpe 分母未扣费
+        "subscription_fee_pct": fee,                   # 现申购费（V0.7.0 改名，原 mgmt_fee_pct 名不副实）；sharpe 分母未扣费
     }
 
 
@@ -1257,6 +1258,51 @@ def em_get(url: str, params: Optional[dict] = None,
             if attempt == 2:
                 raise
             time.sleep(2.0)
+
+
+def _push2_get(url: str, params: Optional[dict] = None, context: str = "") -> dict:
+    """push2/push2his 专用「每次新建 Session」通道（坑P26）。
+
+    2026-11-12 定案实验（12 连发）：push2/push2his 对 requests 栈（urllib3/OpenSSL
+    TLS 指纹）**整体识别**——新建 Session 亦 0/6、1/6 全挂（早先"裸 requests 200"
+    只是计数未达阈值的运气）；curl 亦被掐。⏳ 待办：待 IP/指纹冷却后重探（长期候选：
+    换 TLS 栈 httpx[h2]、curl 持久进程、或代理池）。
+    当前定位：**探测通道**——冷却自愈后可恢复主源地位；冷却期失败自动落腾讯备胎
+    （kline）或中债收盘降级（国债实时），调用方无感。防封：em 线全套防线照走
+    （熔断检查 + flock 节流 + EM_REQUEST_COUNT 账本）；403/429 → RiskControlError
+    计熔断不重试；网络类失败重试 1 次后落备胎，绝不轰炸。"""
+    last_err = ""
+    for attempt in (1, 2):
+        _cbreak_check("em")
+        _cross_proc_throttle("em", EM_MIN_INTERVAL)
+        EM_REQUEST_COUNT[0] += 1
+        sess = requests.Session()
+        sess.trust_env = False                          # P12 直连
+        try:
+            r = sess.get(url, params=params, timeout=10,
+                         headers={"Referer": "https://quote.eastmoney.com/"})
+        except requests.RequestException as e:
+            last_err = f"{type(e).__name__}: {str(e)[:60]}"
+            if attempt == 2:
+                break
+            time.sleep(1.0)
+            continue
+        finally:
+            sess.close()
+        if r.status_code in (403, 429):
+            _cbreak_signal("em", f"HTTP {r.status_code} push2 {context}")
+            raise RiskControlError(          # 风控信号不重试（对齐 em_get 调用方语义）
+                f"HTTP {r.status_code}（push2 {context}）：疑似{_line_label('em')}风控信号，已计入熔断")
+        if r.status_code == 200 and r.text.strip():
+            try:
+                return r.json()
+            except ValueError:
+                last_err = f"非JSON: {r.text[:60]!r}"
+        else:
+            last_err = f"HTTP {r.status_code} {r.text[:60]!r}"
+        if attempt == 1:
+            time.sleep(1.0)
+    raise RuntimeError(f"push2 通道失败（{context}）: {last_err}")
 
 
 _SH_INDEX_Q = {"000300", "000905", "000016", "000688", "000852", "000010"}
@@ -1835,21 +1881,39 @@ def repo_rate_gc() -> dict:
 
 
 def cn_treasury_realtime() -> dict:
-    """国债收益率实时盘中（东财 push2 全球债券行情：CN2Y/5Y/10Y/30Y，走 em_get 股票域线）。"""
+    """国债收益率盘中（push2 全球债券行情 CN2Y/5Y/10Y/30Y）。
+
+    push2 主域有按 IP 渐进冷却（坑P26：高频后短时全客户端挂）——失败自动降级
+    【中债最新收盘】（cb_yield_curve 既有 curl 通道+当日缓存，不轰炸重试），
+    返回 as_of 标注 "盘中(push2)" / "中债最新收盘(降级)"，降级不写缓存。"""
     out = {}
-    for term, sec in [("2y", "CN2Y"), ("5y", "CN5Y"), ("10y", "CN10Y"), ("30y", "CN30Y")]:
-        r = em_get("https://push2.eastmoney.com/api/qt/stock/get",
-                   params={"secid": f"171.{sec}", "fields": "f43,f58,f169,f170"},
-                   headers={"User-Agent": UA, "Referer": "https://quote.eastmoney.com/"})
-        assert_not_risk_control(r, "em", "push2 stock/get 国债实时")
-        r.raise_for_status()
-        d = r.json().get("data") or {}
-        if not d or not d.get("f43"):
-            raise RuntimeError(f"{sec} 实时行情为空（f43 缺失），拒绝静默空")
-        out[term] = {"yield_pct": d["f43"] / 10000,
-                     "change": (d.get("f169") or 0) / 10000,
-                     "change_pct": (d.get("f170") or 0) / 100}
-    out["source"] = "eastmoney/push2-globalbond"
+    try:
+        for term, sec in [("2y", "CN2Y"), ("5y", "CN5Y"), ("10y", "CN10Y"), ("30y", "CN30Y")]:
+            d = _push2_get("https://push2.eastmoney.com/api/qt/stock/get",
+                           {"secid": f"171.{sec}", "fields": "f43,f58,f169,f170"},
+                           f"国债实时 {sec}").get("data") or {}
+            if not d or not d.get("f43"):
+                raise RuntimeError(f"{sec} 实时行情为空（f43 缺失），拒绝静默空")
+            out[term] = {"yield_pct": d["f43"] / 10000,
+                         "change": (d.get("f169") or 0) / 10000,
+                         "change_pct": (d.get("f170") or 0) / 100}
+        out["source"] = "eastmoney/push2-globalbond"
+        out["as_of"] = "盘中(push2)"
+    except RiskControlError:
+        raise                                          # 风控信号绝不降级（F6 契约）
+    except RuntimeError as e:
+        # P26：push2 主域 IP 冷却——降级中债最新收盘（cb_yield_curve 当日缓存通道，
+        # 失败不重试轰炸）；盘中/收盘口径差异由 as_of 显式标注
+        pts = cb_yield_curve("treasury")["points"]
+        last_date = pts[-1]["date"]
+        by_term = {q["term"]: q for q in pts if q["date"] == last_date}
+        for term in ("2y", "5y", "10y", "30y"):
+            if term not in by_term:
+                raise RuntimeError(f"中债降级缺 {term} 期限（{last_date}）") from e
+            out[term] = {"yield_pct": by_term[term]["yield_pct"],
+                         "change": None, "change_pct": None}
+        out["source"] = f"chinabond/收盘降级（push2 冷却: {str(e)[:40]}）"
+        out["as_of"] = f"中债最新收盘(降级,{last_date})"
     out["time"] = datetime.now(_BJ_TZ).isoformat(timespec="seconds")
     return out
 
@@ -2791,14 +2855,11 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
     em_rows = 0
     fb_note = "未启用"
     try:
-        r = ttfund_get("https://push2his.eastmoney.com/api/qt/stock/kline/get",
-                       params={"secid": ident, "klt": 101, "fqt": 1, "lmt": lmt,
-                               "end": "20500101", "fields1": "f1,f2,f3",
-                               "fields2": "f51,f53"},
-                       headers={"Referer": "https://quote.eastmoney.com/"})
-        assert_not_risk_control(r, "tt", f"kline {ident}")
-        r.raise_for_status()
-        ks = ((r.json() or {}).get("data") or {}).get("klines") or []
+        ks = ((_push2_get("https://push2his.eastmoney.com/api/qt/stock/kline/get",
+                               {"secid": ident, "klt": 101, "fqt": 1, "lmt": lmt,
+                                "end": "20500101", "fields1": "f1,f2,f3",
+                                "fields2": "f51,f53"}, f"kline {ident}")
+               .get("data") or {}).get("klines")) or []
         for line in ks:
             p = line.split(",")
             if len(p) >= 2 and re.match(r"\d{4}-\d{2}-\d{2}", p[0]):
@@ -2808,8 +2869,8 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
                     continue
     except RiskControlError:
         raise                                          # 风控≠网络故障，绝不降级（F6 契约）
-    except requests.RequestException:
-        rows = []                                      # 网络类故障才走备胎
+    except RuntimeError:
+        rows = []                                      # curl 通道网络类故障才走备胎（P26）
     em_rows = len(rows)
     if em_rows < need and use_tencent_fallback:
         sym = _secid_tencent_sym(ident)
@@ -2960,5 +3021,102 @@ def fund_scale_history(query: str, force_refresh: bool = False) -> list[dict]:
     if len(out) < 2:
         raise RuntimeError(f"gmbd 规模记录不足（{code} 仅 {len(out)} 期）——新基金或结构变更")
     out.sort(key=lambda x: x["date"])                  # 源序新→旧 → 反转为升序
+    _cache_write(rel, out)
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════
+# V0.7.0 费率全表：F10 购买信息 jjfl 通道（运作费 + 认购/申购/赎回三阶梯）
+# ══════════════════════════════════════════════════════════════════
+# E2 快照的 fees 只有申购费原/现价两个标量；管理费/托管费/销售服务费/赎回阶梯
+# （持有期越久越便宜——决定"拿多久赎回才划算"）只在 F10 jjfl 页。2026-11-12
+# 005001 实测钉死：表5=运作费三率（键值行）、表6=认购费率（适用金额→费率）、
+# 表7=申购费率（适用金额→原|优惠）、表8=赎回费率（适用期限→费率）。分派按
+# 表头特征而非索引——上游插表/调序不静默错列（P-C 同款防线）。
+
+
+def fund_fees(query: str, force_refresh: bool = False) -> dict:
+    """基金费率全表（F10 购买信息 jjfl 页，1 请求，当日缓存）。
+
+    返回 {code, name,
+      management_fee_pct / custody_fee_pct / sales_service_fee_pct,  # 运作费（每年%）
+      founding_tiers,   # 认购费档位 [{range, fee_text}]（募集期买入；老基金为空）
+      purchase_tiers,   # 申购费档位 [{range, origin_pct, discount_pct}]（原价|天天优惠）
+      redemption_tiers} # 赎回阶梯 [{holding, fee_pct}]——按持有期递减，≥730天通常免
+    数值字段解析失败为 None（档位行保留原文 fee_text）；百分号剥离。
+    实测 005001：管理1.20/托管0.20/销售服务0.00；申购 <200万 1.50|0.15；
+    赎回 <7天1.50 → 7-30天0.75 → 30-365天0.50 → 1-2年0.25 → ≥2年0.00。"""
+    code = resolve_fund_code(query)
+    rel = f"fees/{code}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=20)
+        if cached is not None:
+            return cached
+    r = ttfund_get(f"https://fundf10.eastmoney.com/jjfl_{code}.html",
+                   headers={"Referer": "https://fundf10.eastmoney.com/"})
+    assert_not_risk_control(r, "tt", f"jjfl {code}")
+    r.raise_for_status()
+    h = r.content.decode("utf-8", errors="replace")
+    m = re.search(r"<title>([^<\-]{2,25})", h)
+    name = ((m.group(1).strip() if m else "").split("(")[0]      # 剥 "(005001)基金费率" 尾
+            .split("_")[0].split("-")[0].strip()) or None
+
+    def _cells(tr):
+        return [re.sub(r"<[^>]+>|&nbsp;|\s+", "", c)
+                for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S)]
+
+    def _pct(text):
+        mm = re.search(r"([0-9.]+)%", text or "")
+        return float(mm.group(1)) if mm else None
+
+    out = {"code": code, "name": name,
+           "management_fee_pct": None, "custody_fee_pct": None,
+           "sales_service_fee_pct": None,
+           "founding_tiers": [], "purchase_tiers": [], "redemption_tiers": []}
+    for tb in re.findall(r"<table[^>]*>(.*?)</table>", h, re.S):
+        rows = re.findall(r"<tr[^>]*>(.*?)</tr>", tb, re.S)
+        if not rows:
+            continue
+        flat = [c for tr in rows for c in _cells(tr) if c]
+        # 运作费键值行：平铺序列里 标签→值 相邻
+        if "管理费率" in flat and not any("适用" in c for c in flat[:2]):
+            for key, field in (("管理费率", "management_fee_pct"),
+                               ("托管费率", "custody_fee_pct"),
+                               ("销售服务费率", "sales_service_fee_pct")):
+                if key in flat:
+                    i = flat.index(key)
+                    if i + 1 < len(flat):
+                        out[field] = _pct(flat[i + 1])
+            continue
+        head = _cells(rows[0])
+        if not head or "适用金额" not in head[0]:
+            if head and "适用期限" in head[0]:          # 赎回阶梯
+                for tr in rows[1:]:
+                    c = _cells(tr)
+                    if len(c) >= 2 and c[0]:
+                        out["redemption_tiers"].append(
+                            {"holding": c[0], "fee_pct": _pct(c[1]),
+                             "fee_text": c[1] or None})
+            continue
+        # 认购 vs 申购：表头第二列是否含 "原费率"
+        is_purchase = len(head) > 1 and "原费率" in head[1]
+        for tr in rows[1:]:
+            c = _cells(tr)
+            if len(c) < 2 or not c[0]:
+                continue
+            if is_purchase:
+                origin = discount = None
+                mm = re.match(r"([0-9.]+)%\|([0-9.]+)%", c[1] or "")
+                if mm:
+                    origin, discount = float(mm.group(1)), float(mm.group(2))
+                out["purchase_tiers"].append(
+                    {"range": c[0], "origin_pct": origin,
+                     "discount_pct": discount, "fee_text": c[1] or None})  # 固定费档(每笔N元)保原文
+            else:
+                out["founding_tiers"].append(
+                    {"range": c[0], "fee_text": c[1] or None})
+    if (out["management_fee_pct"] is None and out["custody_fee_pct"] is None
+            and not out["redemption_tiers"]):
+        raise RuntimeError(f"jjfl 费率页解析为空（{code}）——上游结构变更，拒绝半空返回")
     _cache_write(rel, out)
     return out

@@ -4,15 +4,15 @@ slug: fund-data
 displayName: 基金数据底座 FundBase
 display_name: 基金数据底座 FundBase
 display_name_en: FundBase · The Data Foundation for China Funds
-description: 写代码实际获取基金领域底层数据时使用——零key零登录，八层能力：【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:净值全史/规模史/持有人/经理/重仓股债/仓位史/基准三曲线/申赎/费率)、区间净值+申赎状态、批量实时净值、季度前十大、蛋卷备胎，快照挂自动降级；【本地计算】复权/回撤/波动/夏普/卡玛/费率标注、定投XIRR、仓位解读(加减仓)、同类百分位(一年前对照)、相对表现(vs沪深300/同类平均)；【持仓穿透】腾讯行情×板块归属→主题聚合→白酒约86%白话地图；【宏观利率】中债曲线族40+条、信用利差、国债/SHIBOR/基准利率史、GC007、国债盘中；【全市场】24792只排行底座(过滤排序全本地)、新发基金全量、公司画像、抱团度(巨潮)、19门类行业配置；【经理与专项】经理画像(在管清单/任期/回报)、排行、持续性矩阵、固收+画像、单基金规模(ENDNAV)、规模全历史(53期含申赎流量)、QDII溢价、重仓探测；【基准指数】指数与股票日线(沪深300等15指数,十年全史,1请求)。请求预算制防封(铁律见下)。仅在需要调用数据接口取数时使用：基金概念解释、投资观点讨论等无需取数的话题不要加载本skill。
+description: 写代码实际获取基金领域底层数据时使用——零key零登录，八层能力：【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:净值全史/规模史/持有人/经理/重仓股债/仓位史/基准三曲线/申赎/费率)、区间净值+申赎状态、批量实时净值、季度前十大、蛋卷备胎，快照挂自动降级；【本地计算】复权/回撤/波动/夏普/卡玛/费率标注、定投XIRR、仓位解读(加减仓)、同类百分位(一年前对照)、相对表现(vs沪深300/同类平均)；【持仓穿透】腾讯行情×板块归属→主题聚合→白酒约86%白话地图；【宏观利率】中债曲线族40+条、信用利差、国债/SHIBOR/基准利率史、GC007、国债盘中；【全市场】24792只排行底座(过滤排序全本地)、新发基金全量、公司画像、抱团度(巨潮)、19门类行业配置；【经理与专项】经理画像(在管清单/任期/回报)、排行、持续性矩阵、固收+画像、费率全表(管理/托管/赎回阶梯)、单基金规模(ENDNAV)、规模全历史(53期含申赎流量)、QDII溢价、重仓探测；【基准指数】指数与股票日线(沪深300等15指数,十年全史,1请求)。请求预算制防封(铁律见下)。仅在需要调用数据接口取数时使用：基金概念解释、投资观点讨论等无需取数的话题不要加载本skill。
 description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集、白话持仓穿透地图、24792 只全市场排行、经理画像与抱团度、十年指数日线与 53 期规模全史——零 key 零登录，请求预算制防封，分层断言全绿。为一切基金应用打地基。
 description_en: The full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), plain-language holdings maps, 24,792-fund market rankings, manager profiles and crowding, 10-year index klines, 53-period scale history. Zero keys, zero login, layered assertions green. The ground every fund application builds on.
 author: hotsauce000
 origin: custom
-version: 0.6.2
+version: 0.7.0
 ---
 
-# fund-data 路由层 V0.6.2
+# fund-data 路由层 V0.7.0
 
 本文件是**路由层**（≈4K token，激活只加载本文件）。细节/坑区/内嵌代码在同目录 **reference.md（按需读取）**；运行代码 `fund_data.py`（import 用，勿通读）：
 
@@ -47,7 +47,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | 基金公司画像 | `fund_company(基金码或8位公司ID)` | 1（基金码+1） |
 | 抱团度/行业配置 | `fund_crowding()` / `fund_industry_allocation()`（季度巨潮） | 1/季（90天） |
 | 业绩持续性/固收+画像 | `rank_persistence()` / `bond_plus_profile(q)`（零请求） | 0 |
-| 规模·全史/溢价/重仓探测 | `fund_scale(q)` · `fund_scale_history(q)` · `qdii_premium(codes)` · `nav_divergence(q)` | 1·1·2·冷启≤12 |
+| 规模·全史/费率/溢价/重仓探测 | `fund_scale`·`fund_scale_history`·`fund_fees`·`qdii_premium`·`nav_divergence` | 各1·2·冷启≤12 |
 | 经理画像/排行 | `fund_manager(基金码或经理ID)` · `manager_rank(pages)`（仅姓名序） | 0~1·50/页 |
 | 指数日线 | `kline_daily("沪深300")`（指数名/股票码） | 1（缓存0） |
 | 债基利率敏感度 | `cb_yield_curve` + `credit_spread` / `treasury_yield_daily` | 1~2 |
@@ -65,7 +65,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | cninfo 451/token null | enckey 时效**非风控**，刷新重试一次（P20） | 仍拒=时钟漂移 |
 | 403/429 | `RiskControlError` 上抛+熔断10min（不触发降级） | 冷却期零网络，等勿重试 |
 
-## 函数速查（47 个，构建时自动生成勿手改）
+## 函数速查（48 个，构建时自动生成勿手改）
 
 | 函数 | 说明 |
 |---|---|
@@ -100,7 +100,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | `shibor_history(period=None, days=30)` | SHIBOR 历史（东财 RPT_IMP_INTRESTRATEN， |
 | `benchmark_rate_history()` | 一年期存/贷款基准利率历次调整（东财 RPT_ECONOMY_DEP |
 | `repo_rate_gc()` | GC007 交易所质押式回购利率（腾讯通道，1 请求）——DR007 |
-| `cn_treasury_realtime()` | 国债收益率实时盘中（东财 push2 全球债券行情：CN2Y/5Y/ |
+| `cn_treasury_realtime()` | 国债收益率盘中（push2 全球债券行情 CN2Y/5Y/10Y/3 |
 | `assert_rankhandler(resp, context='rankhandler')` | rankhandler 家族内容级风控断言（坑P19）：被拦时是 2 |
 | `fund_rank(top=None, fund_type='all', sort='ytd', ascending=False, force_refresh=False)` | 全市场基金排行 / 初筛底座（坑P19；全量 = 1 请求） |
 | `fund_new_issues(force_refresh=False)` | 在发/新成立基金全量（FundNewIssue.aspx，tt 线  |
@@ -116,6 +116,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | `manager_rank(pages=1, force_refresh=False)` | 经理排行（坑P23：服务端仅姓名序，50 条/页，record 强校 |
 | `kline_daily(query, lmt=2600, use_tencent_fallback=True, force_refresh=False)` | 指数/股票日线收盘序列 [{date, close}] 升序（基准指 |
 | `fund_scale_history(query, force_refresh=False)` | 基金规模全历史（F10 规模变动 gmbd 通道，1 请求，当日缓存 |
+| `fund_fees(query, force_refresh=False)` | 基金费率全表（F10 购买信息 jjfl 页，1 请求，当日缓存） |
 
 ## When to Activate
 

@@ -55,7 +55,7 @@ def _sig_rows() -> list:
     return rows
 
 
-VERSION = "0.6.2"
+VERSION = "0.7.0"
 DESCRIPTION = (
     "写代码实际获取基金领域底层数据时使用——零key零登录，八层能力："
     "【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:"
@@ -67,7 +67,7 @@ DESCRIPTION = (
     "【宏观利率】中债曲线族40+条、信用利差、国债/SHIBOR/基准利率史、GC007、国债盘中；"
     "【全市场】24792只排行底座(过滤排序全本地)、新发基金全量、公司画像、"
     "抱团度(巨潮)、19门类行业配置；"
-    "【经理与专项】经理画像(在管清单/任期/回报)、排行、持续性矩阵、固收+画像、"
+    "【经理与专项】经理画像(在管清单/任期/回报)、排行、持续性矩阵、固收+画像、费率全表(管理/托管/赎回阶梯)、"
     "单基金规模(ENDNAV)、规模全历史(53期含申赎流量)、QDII溢价、重仓探测；"
     "【基准指数】指数与股票日线(沪深300等15指数,十年全史,1请求)。"
     "请求预算制防封(铁律见下)。"
@@ -131,7 +131,7 @@ THIN.append("""## 场景路由（我想做 X → 调什么）
 | 基金公司画像 | `fund_company(基金码或8位公司ID)` | 1（基金码+1） |
 | 抱团度/行业配置 | `fund_crowding()` / `fund_industry_allocation()`（季度巨潮） | 1/季（90天） |
 | 业绩持续性/固收+画像 | `rank_persistence()` / `bond_plus_profile(q)`（零请求） | 0 |
-| 规模·全史/溢价/重仓探测 | `fund_scale(q)` · `fund_scale_history(q)` · `qdii_premium(codes)` · `nav_divergence(q)` | 1·1·2·冷启≤12 |
+| 规模·全史/费率/溢价/重仓探测 | `fund_scale`·`fund_scale_history`·`fund_fees`·`qdii_premium`·`nav_divergence` | 各1·2·冷启≤12 |
 | 经理画像/排行 | `fund_manager(基金码或经理ID)` · `manager_rank(pages)`（仅姓名序） | 0~1·50/页 |
 | 指数日线 | `kline_daily("沪深300")`（指数名/股票码） | 1（缓存0） |
 | 债基利率敏感度 | `cb_yield_curve` + `credit_spread` / `treasury_yield_daily` | 1~2 |
@@ -188,6 +188,11 @@ REF.append("""# fund-data 基金底层数据工具包 V0.6.2 模块全档
 **V0.6.1 基准指数层（quant-excess 端点层收编，kline_daily 一函数三形态）：**
 - 🟢 **B1 `kline_daily`**：指数/股票日线收盘原语——指数名查表（沪深300/中证500/红利/国证2000/中证2000 等 15 指数、20 别名键）/EM secid/6 位股票码；指数走 push2his 主源（F6 分流）+ 腾讯备胎（市场 2 无腾讯码不降级），股票复用 `_tencent_kline` 腾讯通道；20h 缓存键含 lmt 防窗口截断；实测沪深300 十年 2600 根、二调 0 请求
 - 🔴 **P25 push2his 日K形态**入册；P23 补 dt=15 二次实测（pi/pn 全忽略恒返回拼音前 10）
+
+**V0.7.0 字段语义升级 + 费率全表（破坏性改名，源端点逐一实证）：**
+- 🔴 **字段名不副实清偿**：`fund_metrics().mgmt_fee_pct` 实为现申购费→改名 `subscription_fee_pct`（源端点实证：E2 fund_Rate=0.15 申购现价；管理费 1.20 只在 F10）；snapshot.manager 三字段改名——`tenure_start`→`total_tenure`（累计时长文本非日期，EM 原名 workTime）、`fund_size_yi`→`current_scale_text`（带单位字符串非 float）、`return_pct`→`return_chart`（三系列图表对象非标量）。旧键除名不双写（破坏性升级）
+- 🟢 **B3 `fund_fees`**：F10 jjfl 费率全表——运作费三率（管理/托管/销售服务，每年%）+ 认购/申购（原/天天优惠）/赎回三阶梯（表头特征分派防插表错列；固定费档保原文）。赎回阶梯直接回答「拿多久赎回才划算」。实测 005001：管理1.20/托管0.20/申购<200万 1.50/0.15/赎回五档至 ≥730天免
+- ✅ **syl 四窗口源端点实证无误**：005001 本地复权交叉对照——近3月/近6月/近1年吻合、近1月=官方20交易日口径（残差0.03）；fees 三标量验证正确
 
 **V0.6.0 经理画像与专项组装层（八函数，源全部一手实测钉死）：**
 - 🟢 **`rank_persistence`**：fund_rank 缓存上算各周期同类分位（不高于该值占比口径，桶内最高=100），纳入门槛 ytd+1y 且 ≥4 周期；consistent=全周期 ≥75 分位——零请求「长牛」初筛
@@ -298,6 +303,7 @@ REF.append("""## 端点路由速查（按需定位，不必通读）
 | V6 | `nav_divergence(q)` | 重仓探测：净值 vs 上季重仓加权收益背离度（疑似调仓） | 快照+E4a+腾讯日K | 冷启≤12 |
 | B1 | `kline_daily(q,lmt)` | 指数/股票日线收盘 [{date,close}]：指数名查表/secid/股票码三形态 | push2his+腾讯备胎 | 1（缓存0） |
 | B2 | `fund_scale_history(q)` | 规模全历史：募集期→最新季报（期间申购/赎回流量+份额+净资产+变动率，升序） | F10 gmbd | 1（缓存0） |
+| B3 | `fund_fees(q)` | 费率全表：管理/托管/销售服务费（每年%）+认购/申购（原/优惠）/赎回三阶梯（持有期递减） | F10 jjfl | 1（缓存0） |
 | V6 | `fund_manager(q)` / `manager_rank(pages)` | 经理画像（任职/规模/回报/在管清单）/ 排行（姓名序） | eastmoney manager 页+dt=14 | 1·50/页 |
 | 本地 | `adjusted_nav(recs)` | 复权净值（分红再投口径，链式） | 零网络 | 0 |
 | 本地 | `fund_metrics(snap,s,e)` | 区间收益/年化/最大回撤/波动/夏普/卡玛/管理费率标注 | 零网络 | 0 |
@@ -380,6 +386,8 @@ REF.append("## 层 7 · 经理画像与专项组装层（V0.6：持续性/规模
 REF.append(code(sections["V0.6 经理画像与专项组装层：持续性/规模/固收+/溢价/重仓探测/经理三件套"]))
 REF.append("## 层 7 · 规模全历史（V0.6.2，F10 规模变动 gmbd 通道）\n")
 REF.append(code(sections[next(k for k in sections if k.startswith("V0.6.2"))]))
+REF.append("## 层 7 · 费率全表（V0.7.0，F10 购买信息 jjfl 通道）\n")
+REF.append(code(sections[next(k for k in sections if k.startswith("V0.7.0"))]))
 REF.append("## 层 8 · 基准指数层（V0.6.1，quant-excess 端点层收编：指数名查表 + 日线原语）\n")
 REF.append(code(sections[next(k for k in sections if k.startswith("V0.6.1"))]))
 
@@ -458,6 +466,7 @@ assert "def fund_rank(top: Optional[int] = None" in ref_text      # V0.5 内嵌�
 assert "def fund_crowding(rdate: str = \"\", force_refresh: bool = False)" in ref_text
 assert "def kline_daily(query: str" in ref_text                       # V0.6.1 内嵌同源
 assert "def fund_scale_history(query: str" in ref_text                # V0.6.2 内嵌同源
+assert "def fund_fees(query: str" in ref_text                          # V0.7.0 内嵌同源
 assert "P25" in ref_text
 assert "def fund_manager(query: str, force_refresh: bool = False) -> dict:" in ref_text  # V0.6 内嵌同源
 assert all(p2 in ref_text for p2 in ("P22", "P23", "P24"))                     # 坑区 V0.6 齐全

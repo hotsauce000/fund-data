@@ -349,9 +349,9 @@ def test_l1_offline():
     check("L1", "同类百分位-解读", pr["latest_percentile"] == _pv - 1
           and "同类前列" in pr["label"] and pr["delta_pp"] is not None,
           f"最新{pr['latest_percentile']} 一年前{pr['year_ago_percentile']} Δ{pr['delta_pp']}pp")
-    check("L1", "metrics-费率标注", fd.fund_metrics(
-        {"nav_history": _nav, "fees": {"current_rate": "0.12"}})["mgmt_fee_pct"] == 0.12
-        and fd.fund_metrics({"nav_history": _nav})["mgmt_fee_pct"] is None)
+    check("L1", "metrics-现申购费标注(V0.7改名)", fd.fund_metrics(
+        {"nav_history": _nav, "fees": {"current_rate": "0.12"}})["subscription_fee_pct"] == 0.12
+        and fd.fund_metrics({"nav_history": _nav})["subscription_fee_pct"] is None)
 
     # ── V0.4.1 审计修复项守卫（P-A~P-E + 复核遗留）──
     expect_raise("L1", "DCA-amount非正拦截",
@@ -919,24 +919,27 @@ def test_l1_offline():
         def raise_for_status(self):
             return None
 
-    _orig_get6, _tx0 = fd.ttfund_get, fd.TENCENT_REQUEST_COUNT[0]
+    _orig_p2g, _tx0 = fd._push2_get, fd.TENCENT_REQUEST_COUNT[0]
     _cache_rw = (fd._cache_read, fd._cache_write)
     try:
         fd._cache_read = lambda *a, **k: None       # L1 不读不写真缓存（防 mock 数据落盘污染）
         fd._cache_write = lambda *a, **k: None
         # lmt=10 → floor=10；12 行 mock（10 有效+1 重复+1 脏）去重后恰好过线；
         # fallback 关闭 = 纯解析路径，零腾讯请求
-        fd.ttfund_get = lambda *a, **k: _KL(["2026-01-02,3000.5", "2026-01-02,3000.5",
-                                             "2026-01-03,3001.0", "bad,xx"]
-                                            + [f"2026-01-{d:02d},{3000 + d}.0"
-                                               for d in range(4, 13)])
+        def _kl_mock(klines):
+            return lambda url, params=None, context="": {"data": {"klines": klines}}
+
+        fd._push2_get = _kl_mock(["2026-01-02,3000.5", "2026-01-02,3000.5",
+                                  "2026-01-03,3001.0", "bad,xx"]
+                                 + [f"2026-01-{d:02d},{3000 + d}.0"
+                                    for d in range(4, 13)])
         rows = fd.kline_daily("1.000905", lmt=10, force_refresh=True,
                               use_tencent_fallback=False)
         check("L1", "K线-EM解析+按日期去重",
               len(rows) == 11 and rows[0]["date"] == "2026-01-02"
               and rows[-1]["date"] == "2026-01-12",
               f"{len(rows)} 根（重复日期行+脏行剔除，01-02 只留一条）")
-        fd.ttfund_get = lambda *a, **k: _KL(["2026-01-02,3000.5"] * 5)
+        fd._push2_get = _kl_mock(["2026-01-02,3000.5"] * 5)
         expect_raise("L1", "K线-样本不足语义化报错",
                      lambda: fd.kline_daily("1.000905", lmt=10, force_refresh=True,
                                             use_tencent_fallback=False), "指数日线不足")
@@ -944,13 +947,13 @@ def test_l1_offline():
         def _raise_rc(*a, **k):                        # 差分锁：EM 403 → RiskControlError
             raise fd.RiskControlError("mock 403")      # 必须原样上抛且绝不触发腾讯备胎
 
-        fd.ttfund_get = _raise_rc
+        fd._push2_get = _raise_rc
         expect_raise("L1", "K线-风控不降级",
                      lambda: fd.kline_daily("1.000905", force_refresh=True), "mock 403")
         check("L1", "K线-风控路径零腾讯请求",
               fd.TENCENT_REQUEST_COUNT[0] == _tx0, f"腾讯账本 {fd.TENCENT_REQUEST_COUNT[0]}")
     finally:
-        fd.ttfund_get = _orig_get6
+        fd._push2_get = _orig_p2g
         fd._cache_read, fd._cache_write = _cache_rw
         fd.TENCENT_REQUEST_COUNT[0] = _tx0
 
@@ -973,7 +976,7 @@ def test_l1_offline():
     try:
         fd._cache_read = lambda *a, **k: None
         fd._cache_write = lambda *a, **k: None
-        fd.ttfund_get = lambda *a, **k: _KL(["2026-01-02,3000.5"])
+        fd._push2_get = _kl_mock(["2026-01-02,3000.5"])
 
         class _FakeOpen:
             def open(self, req, timeout=None):
@@ -1004,6 +1007,58 @@ def test_l1_offline():
     check("L1", "P23-dt15目录页陷阱入册",
           "dt=15" in (Path(__file__).parent / "fund_data.py").read_text(encoding="utf-8"),
           "fund_manager docstring/坑区标注 dt=15 忽略分页")
+
+    # ── V0.7.0 费率全表（jjfl 通道）离线单元 ──
+    _jjfl = ("<html><title>测试基金A(000001)基金费率 _ 天天基金网</title><body>"
+             "<table><tr><td>管理费率</td><td>1.20%（每年）</td><td>托管费率</td>"
+             "<td>0.20%（每年）</td><td>销售服务费率</td><td>0.00%（每年）</td></tr></table>"
+             "<table><tr><th>适用金额</th><th>费率</th></tr>"
+             "<tr><td>小于200万元</td><td>1.20%</td></tr>"
+             "<tr><td>大于等于500万元</td><td>每笔1000元</td></tr></table>"
+             "<table><tr><th>适用金额</th><th>原费率|天天基金优惠费率</th></tr>"
+             "<tr><td>小于200万元</td><td>1.50% | 0.15%</td></tr>"
+             "<tr><td>大于等于500万元</td><td>每笔1000元</td></tr></table>"
+             "<table><tr><th>适用期限</th><th>赎回费率</th></tr>"
+             "<tr><td>小于7天</td><td>1.50%</td></tr>"
+             "<tr><td>大于等于730天</td><td>0.00%</td></tr></table>"
+             "</body></html>")
+    class _FR:
+        def __init__(self, text):
+            self.status_code, self.text = 200, text
+            self.content = text.encode("utf-8")
+
+        def raise_for_status(self):
+            return None
+
+    _orig_get12, _cw12 = fd.ttfund_get, (fd._cache_read, fd._cache_write)
+    try:
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda *a, **k: None
+        fd.ttfund_get = lambda *a, **k: _FR(_jjfl)
+        ff = fd.fund_fees("005001", force_refresh=True)
+        check("L1", "费率全表-运作费三率+表头特征分派",
+              ff["management_fee_pct"] == 1.2 and ff["custody_fee_pct"] == 0.2
+              and ff["sales_service_fee_pct"] == 0.0 and ff["name"] == "测试基金A",
+              "管理/托管/销售服务按标签邻接取值；title 剥费率尾")
+        check("L1", "费率全表-申购档原|优惠拆分+固定费档原文",
+              ff["purchase_tiers"][0] == {"range": "小于200万元", "origin_pct": 1.5,
+                                           "discount_pct": 0.15, "fee_text": "1.50%|0.15%"}
+              and ff["purchase_tiers"][1]["origin_pct"] is None
+              and ff["purchase_tiers"][1]["fee_text"] == "每笔1000元",
+              "百分比对拆分；每笔N元档 None+原文")
+        check("L1", "费率全表-认购/赎回阶梯",
+              ff["founding_tiers"][0]["fee_text"] == "1.20%"
+              and [(x["holding"], x["fee_pct"]) for x in ff["redemption_tiers"]]
+              == [("小于7天", 1.5), ("大于等于730天", 0.0)],
+              "认购适用金额→费率；赎回适用期限阶梯")
+        empty_html = "<html><title>x</title><body><table><tr><td>无关</td></tr></table></body></html>"
+        fd.ttfund_get = lambda *a, **k: _FR(empty_html)
+        expect_raise("L1", "费率全表-空解析拒绝",
+                     lambda: fd.fund_fees("005001", force_refresh=True), "解析为空")
+    finally:
+        fd.ttfund_get = _orig_get12
+        fd._cache_read, fd._cache_write = _cw12
+
 
     # ── V0.6.2 规模全历史（gmbd 通道）离线单元 ──
     _gmbd = ('var gmbd_apidata={ content:"<table class=\'w782\'><thead><tr>'
@@ -1303,10 +1358,12 @@ def test_l2_smoke():
     check("L2", "L7 GC007回购代理", 0.5 < gc["rate_pct"] < 8 and gc["proxy_for"] == "DR007",
           f"GC007={gc['rate_pct']}% ({gc['source'][:20]})")
     rt = fd.cn_treasury_realtime()
-    check("L2", "L7 国债实时四期限",
+    check("L2", "L7 国债收益率四期限(P26两形态)",
           all(t in rt for t in ("2y", "5y", "10y", "30y"))
-          and rt["2y"]["yield_pct"] < rt["10y"]["yield_pct"] < rt["30y"]["yield_pct"],
-          f"2Y={rt['2y']['yield_pct']} 10Y={rt['10y']['yield_pct']} 30Y={rt['30y']['yield_pct']}")
+          and rt["2y"]["yield_pct"] < rt["10y"]["yield_pct"] < rt["30y"]["yield_pct"]
+          and rt["as_of"] in ("盘中(push2)",) or "收盘(降级" in rt.get("as_of", ""),
+          f"2Y={rt['2y']['yield_pct']} 10Y={rt['10y']['yield_pct']} "
+          f"30Y={rt['30y']['yield_pct']} [{rt['as_of']}]")
 
     # ── V0.5 全市场层（rankhandler 全量底座 + cninfo 第四线）──
     _n5 = fd.TT_REQUEST_COUNT[0]
@@ -1402,13 +1459,16 @@ def test_l2_smoke():
     # ── V0.6.1 基准指数层 ──
     idx300 = fd.kline_daily("沪深300")
     _n_tt, _n_tx = fd.TT_REQUEST_COUNT[0], fd.TENCENT_REQUEST_COUNT[0]
+    _n_em = fd.EM_REQUEST_COUNT[0]
     fd.kline_daily("沪深300")                       # 二次必命中当日缓存
-    check("L2", "B1 沪深300-十年全史+缓存0请求",
-          len(idx300) >= 2000 and idx300[0]["date"] < idx300[-1]["date"]
+    check("L2", "B1 沪深300-全史+缓存0请求(P26双形态)",
+          len(idx300) >= 800            # 主源自愈≈2600 / 冷却期腾讯备胎=800（P25上限）
+          and idx300[0]["date"] < idx300[-1]["date"]
           and idx300[-1]["close"] > 1000
-          and fd.TT_REQUEST_COUNT[0] == _n_tt and fd.TENCENT_REQUEST_COUNT[0] == _n_tx,
+          and fd.TT_REQUEST_COUNT[0] == _n_tt and fd.TENCENT_REQUEST_COUNT[0] == _n_tx
+          and fd.EM_REQUEST_COUNT[0] == _n_em,   # P26 后主源走 em 线（三账本全 0）
           f"{len(idx300)} 根 {idx300[0]['date']}→{idx300[-1]['date']} "
-          f"最新收盘 {idx300[-1]['close']}（二调实发 tt/tx 0/0）")
+          f"最新收盘 {idx300[-1]['close']}（二调 tt/tx/em 0/0/0）")
     idxdvd = fd.kline_daily("中证红利", lmt=300)
     check("L2", "B1 中证红利-secid市场1通道",
           len(idxdvd) >= 250 and idxdvd[-1]["close"] > 1000,
@@ -1434,6 +1494,32 @@ def test_l2_smoke():
     fd.fund_scale_history("000312")
     check("L2", "B2 规模全历史-缓存0请求",
           fd.TT_REQUEST_COUNT[0] == _sh_n, f"二调实发 {fd.TT_REQUEST_COUNT[0] - _sh_n} 次")
+
+    # ── V0.7.0 费率全表 + manager 语义命名（官方锚：005001 何帅/F10 费率表）──
+    ff2 = fd.fund_fees("005001")
+    check("L2", "B3 费率全表-官方锚",
+          ff2["management_fee_pct"] == 1.2 and ff2["custody_fee_pct"] == 0.2
+          and ff2["purchase_tiers"][0]["origin_pct"] == 1.5
+          and ff2["purchase_tiers"][0]["discount_pct"] == 0.15
+          and len(ff2["redemption_tiers"]) == 5
+          and ff2["redemption_tiers"][-1]["fee_pct"] == 0.0
+          and "730" in ff2["redemption_tiers"][-1]["holding"],
+          f"管理{ff2['management_fee_pct']}% 托管{ff2['custody_fee_pct']}% "
+          f"申购{ff2['purchase_tiers'][0]['origin_pct']}|{ff2['purchase_tiers'][0]['discount_pct']}% "
+          f"赎回{len(ff2['redemption_tiers'])}档至免")
+    snap7 = fd.fund_snapshot("005001")
+    mgr7 = snap7["manager"]
+    check("L2", "V7 manager语义命名-源端点锚",
+          mgr7["name"] == "何帅" and "年又" in mgr7["total_tenure"]
+          and "亿(" in mgr7["current_scale_text"]
+          and isinstance(mgr7["return_chart"], dict)
+          and "categories" in mgr7["return_chart"]
+          and all(k not in mgr7 for k in ("tenure_start", "fund_size_yi", "return_pct")),
+          f"{mgr7['name']} {mgr7['total_tenure']} {mgr7['current_scale_text']} "
+          f"return_chart=图表对象；旧键已除名（V0.7.0 破坏性改名）")
+    check("L2", "V7 metrics-现申购费字段(改名后)",
+          fd.fund_metrics(snap7)["subscription_fee_pct"] == 0.15,
+          "005001 现申购费 0.15%（注意非管理费——管理费走 fund_fees）")
 
 
 # ════════════════════ L3 交叉验证（三源互证）════════════════════
