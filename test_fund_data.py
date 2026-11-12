@@ -952,6 +952,15 @@ def test_l1_offline():
                      lambda: fd.kline_daily("1.000905", force_refresh=True), "mock 403")
         check("L1", "K线-风控路径零腾讯请求",
               fd.TENCENT_REQUEST_COUNT[0] == _tx0, f"腾讯账本 {fd.TENCENT_REQUEST_COUNT[0]}")
+
+        def _raise_net(*a, **k):                    # P26 主干：通道网络失败→落腾讯备胎
+            raise RuntimeError("push2 通道失败(mock 冷却)")
+
+        fd._push2_get = _raise_net
+        fb_rows = fd.kline_daily("1.000905", lmt=10, force_refresh=True)
+        check("L1", "K线-通道网络失败落腾讯备胎(P26主干)",
+              len(fb_rows) >= 10 and fd.TENCENT_REQUEST_COUNT[0] > _tx0,
+              f"备胎供 {len(fb_rows)} 根（腾讯账本 +{fd.TENCENT_REQUEST_COUNT[0] - _tx0}）")
     finally:
         fd._push2_get = _orig_p2g
         fd._cache_read, fd._cache_write = _cache_rw
@@ -1361,7 +1370,7 @@ def test_l2_smoke():
     check("L2", "L7 国债收益率四期限(P26两形态)",
           all(t in rt for t in ("2y", "5y", "10y", "30y"))
           and rt["2y"]["yield_pct"] < rt["10y"]["yield_pct"] < rt["30y"]["yield_pct"]
-          and rt["as_of"] in ("盘中(push2)",) or "收盘(降级" in rt.get("as_of", ""),
+          and (rt["as_of"] == "盘中(push2)" or "收盘(降级" in rt.get("as_of", "")),
           f"2Y={rt['2y']['yield_pct']} 10Y={rt['10y']['yield_pct']} "
           f"30Y={rt['30y']['yield_pct']} [{rt['as_of']}]")
 

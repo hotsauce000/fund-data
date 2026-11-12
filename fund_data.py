@@ -1278,7 +1278,8 @@ def _push2_get(url: str, params: Optional[dict] = None, context: str = "") -> di
         EM_REQUEST_COUNT[0] += 1
         sess = requests.Session()
         sess.trust_env = False                          # P12 直连
-        try:
+        sess.headers.update({"User-Agent": UA})         # 与 EM_SESSION 同 UA——重探时
+        try:                                            # 不把 UA 层拦截误判为 TLS 指纹
             r = sess.get(url, params=params, timeout=10,
                          headers={"Referer": "https://quote.eastmoney.com/"})
         except requests.RequestException as e:
@@ -3057,7 +3058,7 @@ def fund_fees(query: str, force_refresh: bool = False) -> dict:
     assert_not_risk_control(r, "tt", f"jjfl {code}")
     r.raise_for_status()
     h = r.content.decode("utf-8", errors="replace")
-    m = re.search(r"<title>([^<\-]{2,25})", h)
+    m = re.search(r"<title>([^<\-]{2,40})", h)
     name = ((m.group(1).strip() if m else "").split("(")[0]      # 剥 "(005001)基金费率" 尾
             .split("_")[0].split("-")[0].strip()) or None
 

@@ -5,9 +5,9 @@
 
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 
-# fund-data 基金底层数据工具包 V0.6.2 模块全档
+# fund-data 基金底层数据工具包 V0.7.0 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.7.0（2026-11-12）：216/216 断言实测通过**（L1单元146 · L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.7.0（2026-11-12）：217/217 断言实测通过**（L1单元147 · L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
 
 **V0.6.1 基准指数层（quant-excess 端点层收编，kline_daily 一函数三形态）：**
 - 🟢 **B1 `kline_daily`**：指数/股票日线收盘原语——指数名查表（沪深300/中证500/红利/国证2000/中证2000 等 15 指数、20 别名键）/EM secid/6 位股票码；指数走 push2his 主源（F6 分流）+ 腾讯备胎（市场 2 无腾讯码不降级），股票复用 `_tencent_kline` 腾讯通道；20h 缓存键含 lmt 防窗口截断；实测沪深300 十年 2600 根、二调 0 请求
@@ -51,7 +51,7 @@
 - 🔴 **P18 归一化双 bug 修复**：E2 表格变量两种形态旧解析器都吃不下——`{categories, series:[{y,mom}]}` 行式（规模史）值全丢成光杆 `_date` 行；`[[ts,val],...]` 时序对（仓位/同类百分位）被当"首行表头"产出乱码。修复后规模史/仓位史/同类百分位史全部恢复真实值（下游评测 skill 的份额兜底不再是常态）
 - 🔴 **XIRR 兑现**：`fund_dca_backtest` 的 `irr_xirr_pct` 从"注释承诺 V0.2 补"到真值（二分法，清零无解显式 None）；naive 年化注明偏差方向取决于路径
 - 🟢 **B1 基准三曲线**：`Data_grandTotal`（本基金/同类平均/沪深300，窗口约半年）从"只挂名防缺失"到 `snapshot.benchmark_curves`，fund-data 本体从此自带基准
-- 🟢 **B2/B3 评测函数**：`position_trend`（仓位水平+加减仓）/ `peer_rank`（同类百分位+一年前对照）/ `relative_performance`（vs 沪深300或同类平均：相对收益+β+相关性）/ `fund_metrics` 附管理费率标注；实测白酒基金窗口收益与 grandTotal 基金曲线末点分毫不差（-4.23 vs -4.22）
+- 🟢 **B2/B3 评测函数**：`position_trend`（仓位水平+加减仓）/ `peer_rank`（同类百分位+一年前对照）/ `relative_performance`（vs 沪深300或同类平均：相对收益+β+相关性）/ `fund_metrics` 附现申购费标注（管理费走 fund_fees）；实测白酒基金窗口收益与 grandTotal 基金曲线末点分毫不差（-4.23 vs -4.22）
 - 坑 P15~P17 入册：E6 货基字段语义漂移 / QDII 日历差 / 跨域净值备胎不可得（三候选实测全死）
 
 **V0.3.1 防封加固（两轮审计 F1~F7 修复）：**
@@ -129,7 +129,7 @@
 | B3 | `fund_fees(q)` | 费率全表：管理/托管/销售服务费（每年%）+认购/申购（原/优惠）/赎回三阶梯（持有期递减） | F10 jjfl | 1（缓存0） |
 | V6 | `fund_manager(q)` / `manager_rank(pages)` | 经理画像（任职/规模/回报/在管清单）/ 排行（姓名序） | eastmoney manager 页+dt=14 | 1·50/页 |
 | 本地 | `adjusted_nav(recs)` | 复权净值（分红再投口径，链式） | 零网络 | 0 |
-| 本地 | `fund_metrics(snap,s,e)` | 区间收益/年化/最大回撤/波动/夏普/卡玛/管理费率标注 | 零网络 | 0 |
+| 本地 | `fund_metrics(snap,s,e)` | 区间收益/年化/最大回撤/波动/夏普/卡玛/现申购费标注 | 零网络 | 0 |
 | 本地 | `fund_dca_backtest(snap,...)` | 定投回测 + **XIRR 分期真年化**（naive 对照保留） | 零网络 | 0 |
 | 本地 | `position_trend(snap)` | 仓位史解读：水平区间/加减仓信号 | 零网络 | 0 |
 | 本地 | `peer_rank(snap)` | 同类百分位：最新值+一年前对照+分位标签 | 零网络 | 0 |
@@ -1467,7 +1467,8 @@ def _push2_get(url: str, params: Optional[dict] = None, context: str = "") -> di
         EM_REQUEST_COUNT[0] += 1
         sess = requests.Session()
         sess.trust_env = False                          # P12 直连
-        try:
+        sess.headers.update({"User-Agent": UA})         # 与 EM_SESSION 同 UA——重探时
+        try:                                            # 不把 UA 层拦截误判为 TLS 指纹
             r = sess.get(url, params=params, timeout=10,
                          headers={"Referer": "https://quote.eastmoney.com/"})
         except requests.RequestException as e:
@@ -3086,7 +3087,7 @@ def fund_fees(query: str, force_refresh: bool = False) -> dict:
     assert_not_risk_control(r, "tt", f"jjfl {code}")
     r.raise_for_status()
     h = r.content.decode("utf-8", errors="replace")
-    m = re.search(r"<title>([^<\-]{2,25})", h)
+    m = re.search(r"<title>([^<\-]{2,40})", h)
     name = ((m.group(1).strip() if m else "").split("(")[0]      # 剥 "(005001)基金费率" 尾
             .split("_")[0].split("-")[0].strip()) or None
 
@@ -3316,7 +3317,7 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
 ```python
 # 流A：单基金深度诊断（常态 1 请求）
 snap = fund_snapshot("161725")                    # 或传名称 "招商中证白酒"
-m = fund_metrics(snap)                            # 复权口径全指标（含管理费率标注）
+m = fund_metrics(snap)                            # 复权口径全指标（含现申购费标注）
 dca = fund_dca_backtest(snap, amount=1000)        # 定投回测（XIRR 分期真年化）
 print(m["total_return_pct"], m["max_drawdown_pct"], dca["irr_xirr_pct"])
 
