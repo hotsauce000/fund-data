@@ -956,11 +956,27 @@ def test_l1_offline():
         def _raise_net(*a, **k):                    # P26 主干：通道网络失败→落腾讯备胎
             raise RuntimeError("push2 通道失败(mock 冷却)")
 
+        import types as _types6
+        import urllib.request as _u6
+        _orig_bo6 = _u6.build_opener                # 腾讯备胎也须 mock（L1 零网络契约）
+
+        class _FakeOpen6:
+            def open(self, req, timeout=None):
+                # 测试 secid=1.000905（沪市）→ 腾讯符号 sh000905（市场号 1→sh）
+                payload = {"data": {"sh000905": {"qfqday": [
+                    [f"2026-01-{d:02d}", "1", f"{3.0 + d / 100:.2f}"]
+                    for d in range(1, 12)]}}, "code": 0}
+                return _types6.SimpleNamespace(
+                    read=lambda: json.dumps(payload).encode("utf-8"))
+
+        _u6.build_opener = lambda *a, **k: _types6.SimpleNamespace(
+            open=lambda req, timeout=None: _FakeOpen6().open(req, timeout))
         fd._push2_get = _raise_net
         fb_rows = fd.kline_daily("1.000905", lmt=10, force_refresh=True)
+        _u6.build_opener = _orig_bo6                 # 用毕即还（后续块免受污染）
         check("L1", "K线-通道网络失败落腾讯备胎(P26主干)",
-              len(fb_rows) >= 10 and fd.TENCENT_REQUEST_COUNT[0] > _tx0,
-              f"备胎供 {len(fb_rows)} 根（腾讯账本 +{fd.TENCENT_REQUEST_COUNT[0] - _tx0}）")
+              len(fb_rows) == 11 and fd.TENCENT_REQUEST_COUNT[0] == _tx0 + 1,
+              f"mock 备胎供 {len(fb_rows)} 根（腾讯账本 +1，零真实网络）")
     finally:
         fd._push2_get = _orig_p2g
         fd._cache_read, fd._cache_write = _cache_rw
