@@ -1392,7 +1392,8 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
         except OSError:                            # 含 URLError（其子类）
             if attempt == 2:
                 raise
-            time.sleep(1.0)
+            time.sleep(2.0)                        # 退避加长：SSL EOF 瞬态窗口常 >1s，1s 内
+                                                  # 二次重试大概率同窗双败（冷跑实测教训）
     result = {}
     for line in data.strip().split(";"):
         if "=" not in line or '"' not in line:
@@ -2837,8 +2838,9 @@ BENCH_SECID = {
 _SH_INDEX_Q = ({v.split(".")[1] for v in BENCH_SECID.values() if v.startswith("1.")}
                | {"000010"})
 _SECID_RE = re.compile(r"[012]\.\d{6}")
-_TENCENT_KLINE_CAP = 800                       # 腾讯 fqkline 实测：≤800 全量返回；1000~2000
-                                               # 静默截断~641；≥2100 param error（sh600519 扫描，P25）
+_TENCENT_KLINE_CAP = 800                       # 腾讯 fqkline 实测：≤800 全量返回（param=800 实返
+                                               # 801 根，服务端+1 无害）；1000~2000 静默截断~641；
+                                               # ≥2100 param error（sh600519 扫描，P25）
 
 
 def _kline_resolve(query: str) -> tuple:

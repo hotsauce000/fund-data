@@ -1669,8 +1669,8 @@ def test_l2_smoke():
           f"{len(k519)} 根，最新收盘 {k519[-1]['close']}")
 
     # ── V0.6.2 规模全历史（真数据 + 官方锚）──
-    _sh_n = fd.TT_REQUEST_COUNT[0]
     shist = fd.fund_scale_history("000312")
+    _sh_n = fd.TT_REQUEST_COUNT[0]   # 快门在一调之后——冷启首调的抓取不计入「二调」
     # 容前不锁尾（全仓 L2 惯例）：2026-Q4 披露后 shist[-1] 会前移——官方锚按日期定位
     _anchor = next((x for x in shist if x["date"] == "2026-09-30"), None)
     check("L2", "B2 规模全历史-全史跨度+官方锚",
@@ -1934,17 +1934,18 @@ def main():
     print(f"fund-data {fd.__version__} 分层测试  offline_only={OFFLINE_ONLY}\n")
     test_l1_offline()
     if not OFFLINE_ONLY:
-        try:
-            test_l2_smoke()
-            test_l3_cross()
-            test_l4_budget()
-            test_l5_degrade()
-            test_f_guard_band()
-            test_f_cache_band()
-        except Exception:
-            traceback.print_exc()
-            R["fail"] += 1
-            R["results"].append(("ONLINE", "在线测试异常中止", "FAIL", traceback.format_exc()[:200]))
+        # 逐函数隔离（冷跑教训：单函数 transient 逃逸曾连带跳过 L3/L4/L5/F 全部信号）；
+        # 栈全文走 stdout（print_exc 走 stderr 会与 check 的 stdout 在管道下错序截断）
+        for fn in (test_l2_smoke, test_l3_cross, test_l4_budget, test_l5_degrade,
+                   test_f_guard_band, test_f_cache_band):
+            try:
+                fn()
+            except Exception:
+                tb = traceback.format_exc()
+                print(tb)
+                R["fail"] += 1
+                R["results"].append(("ONLINE", f"{fn.__name__} 异常中止", "FAIL",
+                                     tb[-250:] if len(tb) > 250 else tb))
     print("\n──── 汇总 ────")
     by_layer = {}
     for layer, name, st, detail in R["results"]:
