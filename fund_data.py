@@ -67,7 +67,6 @@ __version__ = "0.7.1"
 
 FUND_CACHE_DIR = Path.home() / ".fund_data_cache"
 SNAPSHOT_TTL_HOURS = 20          # 距上次抓取 20h 失效（滚动窗口，非自然日切分）
-FUND_LIST_TTL_DAYS = 30
 _BJ_TZ = timezone(timedelta(hours=8))   # E2 时间戳按北京时区解析，非东八区机器不漂移
 
 TT_MIN_INTERVAL = 1.5            # 东财/天天系最小请求间隔（秒）；批量场景建议调 2~3
@@ -95,11 +94,147 @@ _CBREAK_COOLDOWN = 600           # F2：熔断冷却 10 分钟
 _CBREAK_TRIP = 3                 # 连续 3 次风控信号触发熔断
 _cbreak_state = {"tt": [0, 0.0], "em": [0, 0.0], "cninfo": [0, 0.0]}   # [连击数, 上次信号时刻]；>5min 衰减归一
 
+# Sprint 2/3：异常与缓存语义与 fund_data_core 统一（core 为硬依赖，与主模块同一套部署）。
+from fund_data_core import CachePolicy, CacheRepository, StaleDataError
+from fund_data_core.cache_policies import FUND_LIST_TTL_SECONDS
+from fund_data_core.errors import (CircuitOpenError, LeaseError,
+                                   RiskControlError)
 
-class RiskControlError(RuntimeError):
-    """403/429/风控页信号——与网络故障严格区分：绝不触发降级风暴（审计 F6），
-    直接上抛并计入熔断。它不是 requests.RequestException 子类，
-    fund_snapshot 的 except RequestException 不会误捕它。"""
+FUND_LIST_TTL_DAYS = FUND_LIST_TTL_SECONDS // 86400   # 单一来源：core 常量派生（30 天）
+
+
+# ── Sprint 2：跨进程请求协调核心（fund_data_core）接入 ─────────────────
+# 模块加载完成后默认激活协调器（见文件末尾 _reset_request_coordination() 调用）：
+# 配额滑窗/最小间隔/在途上限按 provider 分账（tt+em+push2 合并东财风控面），
+# 熔断闸门由协调器裁决。成功语义保持 Sprint 1 口径：传输层（Gateway）只分类
+# 风险与可达性，HTTP 2xx 绝不清零；业务完整性校验通过后由调用方显式
+# _cbreak_success() 清零（provider 级结论）。测试可再次调 _reset_request_coordination
+# 注入 FakeClock/临时状态目录重建；下方 legacy F1/F2 实现保留供 _teardown 回退。
+_COORDINATOR = None
+_REQUEST_GATEWAY = None
+_CACHE_REPO = None     # Sprint 3：CacheRepository（FUND_CACHE_DIR 即缓存根，键=legacy 相对路径）
+_CORE_LINE_PROVIDER = {"tt": "eastmoney", "em": "eastmoney", "cninfo": "cninfo",
+                       "danjuan": "danjuan", "tencent": "tencent",
+                       "chinabond": "chinabond", "cb": "chinabond"}
+
+
+def _reset_request_coordination(clock=None, sleeper=None, policies=None):
+    """（重新）构建进程级协调器与网关；返回 Coordinator（测试/嵌入方用）。
+
+    状态目录固定在 FUND_CACHE_DIR/coordinator（测试先重定向 FUND_CACHE_DIR 再调
+    本函数）。clock/sleeper 可注入确定性时钟；缺省用真实 time 模块。policies
+    可传 {"eastmoney": {"min_interval": 0}} 等字段 dict——在本模块预算策略之上
+    replace 合并（保住 240/300s 等防封余量，绝不能回落 DEFAULT_POLICIES）。
+    构建后 legacy F1/F2 磁盘文件不再读写（实现保留，供 _teardown 回退）。
+    """
+    global _COORDINATOR, _REQUEST_GATEWAY
+    from dataclasses import replace as _dc_replace
+    from fund_data_core import Coordinator, Gateway, ProviderPolicy
+    resolved = {
+        # 东财全域（tt/em/push2 同一 IP 风控面）预算 240/300s：300 封禁线留 20% 余量
+        "eastmoney": ProviderPolicy(
+            max_requests=240, window_seconds=300, min_interval=TT_MIN_INTERVAL,
+            max_in_flight=4, lease_seconds=30, circuit_threshold=_CBREAK_TRIP,
+            open_seconds=_CBREAK_COOLDOWN),
+        "cninfo": ProviderPolicy(
+            max_requests=120, window_seconds=300, min_interval=CNINFO_MIN_INTERVAL,
+            max_in_flight=2, lease_seconds=30, circuit_threshold=_CBREAK_TRIP,
+            open_seconds=_CBREAK_COOLDOWN),
+        "danjuan": ProviderPolicy(
+            max_requests=120, window_seconds=300, min_interval=1.5, max_in_flight=2,
+            lease_seconds=30, circuit_threshold=_CBREAK_TRIP,
+            open_seconds=_CBREAK_COOLDOWN),
+        "tencent": ProviderPolicy(
+            max_requests=300, window_seconds=300, min_interval=0.2, max_in_flight=4,
+            lease_seconds=30, circuit_threshold=_CBREAK_TRIP,
+            open_seconds=_CBREAK_COOLDOWN),
+        # 预留：中债 curl 通道（_cb_request）Sprint 3 接入 Gateway curl transport，
+        # 当前该线未走协调器——策略先行注册保证接入时预算即生效。
+        "chinabond": ProviderPolicy(
+            max_requests=120, window_seconds=300, min_interval=1.5, max_in_flight=2,
+            lease_seconds=30, circuit_threshold=_CBREAK_TRIP,
+            open_seconds=_CBREAK_COOLDOWN),
+    }
+    for name, override in (policies or {}).items():
+        if name not in resolved:
+            raise ValueError(f"未知 provider 策略覆盖: {name!r}")
+        resolved[name] = (_dc_replace(resolved[name], **override)
+                          if isinstance(override, dict) else override)
+    tick = clock if clock is not None else time
+    _COORDINATOR = Coordinator(FUND_CACHE_DIR / "coordinator", policies=resolved,
+                               clock=tick, sleeper=sleeper if sleeper is not None else tick)
+    _REQUEST_GATEWAY = Gateway(_COORDINATOR)
+    global _CACHE_REPO
+    _CACHE_REPO = CacheRepository(FUND_CACHE_DIR)   # 数据文件保持在 legacy 相对路径
+    for line in _cbreak_state:
+        _cbreak_state[line] = [0, 0.0]
+    return _COORDINATOR
+
+
+def _teardown_request_coordination():
+    """拆除协调（回退 legacy F1/F2 与直读缓存）：诊断/降级排查时按需调用。"""
+    global _COORDINATOR, _REQUEST_GATEWAY, _CACHE_REPO
+    _COORDINATOR = None
+    _REQUEST_GATEWAY = None
+    _CACHE_REPO = None
+
+
+def _tt_hit(url: str):
+    """ttfund_get 逐尝试账本（与 legacy 口径一致：host 明细入账）。"""
+    TT_REQUEST_COUNT[0] += 1
+    host = re.sub(r"^https?://", "", url).split("/")[0]
+    TT_REQUEST_COUNT[1][host] = TT_REQUEST_COUNT[1].get(host, 0) + 1
+
+
+def _em_hit(url: str):
+    EM_REQUEST_COUNT[0] += 1
+
+
+def _cninfo_hit(url: str):
+    CNINFO_REQUEST_COUNT[0] += 1
+
+
+class _SessionAdapter:
+    """Gateway 注入用 Session 视图：只暴露 get/post（网关按 per-method 分发，
+    测试对 TT_SESSION.get/.post 的替换继续生效），每次尝试回调 on_hit 记账
+    （与 legacy 逐 attempt 的请求账本口径一致）。被包裹会话若返回异常实例
+    （mock/半破坏 session 的形态）按传输失败抛出，交由网关重试/结算。"""
+
+    def __init__(self, session, on_hit):
+        self._session = session
+        self._on_hit = on_hit
+
+    def get(self, url, **kwargs):
+        self._on_hit(url)
+        result = self._session.get(url, **kwargs)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    def post(self, url, **kwargs):
+        self._on_hit(url)
+        result = self._session.post(url, **kwargs)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+
+def _release_pending(resp, note: str = "raw-passthrough"):
+    """中性结算响应上待裁决的许可：入账响应、释放租约、绝不清零（Sprint 1）。
+
+    业务层的成功清零统一走 _cbreak_success()（provider 级显式结论）。
+    慢响应边缘租约可能已到期被 _prune 中性清理——LeaseError 静默（语义等价）。
+    """
+    permit = getattr(resp, "permit", None)
+    if permit is not None:
+        try:
+            permit.failure(reason=note, response_received=True)
+        except LeaseError:
+            pass
+
+
+class UpstreamFormatError(RuntimeError):
+    """上游响应结构不符合契约：不计成功、不触发网络降级。"""
 
 
 def _throttle_file(line: str) -> Path:
@@ -147,7 +282,20 @@ def _line_label(line: str) -> str:
 
 
 def _cbreak_check(line: str):
-    """F2：熔断检查。冷却期内所有请求直接拒绝（不敲上游），报错给明确解除时间。"""
+    """F2：熔断检查。冷却期内所有请求直接拒绝（不敲上游），报错给明确解除时间。
+
+    Sprint 2：协调核心激活时读协调器闸门（OPEN 拒绝 / HALF_OPEN 放行，探针语义
+    由网关-许可层保证；快照读取同时完成到期转 HALF_OPEN 的推进）。legacy 路径
+    不变（磁盘冷却文件）。
+    """
+    if _COORDINATOR is not None:
+        snap = _COORDINATOR.snapshot(_CORE_LINE_PROVIDER.get(line, "eastmoney"))
+        if snap["circuit"] == "OPEN":
+            remain = int(max(0.0, snap["open_until"] - time.time()))
+            raise CircuitOpenError(
+                f"{_line_label(line)}[{line}] 熔断中（疑似触发风控已自动停机），冷却剩 {remain}s。"
+                f"这是保护机制——继续请求只会延长封禁；稍后再试或换网络。")
+        return
     f = _cbreak_file(line)
     if f.exists():
         try:
@@ -156,7 +304,7 @@ def _cbreak_check(line: str):
             until = 0.0
         if until > time.time():
             remain = int(until - time.time())
-            raise RuntimeError(
+            raise CircuitOpenError(
                 f"{_line_label(line)}[{line}] 熔断中（疑似触发风控已自动停机），冷却剩 {remain}s 至 "
                 f"{datetime.fromtimestamp(until).strftime('%H:%M:%S')}。"
                 f"这是保护机制——继续请求只会延长封禁；稍后再试或换网络。")
@@ -164,11 +312,33 @@ def _cbreak_check(line: str):
         _cbreak_state[line] = [0, 0.0]
 
 
+def _cbreak_success(line: str):
+    """业务结构与完整性校验全部通过后，才清零该线的风控连击。"""
+    if _COORDINATOR is not None:
+        _COORDINATOR.clear_risk_streak(_CORE_LINE_PROVIDER.get(line, "eastmoney"))
+    _cbreak_state[line] = [0, 0.0]        # 镜像 legacy 状态（审计打印/内省兼容）
+
+
 def _cbreak_signal(line: str, why: str):
-    """F2：记录一次风控信号。连续 _CBREAK_TRIP 次（5 分钟窗口内）→ 落盘熔断并抛错。"""
+    """F2：记录一次风控信号。连续 _CBREAK_TRIP 次（5 分钟窗口内）→ 落盘熔断并抛错。
+
+    Sprint 2：协调核心激活时信号入协调器（跨进程共享连击——真实账本；legacy 的
+    5min 孤立信号衰减由「业务成功清零 + 滑窗配额」替代：连击只被显式业务成功
+    清零，不会被时间静默冲销）。_cbreak_state 同步镜像（进程内审计口径兼容），
+    触闸抛错口径与 legacy 一致。
+    """
     cnt, last_ts = _cbreak_state.get(line, [0, 0.0])
-    cnt = 1 if (time.time() - last_ts) > 300 else cnt + 1   # 跨 5min 的孤立信号重新计
+    cnt = 1 if (time.time() - last_ts) > 300 else cnt + 1   # 镜像口径：跨 5min 孤立信号重计
     _cbreak_state[line] = [cnt, time.time()]
+    if _COORDINATOR is not None:
+        outcome = _COORDINATOR.signal_risk(_CORE_LINE_PROVIDER.get(line, "eastmoney"), why)
+        if outcome["opened"]:
+            _cbreak_state[line] = [0, 0.0]
+            raise RiskControlError(
+                f"{_line_label(line)}[{line}] 连续 {_CBREAK_TRIP} 次风控信号（最近: {why}），已自动熔断 "
+                f"{_CBREAK_COOLDOWN // 60} 分钟。"
+                f"熔断期内所有{_line_label(line)}请求直接拒绝（保护 IP）。")
+        return
     if cnt >= _CBREAK_TRIP:
         until = time.time() + _CBREAK_COOLDOWN
         try:
@@ -186,16 +356,23 @@ def _cbreak_signal(line: str, why: str):
 def assert_not_risk_control(resp, line: str = "tt", context: str = ""):
     """F6 防线：调用方 raise_for_status **之前**先过这一道——403/429 转 RiskControlError。
 
-    用法：r = ttfund_get(...); assert_not_risk_control(r, "tt", "E2"); r.raise_for_status()
-    RiskControlError 不是 RequestException 子类 → fund_snapshot 的降级 except 不会误捕
-    → 杜绝"403 被当网络故障 → 降级 → 37 页 lsjz 风暴"（审计 F6 的恶性链）。
+    此函数只分类传输层风险，不判定业务成功；HTTP 500、非 JSON、结构异常均不清零。
+    调用方完成业务完整性校验后，必须显式调用 _cbreak_success(line)。
     """
     if resp.status_code in (403, 429):
         _cbreak_signal(line, f"HTTP {resp.status_code} {context}")
         raise RiskControlError(
             f"HTTP {resp.status_code}（{context}）：疑似{_line_label(line)}风控信号，"
             f"已计入熔断计数。本错误不触发降级（防请求风暴），请降频稍后再试。")
-    _cbreak_state[line] = [0, 0.0]   # 成功响应清零连击（孤立 403 不跨时间累积误熔断）
+
+
+def _assert_not_risk_content(text: str, line: str, context: str):
+    """识别已实测的 200+拒绝文案；其他结构异常由调用方按 UpstreamFormatError 处理。"""
+    if "无访问权限" in text:
+        _cbreak_signal(line, f"内容风控 {context}")
+        raise RiskControlError(
+            f"{context} 返回「无访问权限」：疑似{_line_label(line)}风控信号，"
+            f"已计入熔断计数。本错误不触发降级。")
 
 
 def ttfund_get(url: str, params: Optional[dict] = None,
@@ -203,9 +380,20 @@ def ttfund_get(url: str, params: Optional[dict] = None,
     """天天/东财/蛋卷统一请求入口：跨进程串行限流(F1) + 熔断(F2) + 强制 HTTPS（坑P1）
     + 会话复用 + 瞬态重试1次（仅网络异常；HTTP 状态码在调用方经 assert_not_risk_control
     分类——403/429 是风控信号，不重试、不降级、计熔断，见 F6）。
+
+    Sprint 2：协调核心激活时改走 Gateway——403/429/风控正文由网关分类并计熔断，
+    配额按 URL 域名分 provider（东财/蛋卷各自独立账）；2xx 只代表可达，
+    中性结算不清零，业务成功仍由调用方显式 _cbreak_success()。
     """
     if url.startswith("http://"):
         url = "https://" + url[len("http://"):]
+    if _REQUEST_GATEWAY is not None:
+        resp = _REQUEST_GATEWAY.get(
+            url, params=params, headers=headers, timeout=timeout, retries=1,
+            retry_statuses=(),                         # 仅网络异常重试（legacy 口径）
+            session=_SessionAdapter(TT_SESSION, _tt_hit), **kwargs)
+        _release_pending(resp)
+        return resp
     for attempt in (1, 2):
         _cbreak_check("tt")                             # F2：冷却期内直接拒绝
         _cross_proc_throttle("tt", TT_MIN_INTERVAL)     # F1：跨进程节流（锁内睡间隔）
@@ -221,7 +409,14 @@ def ttfund_get(url: str, params: Optional[dict] = None,
 
 
 def _cache_read(rel: str, max_age_hours: Optional[float]) -> Optional[dict]:
-    """读磁盘缓存；rel 相对 FUND_CACHE_DIR。过期/损坏返回 None（损坏即重下，坑见 L5 演练）。"""
+    """读磁盘缓存；rel 相对 FUND_CACHE_DIR。过期/损坏返回 None（损坏即重下，坑见 L5 演练）。
+
+    Sprint 3：core 激活时走 CacheRepository.read（raw JSON 同路径，miss/损坏/
+    过期一律 None，与直读 JSON 语义等价）；teardown 模式回退 legacy 直读。
+    """
+    if _CACHE_REPO is not None:
+        return _CACHE_REPO.read(
+            rel, None if max_age_hours is None else max_age_hours * 3600)
     p = FUND_CACHE_DIR / rel
     if not p.exists():
         return None
@@ -236,7 +431,15 @@ def _cache_read(rel: str, max_age_hours: Optional[float]) -> Optional[dict]:
 
 
 def _cache_write(rel: str, payload: "dict | list") -> None:
-    """原子写（tmp+rename）：进程中断不留半截文件（G2；损坏兜底仍在 _cache_read）。"""
+    """原子写（tmp+rename）：进程中断不留半截文件（G2；损坏兜底仍在 _cache_read）。
+
+    Sprint 3：core 激活时走 CacheRepository.write（mkstemp+rename，无 schema
+    标记，与 legacy 落盘 JSON 语义等价——分隔符为紧凑格式，且 NaN/Inf 直接
+    拒绝而非落盘 NaN 字面量）；teardown 模式回退 legacy 直写。
+    """
+    if _CACHE_REPO is not None:
+        _CACHE_REPO.write(rel, payload)
+        return
     p = FUND_CACHE_DIR / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix(p.suffix + f".tmp{os.getpid()}")
@@ -255,29 +458,52 @@ def fund_list(force_refresh: bool = False) -> list[dict]:
     """全量基金清单 ~2.8万只：[{code, pinyin, name, type}, ...]
 
     E1: fund.eastmoney.com/js/fundcode_search.js（首载 1 请求，之后磁盘 30 天 / 进程内 0 开销）
+
+    Sprint 3（get_or_load 榜样）：core 激活时冷启动并发收敛（跨进程锁内单一装载，
+    follower 等待后直读）；装载器内完成业务完整性校验并通过后才写缓存/清零——
+    loader 成功=业务成功，天然对齐 Sprint 1。retry_after=0：结构异常后立刻重试
+    允许（保持既有契约）；StaleDataError 保真上抛诱因（旧缓存不改变异常类型）。
+    进程内快路径仍由 _FUND_LIST_MEM 负责（repo 内存层有意不用，避免双层缓存）。
     """
     if _FUND_LIST_MEM and not force_refresh:
+        return _FUND_LIST_MEM
+
+    def _load() -> list[dict]:
+        url = "https://fund.eastmoney.com/js/fundcode_search.js"
+        r = ttfund_get(url, headers={"Referer": "https://fund.eastmoney.com/"})
+        assert_not_risk_control(r, "tt", "E1 清单")
+        r.raise_for_status()
+        text = r.text
+        brace = text.find("[")
+        if brace < 0:
+            raise RuntimeError(f"基金清单响应异常（无 JSON 数组）: {text[:120]!r}")
+        rows, _ = json.JSONDecoder().raw_decode(text[brace:])
+        loaded = [{"code": x[0], "pinyin": x[1], "name": x[2], "type": x[3]} for x in rows]
+        if len(loaded) < 5000:                        # 正常 ~2万条，骤降=上游结构变了
+            raise RuntimeError(f"基金清单仅 {len(loaded)} 条，疑似上游结构变更，拒绝缓存脏数据")
+        _cbreak_success("tt")
+        return loaded
+
+    if _CACHE_REPO is not None:
+        try:
+            result = _CACHE_REPO.get_or_load(
+                "fund_list.json",
+                CachePolicy(ttl_seconds=FUND_LIST_TTL_SECONDS,   # core 常量，与 30 天口径单一来源
+                            retry_after_seconds=0.0),
+                _load, force_refresh=force_refresh)
+        except StaleDataError as stale:
+            raise stale.__cause__ if stale.__cause__ is not None else stale
+        _FUND_LIST_MEM[:] = result.data
         return _FUND_LIST_MEM
     cached = None if force_refresh else _cache_read(
         "fund_list.json", max_age_hours=FUND_LIST_TTL_DAYS * 24)
     if cached:
         _FUND_LIST_MEM[:] = cached
         return _FUND_LIST_MEM
-    url = "https://fund.eastmoney.com/js/fundcode_search.js"
-    r = ttfund_get(url, headers={"Referer": "https://fund.eastmoney.com/"})
-    assert_not_risk_control(r, "tt", "E1 清单")
-    r.raise_for_status()
-    text = r.text
-    brace = text.find("[")
-    if brace < 0:
-        raise RuntimeError(f"基金清单响应异常（无 JSON 数组）: {text[:120]!r}")
-    rows, _ = json.JSONDecoder().raw_decode(text[brace:])
-    out = [{"code": x[0], "pinyin": x[1], "name": x[2], "type": x[3]} for x in rows]
-    if len(out) < 5000:                               # 正常 ~2万条，骤降=上游结构变了
-        raise RuntimeError(f"基金清单仅 {len(out)} 条，疑似上游结构变更，拒绝缓存脏数据")
-    _cache_write("fund_list.json", out)
-    _FUND_LIST_MEM[:] = out
-    return out
+    loaded = _load()
+    _cache_write("fund_list.json", loaded)
+    _FUND_LIST_MEM[:] = loaded
+    return loaded
 
 
 def norm_fund_code(query: str) -> dict:
@@ -546,8 +772,8 @@ def fund_snapshot(query: str, force_refresh: bool = False) -> dict:
     """单基金一站式快照（E2 pingzhongdata，436KB → 20+ 数据集）。
 
     ⭐ 主端点：常态诊断只花这 1 个请求（当日磁盘缓存命中则 0 请求）。
-    E2 网络失败/响应异常时自动走分拆降级（E3+E4a+蛋卷，见 _snapshot_degraded），
-    返回体 source 标注 "degraded"，绝不静默空。
+    E2 网络失败或真正空体走分拆降级（E3+E4a+蛋卷）；风控页与结构异常显式上抛，
+    不触发多页降级。降级返回体 source 标注 "degraded"，绝不静默空。
     返回结构见 keys；缺失数据集列入 missing（坑P3），绝不静默为空。
     """
     code = resolve_fund_code(query)
@@ -565,17 +791,16 @@ def fund_snapshot(query: str, force_refresh: bool = False) -> dict:
     except requests.RequestException as e:
         return _snapshot_degraded(code, reason=f"E2 网络失败: {e}")
     text = r.content.decode("utf-8", errors="replace")
-    # 坑P1 兜底：HTTPS 下仍拿到的空体/极小体 = 上游异常（新基金无数据或被风控）
-    if len(r.content) < 1024:
-        return _snapshot_degraded(
-            code, reason=f"E2 响应仅 {len(r.content)} 字节（正常 400KB+），疑似上游异常")
+    _assert_not_risk_content(text, "tt", "E2 快照")
+    # 只有零字节响应才按瞬态上游异常降级；纯空白等非空畸形体走结构校验。
+    if not r.content:
+        return _snapshot_degraded(code, reason="E2 响应为空，疑似瞬态上游异常")
     v = _parse_js_vars(text)
     missing = [k for k in _PZ_VARS_KNOWN if k not in v]
-    # P0 防线：HTTP 200 + ≥1KB 的风控页/跳转页会解析不出关键变量——
-    # 不校验就会产出 name=None 的全空快照还写入缓存污染 20 小时。识别为上游异常 → 走降级。
+    # 非风控的结构异常不触发多页降级：避免把上游改版误判为网络故障。
     if not v.get("fS_name") or ("Data_netWorthTrend" not in v and not v.get("ishb")):
-        return _snapshot_degraded(
-            code, reason="E2 响应缺少关键变量（fS_name/netWorthTrend），疑似风控页或非数据响应")
+        raise UpstreamFormatError(
+            "E2 响应缺少关键变量（fS_name/netWorthTrend），拒绝生成空快照或触发分拆降级")
 
     nav = [{"date": datetime.fromtimestamp(int(p["x"]) / 1000, _BJ_TZ).strftime("%Y-%m-%d"),
             "nav": float(p["y"]),
@@ -632,6 +857,7 @@ def fund_snapshot(query: str, force_refresh: bool = False) -> dict:
         "buy_redemption_status": v.get("Data_buySedemption"),
         "missing_datasets": missing,                   # 坑P3：显式列出，调用方知情
     }
+    _cbreak_success("tt")
     _cache_write(rel, snap)
     return snap
 
@@ -658,11 +884,15 @@ def _snapshot_degraded(code: str, reason: str = "", years: float = 1.0) -> dict:
         if hold:
             latest = hold[0]["period"]
             top_stocks = [h["stock_code"] for h in hold if h["period"] == latest]
+    except (RiskControlError, CircuitOpenError):
+        raise
     except Exception:
         missing.append("stockCodes/E4a")
     dj: dict = {}
     try:
         dj = fund_detail_danjuan(code)                # 蛋卷档案（跨域）
+    except (RiskControlError, CircuitOpenError):
+        raise
     except Exception:
         missing.append("danjuan/D1")
     return {
@@ -741,6 +971,7 @@ def fund_nav_history(query: str, start: str = "", end: str = "",
     if not rows:
         raise RuntimeError(f"{code} 在 {start}~{end} 无净值记录"
                            f"（基金未成立/已清盘/区间早于成立日/代码有误），拒绝静默返回空。")
+    _cbreak_success("tt")
     return rows
 
 
@@ -825,6 +1056,7 @@ def fund_holdings(query: str, year: Optional[int] = None) -> list[dict]:
                             "nav_pct": _to_float(cells[i_pct]),
                             "shares_wan": _to_float(cells[i_shares]),
                             "value_wan": _to_float(cells[i_value])})
+    _cbreak_success("tt")
     _cache_write(rel, out)
     return out
 
@@ -854,7 +1086,7 @@ def fund_detail_danjuan(query: str) -> dict:
     d = (r.json() or {}).get("data") or {}
     if not d:
         raise RuntimeError(f"蛋卷详情返回空（{code}）")
-    return {
+    out = {
         "code": d.get("fd_code"), "name": d.get("fd_name"), "full_name": d.get("fd_full_name"),
         "type": d.get("fd_type"), "found_date": d.get("found_date"),
         "total_share": d.get("totshare"), "manager": d.get("manager_name"),
@@ -863,6 +1095,8 @@ def fund_detail_danjuan(query: str) -> dict:
         "subscribe_status": d.get("subscribe_status"), "redeem_status": d.get("withdraw_status"),
         "source": "danjuan",
     }
+    _cbreak_success("tt")
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -893,6 +1127,8 @@ def fund_realtime_nav(codes: list[str]) -> list[dict]:
                     "ac_nav": _to_float(x.get("ACCNAV")),
                     "daily_return_pct": _to_float(x.get("NAVCHGRT"))}
                    for x in datas if x.get("FCODE"))
+    if cs:
+        _cbreak_success("tt")
     return out
 
 
@@ -1247,7 +1483,16 @@ def em_get(url: str, params: Optional[dict] = None,
 
     与 ttfund_get 分管不同子域（各自独立的节流线/熔断线），但同属东财风控面——
     em 线触发熔断时建议同时降低 tt 线频率（风控按 IP 不按子域精确区分）。
+    Sprint 2：协调核心激活时改走 Gateway（与 tt 线共享 eastmoney 配额账），
+    2xx 中性结算不清零，业务成功由调用方显式 _cbreak_success("em")。
     """
+    if _REQUEST_GATEWAY is not None:
+        resp = _REQUEST_GATEWAY.get(
+            url, params=params, headers=headers, timeout=timeout, retries=1,
+            retry_statuses=(),                         # 仅网络异常重试（legacy 口径）
+            session=_SessionAdapter(EM_SESSION, _em_hit), **kwargs)
+        _release_pending(resp, "em-passthrough")
+        return resp
     for attempt in (1, 2):                            # 瞬态抖动重试一次（与 ttfund_get 对齐）
         _cbreak_check("em")
         _cross_proc_throttle("em", EM_MIN_INTERVAL)
@@ -1316,22 +1561,34 @@ def _push2_get(url: str, params: Optional[dict] = None, context: str = "") -> di
     重触机制。对策（不跟指纹识别军备竞赛）：单发即弃（1 调用=1 网络命中）+
     flock 跨进程地板 + 随机抖动 + 连接级熔断（2 连败停 1h）——桶满正常用、桶空
     自动退避，调用方无感（降级链接管）。403/429 → RiskControlError 计 F2 熔断
-    不重试不降级（F6 契约）。"""
+    不重试不降级（F6 契约）。
+
+    Sprint 2：协调核心激活时网络命中改走 Gateway（retries=0 保持单发即弃；
+    tt/em/push2 共享 eastmoney 配额账）；403/429 由网关分类计熔断，其余响应
+    中性结算，业务成功仍归调用方 _cbreak_success("em")。"""
     _push2_conn_check()                              # 连接级熔断：停机期零网络直通
-    _cbreak_check("em")                              # F2：403/429 显式风控熔断（独立标记）
-    _cross_proc_throttle("em", EM_MIN_INTERVAL)      # F1 跨进程地板（P12 直连）
+    if _REQUEST_GATEWAY is None:
+        _cbreak_check("em")                          # F2：403/429 显式风控熔断（独立标记）
+        _cross_proc_throttle("em", EM_MIN_INTERVAL)  # F1 跨进程地板（P12 直连）
     if _PUSH2_JITTER[1] > 0:
         # 抖动打掉节拍器特征。注：sleep 在 flock 释放后——跨进程相邻请求发起间隔
         # 下界=EM_MIN_INTERVAL-jitter_max（非严格 1.0s），单发即弃+连接级熔断兜底
         # 下的有意取舍（单进程内间隔仍恒 ≥1.5s）
         time.sleep(random.uniform(*_PUSH2_JITTER))
-    EM_REQUEST_COUNT[0] += 1
     sess = requests.Session()
     sess.trust_env = False                           # P12 直连（不读系统/环境代理）
     sess.headers.update({"User-Agent": UA})          # 与 EM_SESSION 同 UA——重探时
     try:                                            # UA 层拦截不被误判为指纹层
-        r = sess.get(url, params=params, timeout=10,
-                     headers={"Referer": "https://quote.eastmoney.com/"})
+        if _REQUEST_GATEWAY is not None:
+            r = _REQUEST_GATEWAY.get(
+                url, params=params, timeout=10, retries=0,
+                headers={"Referer": "https://quote.eastmoney.com/"},
+                session=_SessionAdapter(sess, _em_hit))
+            _release_pending(r, "push2-passthrough")
+        else:
+            EM_REQUEST_COUNT[0] += 1
+            r = sess.get(url, params=params, timeout=10,
+                         headers={"Referer": "https://quote.eastmoney.com/"})
     except requests.RequestException as e:
         _push2_conn_fail(f"{type(e).__name__} {context}")
         raise RuntimeError(f"push2 通道失败（{context}）: {type(e).__name__}: {str(e)[:60]}")
@@ -1371,6 +1628,32 @@ def _tencent_prefix(code: str) -> str:
     return f"sz{c}"
 
 
+def _tencent_raw(url: str, headers: Optional[dict] = None, timeout: int = 10) -> bytes:
+    """腾讯通道统一取原始字节（P12 直连 opener）。
+
+    Sprint 2：协调核心激活时走许可生命周期——urllib opener 响应无 HTTP 状态码，
+    进不了 Gateway 状态机，故手动 acquire/start/finish（中性结算，业务裁决归
+    调用方）；acquire 同时提供跨进程 0.2s 地板（此前腾讯线无跨进程节流）。
+    TENCENT_REQUEST_COUNT 计真实网络命中：在许可取得之后自增（acquire 被拒
+    的尝试不进账本，与「账本=真实上游命中」口径一致）。
+    """
+    req = urllib.request.Request(url, headers=headers or {"User-Agent": "Mozilla/5.0"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    if _COORDINATOR is None:
+        TENCENT_REQUEST_COUNT[0] += 1
+        return opener.open(req, timeout=timeout).read()
+    permit = _COORDINATOR.acquire(url)
+    _COORDINATOR.mark_network_started(permit)
+    TENCENT_REQUEST_COUNT[0] += 1
+    try:
+        raw = opener.open(req, timeout=timeout).read()
+    except BaseException:
+        permit.failure(reason="tencent-transport")
+        raise
+    permit.failure(reason="tencent-passthrough", response_received=True)
+    return raw
+
+
 def tencent_quote(codes: list[str]) -> dict[str, dict]:
     """腾讯批量实时行情（通道内嵌自 a-stock-data §1.2）：价/涨跌/换手/PE/PB/市值。
 
@@ -1382,12 +1665,8 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
     url = "https://qt.gtimg.cn/q=" + ",".join(_tencent_prefix(c) for c in codes)
     data = None
     for attempt in (1, 2):                            # 瞬态 SSL EOF/连接重试一次（实测网络抖动）
-        req = urllib.request.Request(url)
-        req.add_header("User-Agent", "Mozilla/5.0")
-        TENCENT_REQUEST_COUNT[0] += 1                # 审计账本：腾讯线与东财线并列可查
         try:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            data = opener.open(req, timeout=10).read().decode("gbk")   # 直连（坑P12）
+            data = _tencent_raw(url, headers={"User-Agent": "Mozilla/5.0"}).decode("gbk")
             break
         except OSError:                            # 含 URLError（其子类）
             if attempt == 2:
@@ -1453,6 +1732,7 @@ def concept_blocks(stock_code: str, use_cache: bool = True) -> list[str]:
     tags = [it.get("f14", "") for it in items if it.get("f14")]
     if not tags:
         raise RuntimeError(f"{stock_code} 板块归属为空（secid 路由或风控），拒绝静默空")
+    _cbreak_success("em")
     _cache_write(rel, tags)
     return tags
 
@@ -1515,7 +1795,9 @@ def penetrate(query: str, topn: int = 10) -> dict:
     for h in picks:
         try:
             tags = concept_blocks(h["stock_code"])
-        except Exception as e:                         # 风控/解析失败：跳过该股主题，不中断
+        except (RiskControlError, CircuitOpenError):
+            raise                                  # 风险型信号不得伪装成单股数据缺失
+        except Exception as e:                     # 单股数据/连接故障：跳过该股主题，不中断
             failed_stocks.append({"code": h["stock_code"], "name": h["stock_name"],
                                   "weight": h["nav_pct"],
                                   "reason": f"板块获取失败: {str(e)[:60]}"})
@@ -1797,15 +2079,12 @@ def credit_spread(rating: str = "AA", term: str = "3y",
 
 def _dc_query(report: str, sort_col: str, page_size: int = 60,
               filter_str: str = "", pages: int = 1,
-              cache_key: Optional[str] = None) -> list[dict]:
-    """东财 datacenter 宏观报表统一查询（走 ttfund_get 限流；坑P10：报表名需实测）。
-
-    F7：cache_key 非空时当日磁盘缓存（宏观日更数据，重复查询零请求）。
-    """
+              cache_key: Optional[str] = None) -> tuple[list[dict], bool]:
+    """东财 datacenter 宏观报表统一查询，返回 (记录, 是否来自缓存)。"""
     if cache_key:
         cached = _cache_read(f"macro/{cache_key}.json", max_age_hours=SNAPSHOT_TTL_HOURS)
         if cached is not None:
-            return cached
+            return cached, True
     rows: list[dict] = []
     for pg in range(1, pages + 1):
         params = {"reportName": report, "columns": "ALL", "pageSize": str(page_size),
@@ -1825,11 +2104,7 @@ def _dc_query(report: str, sort_col: str, page_size: int = 60,
         rows.extend(batch)
         if len(batch) < page_size:
             break
-    if cache_key:
-        # 空结果也缓存（P-D）：success 链路已校验，空 = 上游真无数据；
-        # 不缓存会让合法空报表每次调用重发请求
-        _cache_write(f"macro/{cache_key}.json", rows)
-    return rows
+    return rows, False
 
 
 _EM_TSY_FIELDS = {"EMM00588704": "cn_2y", "EMM00166462": "cn_5y",
@@ -1843,8 +2118,8 @@ def treasury_yield_daily(days: int = 30) -> list[dict]:
 
     days>500 时按 500 截断（单页上限）；中债↔东财同口径（三源互证实测分毫不差）。
     """
-    rows = _dc_query("RPTA_WEB_TREASURYYIELD", "SOLAR_DATE",
-                   page_size=min(days, 500), cache_key=f"tsy_{min(days, 500)}")
+    rows, from_cache = _dc_query("RPTA_WEB_TREASURYYIELD", "SOLAR_DATE",
+                                 page_size=min(days, 500), cache_key=f"tsy_{min(days, 500)}")
     out = []
     for r in rows[:days]:
         rec = {"date": str(r.get("SOLAR_DATE", ""))[:10]}
@@ -1854,6 +2129,9 @@ def treasury_yield_daily(days: int = 30) -> list[dict]:
         out.append(rec)
     if not out:
         raise RuntimeError("东财国债日频返回空（RPTA_WEB_TREASURYYIELD），拒绝静默空")
+    if not from_cache:
+        _cache_write(f"macro/tsy_{min(days, 500)}.json", rows)
+        _cbreak_success("tt")
     return out
 
 
@@ -1870,14 +2148,18 @@ def shibor_history(period: Optional[str] = None, days: int = 30) -> list[dict]:
     flt = '(CURRENCY_CODE="CNY")(MARKET="上海银行同业拆借市场")'
     if period:
         flt += f'(REPORT_PERIOD="{period}")'
-    rows = _dc_query("RPT_IMP_INTRESTRATEN", "REPORT_DATE",
-                     page_size=min(days * (1 if period else 8), 500), filter_str=flt,
-                     cache_key=f"shibor_{period or 'all'}_{min(days, 500)}")
+    window = min(days * (1 if period else 8), 500)
+    rows, from_cache = _dc_query("RPT_IMP_INTRESTRATEN", "REPORT_DATE",
+                                 page_size=window, filter_str=flt,
+                                 cache_key=f"shibor_{period or 'all'}_{window}")
     out = [{"date": str(r.get("REPORT_DATE", ""))[:10], "period": r.get("REPORT_PERIOD"),
             "market": r.get("MARKET"), "rate_pct": r.get("IR_RATE"),
             "change_pct": r.get("CHANGE_RATE")} for r in rows]
     if not out:
         raise RuntimeError(f"SHIBOR 查询返回空（period={period!r}），拒绝静默空")
+    if not from_cache:
+        _cache_write(f"macro/shibor_{period or 'all'}_{window}.json", rows)
+        _cbreak_success("tt")
     if period:                                             # 双保险：按日期去重
         seen, dedup = set(), []
         for r in sorted(out, key=lambda x: x["date"], reverse=True):
@@ -1897,8 +2179,8 @@ def benchmark_rate_history() -> list[dict]:
       ⚠️ 这是基准利率史非 LPR 报价（东财无 LPR 报表，实测 9501）。
     附每次调整次日沪深涨跌（next_sh/sz_pct）。
     """
-    rows = _dc_query("RPT_ECONOMY_DEPOSIT_RATE", "REPORT_DATE", page_size=100,
-                     cache_key="deposit_rate_all")
+    rows, from_cache = _dc_query("RPT_ECONOMY_DEPOSIT_RATE", "REPORT_DATE", page_size=100,
+                                 cache_key="deposit_rate_all")
     out = [{"report_date": str(r.get("REPORT_DATE", ""))[:10],
             "deposit_1y_prev": r.get("DEPOSIT_RATE_BB"),
             "deposit_1y": r.get("DEPOSIT_RATE_BA"),
@@ -1909,6 +2191,9 @@ def benchmark_rate_history() -> list[dict]:
            for r in rows]
     if len(out) < 5:
         raise RuntimeError(f"基准利率史仅 {len(out)} 条（正常 30+），疑似上游结构变更")
+    if not from_cache:
+        _cache_write("macro/deposit_rate_all.json", rows)
+        _cbreak_success("tt")
     return out
 
 
@@ -1956,8 +2241,8 @@ def cn_treasury_realtime() -> dict:
                          "change_pct": (d.get("f170") or 0) / 100}
         out["source"] = "eastmoney/push2-globalbond"
         out["as_of"] = "盘中(push2)"
-    except RiskControlError:
-        raise                                          # 风控信号绝不降级（F6 契约）
+    except (RiskControlError, CircuitOpenError):
+        raise                                          # 风险型信号绝不降级（F6 契约）
     except RuntimeError as e:
         # P26：push2 缓释桶额度耗尽/连接级熔断——降级中债最新收盘（cb_yield_curve
         # 当日缓存通道，失败不重试轰炸）；盘中/收盘口径差异由 as_of 显式标注
@@ -1974,6 +2259,7 @@ def cn_treasury_realtime() -> dict:
         out["as_of"] = f"中债最新收盘(降级,{last_date})"
     out["time"] = datetime.now(_BJ_TZ).isoformat(timespec="seconds")
     if not degraded:
+        _cbreak_success("em")
         _cache_write(rel, out)                         # 仅健康形态写 300s 短缓存
     return out
 
@@ -2023,15 +2309,10 @@ def _cninfo_enckey(ts: Optional[int] = None) -> str:
 
 
 def assert_rankhandler(resp, context: str = "rankhandler"):
-    """rankhandler 家族内容级风控断言（坑P19）：被拦时是 200+"无访问权限"而非 403——
-    只看状态码会漏。命中后计入 tt 线熔断并抛 RiskControlError（不触发降级）。"""
+    """rankhandler 家族内容级风控断言；业务成功由完整记录校验后另行确认。"""
     assert_not_risk_control(resp, "tt", context)
     text = resp.content.decode("utf-8", errors="replace")[:500]
-    if "无访问权限" in text:
-        _cbreak_signal("tt", f"rankhandler 拒绝访问 {context}")
-        raise RiskControlError(
-            f"rankhandler 返回「无访问权限」（{context}）：疑似东财风控信号，已计入熔断。"
-            f"该接口鉴权=Referer（fundranking.html），先检查 Referer 头是否丢失。")
+    _assert_not_risk_content(text, "tt", context)
 
 
 def _cninfo_post(sysapi: str, params: dict, context: str) -> list:
@@ -2039,18 +2320,31 @@ def _cninfo_post(sysapi: str, params: dict, context: str) -> list:
 
     451/"token null" = enckey 时效问题（本地时钟漂移或秒边界）非风控——刷新钥匙
     重试一次，仍拒才报错；403/429 仍走 assert_not_risk_control 计熔断。
+    Sprint 2：协调核心激活时改走 Gateway（cninfo 独立配额账；451 重试=新许可
+    独立计配额），2xx 中性结算，业务成功由调用方 _cbreak_success("cninfo")。
     """
     for attempt in (1, 2):
-        _cbreak_check("cninfo")
-        _cross_proc_throttle("cninfo", CNINFO_MIN_INTERVAL)
+        if _REQUEST_GATEWAY is None:
+            _cbreak_check("cninfo")
+            _cross_proc_throttle("cninfo", CNINFO_MIN_INTERVAL)
         key = _cninfo_enckey()
         try:
-            CNINFO_REQUEST_COUNT[0] += 1
-            r = TT_SESSION.post(f"https://webapi.cninfo.com.cn/api/sysapi/{sysapi}",
-                                params=params, timeout=20,
-                                headers={"Accept-Enckey": key,
-                                         "Referer": "https://webapi.cninfo.com.cn/",
-                                         "X-Requested-With": "XMLHttpRequest"})
+            if _REQUEST_GATEWAY is not None:
+                r = _REQUEST_GATEWAY.post(
+                    f"https://webapi.cninfo.com.cn/api/sysapi/{sysapi}",
+                    params=params, timeout=20, retries=0,
+                    headers={"Accept-Enckey": key,
+                             "Referer": "https://webapi.cninfo.com.cn/",
+                             "X-Requested-With": "XMLHttpRequest"},
+                    session=_SessionAdapter(TT_SESSION, _cninfo_hit))
+                _release_pending(r, "cninfo-passthrough")
+            else:
+                CNINFO_REQUEST_COUNT[0] += 1
+                r = TT_SESSION.post(f"https://webapi.cninfo.com.cn/api/sysapi/{sysapi}",
+                                    params=params, timeout=20,
+                                    headers={"Accept-Enckey": key,
+                                             "Referer": "https://webapi.cninfo.com.cn/",
+                                             "X-Requested-With": "XMLHttpRequest"})
         except requests.RequestException:
             if attempt == 2:
                 raise
@@ -2166,6 +2460,7 @@ def _rank_fetch(ft: str, sc: str, pn: int) -> list:
     if len(rows) != expected:
         raise RuntimeError(f"rankhandler 校验失败 allRecords={total} 实收 {len(rows)}，"
                            f"应收 {expected}（静默截断拒绝，pn={pn}）")
+    _cbreak_success("tt")
     return rows
 
 
@@ -2269,6 +2564,7 @@ def fund_new_issues(force_refresh: bool = False) -> list[dict]:
         raise RuntimeError(f"新发分页校验失败 record={total} 实收 {len(out)}（截断拒绝）")
     if not out:
         raise RuntimeError("新发列表为空，拒绝静默返回")
+    _cbreak_success("tt")
     _cache_write(rel, out)
     return out
 
@@ -2286,6 +2582,7 @@ def _company_id_from_fund(fund_query: str) -> tuple:
                   r.content.decode("utf-8", errors="replace"))
     if not m:
         raise RuntimeError(f"jbgk 页未找到公司直链（{code}）——上游结构变更")
+    _cbreak_success("tt")
     return m.group(1), None
 
 
@@ -2311,7 +2608,7 @@ def fund_company(query: str, force_refresh: bool = False) -> dict:
                 if it.get("company") == q:
                     cid = it["company_id"]
                     break
-        except RiskControlError:
+        except (RiskControlError, CircuitOpenError):
             raise
         except Exception:
             pass
@@ -2360,6 +2657,7 @@ def fund_company(query: str, force_refresh: bool = False) -> dict:
            "funds": funds}
     if out["scope_yi"] is None and out["fund_count"] is None:
         raise RuntimeError(f"公司页字段解析失败（{cid}）——上游结构变更，拒绝半空返回")
+    _cbreak_success("tt")
     _cache_write(rel, out)
     return out
 
@@ -2399,6 +2697,7 @@ def fund_crowding(rdate: str = "", force_refresh: bool = False) -> list[dict]:
     if len(out) < 100:
         raise RuntimeError(f"基金重仓股聚合仅解析出 {len(out)} 行（{rd8}），疑似结构变更")
     out.sort(key=lambda r: -r["fund_count"])
+    _cbreak_success("cninfo")
     _cache_write(rel, out)
     return out
 
@@ -2432,6 +2731,7 @@ def fund_industry_allocation(rdate: str = "", force_refresh: bool = False) -> li
     if len(out) < 10:
         raise RuntimeError(f"行业配置仅解析出 {len(out)} 行（{rd8}），疑似结构变更")
     out.sort(key=lambda r: -r["market_value_yi"])
+    _cbreak_success("cninfo")
     _cache_write(rel, out)
     return out
 
@@ -2462,13 +2762,10 @@ def _tencent_kline(stock_code: str, bars: int = 90,
             return cached
     url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
            f"param={pre},day,,,{int(bars)},qfq")
-    req = urllib.request.Request(url, headers={"Referer": "https://gu.qq.com/"})
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     raw = None
     for attempt in (1, 2):                        # 瞬态重试1次（对齐 tencent_quote 同通道）
         try:
-            TENCENT_REQUEST_COUNT[0] += 1
-            raw = opener.open(req, timeout=10).read().decode("utf-8")
+            raw = _tencent_raw(url, headers={"Referer": "https://gu.qq.com/"}).decode("utf-8")
             break
         except OSError as e:
             if attempt == 2:
@@ -2569,6 +2866,7 @@ def fund_scale(query: str, force_refresh: bool = False) -> dict:
     name = next((f["name"] for f in fund_list() if f["code"] == code), None)
     out = {"code": code, "name": name, "scale_yi": round(endnav_f / 1e8, 2),
            "company": d.get("JJGS"), "source": "eastmoney/fundmobapi"}
+    _cbreak_success("tt")
     _cache_write(rel, out)
     return out
 
@@ -2714,12 +3012,14 @@ def _manager_page(mid: str) -> dict:
                  re.findall(r"\{valueField:'(\d{6})',name:'([^']+)',type:'(\d+)'\}", mg.group(1))]
     if not name or not funds:
         raise RuntimeError(f"经理主页解析失败（{mid}）：name={name!r} 在管清单={len(funds)}——上游结构变更")
-    return {"manager_id": mid, "name": name,
-            "tenure": tenure.group(1) if tenure else None,
-            "scale_yi": float(scale.group(1)) if scale else None,
-            "return_since_pct": float(ret.group(1)) if ret else None,
-            "funds": funds, "fund_count": len(funds),
-            "source": "eastmoney/manager-page"}
+    out = {"manager_id": mid, "name": name,
+           "tenure": tenure.group(1) if tenure else None,
+           "scale_yi": float(scale.group(1)) if scale else None,
+           "return_since_pct": float(ret.group(1)) if ret else None,
+           "funds": funds, "fund_count": len(funds),
+           "source": "eastmoney/manager-page"}
+    _cbreak_success("tt")
+    return out
 
 
 def fund_manager(query: str, force_refresh: bool = False) -> dict:
@@ -2806,6 +3106,7 @@ def manager_rank(pages: int = 1, force_refresh: bool = False) -> list[dict]:
     expected = min(50 * pages, record)
     if len(out) != expected:
         raise RuntimeError(f"经理排行校验失败 record={record} 实收 {len(out)}，应收 {expected}")
+    _cbreak_success("tt")
     _cache_write(rel, out)
     return out
 
@@ -2939,8 +3240,8 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
                     rows.append({"date": p[0], "close": float(p[1]), "source": "push2his"})
                 except ValueError:
                     continue
-    except RiskControlError:
-        raise                                          # 风控≠网络故障，绝不降级（F6 契约）
+    except (RiskControlError, CircuitOpenError):
+        raise                                          # 风险型信号≠连接故障，绝不降级（F6 契约）
     except RuntimeError:
         rows = []                                      # _push2_get 网络类故障才走备胎（P26）
     em_rows = len(rows)
@@ -2956,10 +3257,8 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
             try:
                 url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
                        f"param={sym},day,,,{eff},qfq")
-                req = urllib.request.Request(url, headers={"Referer": "https://gu.qq.com/"})
-                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                TENCENT_REQUEST_COUNT[0] += 1
-                d = json.loads(opener.open(req, timeout=10).read().decode("utf-8"))
+                d = json.loads(_tencent_raw(
+                    url, headers={"Referer": "https://gu.qq.com/"}).decode("utf-8"))
                 node = (d.get("data") or {}).get(sym) or {}
                 for arr in node.get("qfqday") or node.get("day") or []:
                     if len(arr) >= 3:
@@ -2979,6 +3278,8 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
         raise RuntimeError(
             f"指数日线不足（{ident} 需≥{need}）：EM 实收 {em_rows} 行，{fb_note}，"
             f"去重后 {len(dedup)} 行")
+    if em_rows >= need:
+        _cbreak_success("em")                         # 腾讯备胎成功不清零东财风控连击
     _cache_write(rel, dedup)
     return dedup
 
@@ -3094,6 +3395,7 @@ def fund_scale_history(query: str, force_refresh: bool = False) -> list[dict]:
     if len(out) < 2:
         raise RuntimeError(f"gmbd 规模记录不足（{code} 仅 {len(out)} 期）——新基金或结构变更")
     out.sort(key=lambda x: x["date"])                  # 源序新→旧 → 反转为升序
+    _cbreak_success("tt")
     _cache_write(rel, out)
     return out
 
@@ -3191,5 +3493,12 @@ def fund_fees(query: str, force_refresh: bool = False) -> dict:
     if (out["management_fee_pct"] is None and out["custody_fee_pct"] is None
             and not out["redemption_tiers"]):
         raise RuntimeError(f"jjfl 费率页解析为空（{code}）——上游结构变更，拒绝半空返回")
+    _cbreak_success("tt")
     _cache_write(rel, out)
     return out
+
+
+# ── Sprint 2 默认激活：跨进程请求协调（真实时钟；测试可随时重建）────────
+# 放在模块末尾确保策略引用的全部常量（TT/CNINFO 间隔等）已定义。import 副作用
+# 仅构建协调器与网关对象，首个网络请求才落盘状态（~/.fund_data_cache/coordinator）。
+_reset_request_coordination()

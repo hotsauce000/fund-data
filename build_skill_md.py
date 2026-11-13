@@ -9,6 +9,7 @@
 """
 import ast
 import re
+import shutil
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -141,7 +142,7 @@ THIN.append("""## 场景路由（我想做 X → 调什么）
 
 | 故障 | 行为 | 硬边界 |
 |---|---|---|
-| E2 快照失败/风控页/空体 | **自动降级** E3+E4a+蛋卷（source=degraded），不污染缓存 | 窗口默认 1 年 |
+| E2 网络失败/真正空体 | **自动降级** E3+E4a+蛋卷（source=degraded），不污染缓存 | 窗口默认 1 年；风控页/结构异常显式上抛，不降级 |
 | 历史净值兜底 | E3 lsjz 逐页（TotalCount 强校验） | **跨域无备胎（P17 三候选全死）** |
 | 个股行情 | 腾讯通道（不封 IP） | — |
 | 利率曲线 | 中债 curl 通道（TLS 指纹墙 P11） | 东财 datacenter 互证 |
@@ -183,7 +184,7 @@ REF.append(f"""# fund-data 完整参考（reference.md · 按需读取层）V{VE
 
 REF.append("""# fund-data 基金底层数据工具包 V0.7.1 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**V0.7.1（2026-11-12）：232/232 断言实测通过**（L1单元162 · L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）与 `test_fund_data.py`（回归测试）与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入：234/234 离线断言通过**（L1 单元 198 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 75 条。在线层 L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11 须显式 `--online`），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
 
 **V0.7.1 push2 防复发加固（IP 缓释桶定案，五发探针实证）：**
 - 🔴 **P26 定性修正**：封锁=**IP 级缓释桶限流**——健康期容量大（treasury 4 连发数周无事）、惩罚期容量极小（3 连发即放空、第 4 发 RST）且恢复慢；12:16 三连过（同栈同 UA）**证伪「TLS 指纹永久黑名单」**，12:22/12:23 两连挂定案重触机制（上午 12 连发 0/6、1/6 是热窗观测，混淆了冷却与指纹）。教训：**诊断行为本身会烧 IP 额度——排查封锁先 ≤5 次小样本，绝不做几十连发**
@@ -240,7 +241,7 @@ REF.append("""# fund-data 基金底层数据工具包 V0.7.1 模块全档
 **V0.3.1 防封加固（两轮审计 F1~F7 修复）：**
 - 🔴 **F1 跨进程节流锁**：限流时间戳从进程内存改磁盘文件+flock——多进程并发时合并速率不再越线（原实现双进程批量即可达封禁阈值的 2/3）
 - 🔴 **F6 风控信号与网络故障分流**：`assert_not_risk_control()` 防线接入全部 8 个东财调用点——403/429 抛 `RiskControlError`（非 RequestException 子类），**绝不触发降级风暴**
-- 🔴 **F2 熔断器**：连续 3 次风控信号→落盘熔断 10 分钟→冷却期内所有请求直接拒绝（零网络）；成功响应清零连击；tt/em 两线独立
+- 🔴 **F2 熔断器**：连续 3 次风控信号→落盘熔断 10 分钟→冷却期内所有请求直接拒绝（零网络）；成功响应清零连击（V0.3.1 当时口径；Sprint 1 起改为业务完整性校验成功后清零）；tt/em 两线独立
 - 🟡 F3 降级窗口 3年→1年；F4 fund_holdings 当日缓存；F7 L7 宏观层当日缓存；G2 缓存原子写 tmp+rename
 - 测试 65→70：双进程合并间隔/403不触降级/冷却期拒绝且零网络/宏观与持仓二调0请求
 
@@ -490,5 +491,21 @@ for dest in (SKILL_DIR, HERE):
 (SKILL_DIR / "fund_data.py").write_text(SRC, encoding="utf-8")
 (SKILL_DIR / "test_fund_data.py").write_text(
     (HERE / "test_fund_data.py").read_text(encoding="utf-8"), encoding="utf-8")
+# Sprint 2：fund_data_core 与主模块同一套部署（硬依赖：fund_data.py 裸 import
+# core 异常，skill 目录缺包即 import 失败——发布必须是带核心包的完整一套）。
+# 拷贝走临时目录 + 原子 rename：中途失败时 skill 目录仍保留旧版可用核心包。
+# 同步核心包四份测试，使 skill 目录可独立跑全量回归。
+core_src, core_dst = HERE / "fund_data_core", SKILL_DIR / "fund_data_core"
+core_new = SKILL_DIR / "fund_data_core.new"
+if core_new.exists():
+    shutil.rmtree(core_new)
+shutil.copytree(core_src, core_new,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+if core_dst.exists():
+    shutil.rmtree(core_dst)
+core_new.rename(core_dst)
+for _name in ("test_coordinator.py", "test_gateway.py",
+              "test_cache.py", "test_cache_policies.py"):
+    shutil.copy2(HERE / _name, SKILL_DIR / _name)
 print(f"OK: SKILL.md 路由层 {thin_bytes}B（token 下限粗估 ≈{thin_bytes // 3 // 1000}K）+ "
       f"reference.md {len(ref_text.encode('utf-8'))}B；函数速查 {len(_sig_rows())} 个全覆盖")

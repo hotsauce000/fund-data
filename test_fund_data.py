@@ -3,10 +3,12 @@
 fund-data V0.2 分层测试运行器（按测试计划 V1.0）
   L1 单元（零网络）· L2 端点 smoke（结构断言）· L3 交叉验证（三源互证）
   L4 请求预算审计 · L5 降级演练与坑回归 · L6 穿透层（确定性/降级/路由/清洗）
-用法: python3 test_fund_data.py [--offline-only]
+用法: python3 test_fund_data.py [--offline-only | --online]（默认离线）
 """
 import json
+import os
 import sys
+import tempfile
 import time
 import traceback
 from datetime import date
@@ -15,10 +17,44 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import fund_data as fd
 
-_unknown = [a for a in sys.argv[1:] if a != "--offline-only"]
-if _unknown:
-    sys.exit(f"未知参数 {_unknown}（仅支持 --offline-only）——防封项目工具自身不能意外发真实请求")
-OFFLINE_ONLY = "--offline-only" in sys.argv
+# 全部离线测试（含后续 mock 的缓存写入）都隔离在临时目录，绝不碰真实用户缓存。
+_TEST_CACHE_TMP = tempfile.TemporaryDirectory(prefix="fund-data-offline-cache-")
+fd.FUND_CACHE_DIR = Path(_TEST_CACHE_TMP.name)
+# 模块 import 末尾按真实缓存目录默认激活了协调器；重定向后按沙箱目录重建，
+# 测试期的配额/熔断状态绝不写进 ~/.fund_data_cache/coordinator。间隔归零：
+# 滑窗/间隔语义由 fund_data_core 单测钉死，集成回归不为节流真睡 1.5s。
+_ZERO_POLICY = {line: {"min_interval": 0} for line in
+                ("eastmoney", "cninfo", "danjuan", "tencent", "chinabond")}
+
+
+def _fresh_coordination():
+    """清空沙箱协调器落盘状态并重建（风控演练后复位闸门，等价 legacy 时代
+    unlink 标记文件——闸门 OPEN 是跨进程持久化的，仅重建对象不擦状态）。"""
+    import shutil as _shutil
+    _shutil.rmtree(fd.FUND_CACHE_DIR / "coordinator", ignore_errors=True)
+    return fd._reset_request_coordination(policies=_ZERO_POLICY)
+
+
+_fresh_coordination()
+
+# 离线密闭性种子：沙箱预置合成基金清单——业务函数 resolve 链（norm_fund_code→
+# fund_list）全部命中种子零网络；在线 L2 首测 force_refresh 拉真实清单覆盖。
+# 合成行只求覆盖离线消费方需要的代码族（161725 穿透/快照、005001 费率、
+# 华夏成长份额族与 000312 备用），600519 有意不进（L5 拦截断言依赖）。
+_SEED_LIST = [
+    {"code": "161725", "pinyin": "csbc", "name": "测试白酒基金", "type": "股票指数"},
+    {"code": "005001", "pinyin": "csjja", "name": "测试基金A", "type": "混合型-灵活"},
+    {"code": "000001", "pinyin": "hxcz", "name": "华夏成长", "type": "混合型-偏股"},
+    {"code": "024808", "pinyin": "hxczc", "name": "华夏成长C", "type": "混合型-偏股"},
+    {"code": "024809", "pinyin": "hxczhh", "name": "华夏成长混合", "type": "混合型-偏股"},
+    {"code": "000312", "pinyin": "csxf", "name": "测试消费", "type": "股票指数"},
+]
+fd._cache_write("fund_list.json", _SEED_LIST)
+
+_unknown = [a for a in sys.argv[1:] if a not in ("--offline-only", "--online")]
+if _unknown or ("--offline-only" in sys.argv and "--online" in sys.argv):
+    sys.exit(f"参数错误 {sys.argv[1:]}（默认离线；真实请求须显式 --online）")
+OFFLINE_ONLY = "--online" not in sys.argv
 R = {"pass": 0, "fail": 0, "results": []}
 
 
@@ -166,13 +202,18 @@ def test_l1_offline():
           "'AI' 被 I+$ 剥成单字符 'A' → None")
 
     # ── 穿透确定性 + 降级路径（mock，零网络）──
-    _orig = (fd.fund_holdings, fd.fund_snapshot, fd.tencent_quote, fd.concept_blocks)
+    # fund_list 也 patch（照 473 块惯例）：penetrate→resolve_fund_code 会拉真实清单，
+    # 不 patch 则离线套件对 fund.eastmoney.com 偷发一次真实请求（审查毒化复现的存量漏网）。
+    _orig = (fd.fund_holdings, fd.fund_snapshot, fd.tencent_quote, fd.concept_blocks,
+             fd.fund_list)
     _mk_hold = lambda: [
         {"period": "2026-09-30", "seq": i + 1, "stock_code": c, "stock_name": f"股{i}",
          "nav_pct": 10.0, "shares_wan": 1, "value_wan": 1}
         for i, c in enumerate(["600001", "600002", "600003", "600004"])]
     fd.fund_holdings = lambda q, **k: _mk_hold()
     fd.fund_snapshot = lambda q, **k: {"name": "测试基金"}
+    fd.fund_list = lambda **k: [{"code": "161725", "name": "测试白酒基金",
+                                 "type": "股票指数", "pinyin": "csbc"}]
     fd.tencent_quote = lambda cs: {c: {"name": c, "price": 1.0, "change_pct": 0.0,
                                        "turnover_pct": 0.0, "pe_ttm": 10.0,
                                        "float_mcap_yi": 1.0, "mcap_yi": 1.0, "pb": 1.0}
@@ -223,7 +264,8 @@ def test_l1_offline():
         fd.fund_holdings = lambda q, **k: []
         expect_raise("L1", "穿透-无股票持仓报错", lambda: fd.penetrate("161725"), "无股票持仓")
     finally:
-        (fd.fund_holdings, fd.fund_snapshot, fd.tencent_quote, fd.concept_blocks) = _orig
+        (fd.fund_holdings, fd.fund_snapshot, fd.tencent_quote, fd.concept_blocks,
+         fd.fund_list) = _orig
 
     # ── L7 宏观利率层单元（零网络：期限映射 / xlsx fixture 解析 / 未知曲线拒绝）──
     import io as _io
@@ -413,9 +455,12 @@ def test_l1_offline():
         return _FakeResp('var apidata={ content:"<h4>截止至：<font>2026-09-30</font></h4>'
                          '<table>' + thead + tbody + '</table>", arryear:[2026]};')
     _orig_ttf, _orig_cache_r, _orig_cache_w = fd.ttfund_get, fd._cache_read, fd._cache_write
+    _orig_fl_444 = fd.fund_list          # 本块 resolve 链路会拉清单——patch 防触网/防 mock 串味
     fd._cache_read = lambda rel, max_age_hours=None: None
     fd._cache_write = lambda rel, payload: None
     try:
+        fd.fund_list = lambda **k: [{"code": "161725", "name": "测试基金",
+                                     "type": "混合型-偏股", "pinyin": "cs"}]
         fd.ttfund_get = lambda url, **k: _jjcc_resp(_th_std, _row_std)
         h_std = fd.fund_holdings("161725")
         fd.ttfund_get = lambda url, **k: _jjcc_resp(_th_ins, _row_ins)
@@ -446,6 +491,7 @@ def test_l1_offline():
     finally:
         fd.ttfund_get, fd._cache_read, fd._cache_write = \
             (_orig_ttf, _orig_cache_r, _orig_cache_w)
+        fd.fund_list = _orig_fl_444
 
     # penetrate 不再为名字拉快照（P-A）——fund_list 也 patch，与真实清单缓存隔离
     _orig = (fd.fund_holdings, fd.tencent_quote, fd.concept_blocks, fd.fund_snapshot,
@@ -565,6 +611,7 @@ def test_l1_offline():
         def __init__(self, code, body):
             self.status_code, self.content = code, body.encode("utf-8")
 
+    fd._cbreak_file("tt").unlink(missing_ok=True)
     fd._cbreak_state["tt"] = [0, 0.0]
     expect_raise("L1", "排行-内容级风控断言(P19)",
                  lambda: fd.assert_rankhandler(_FR(200, 'var r="无访问权限"'), "t"),
@@ -572,9 +619,24 @@ def test_l1_offline():
     check("L1", "排行-风控信号计入熔断计数(未达阈值不落盘)",
           fd._cbreak_state["tt"][0] == 1 and not fd._cbreak_file("tt").exists(),
           str(fd._cbreak_state["tt"]))
-    fd.assert_rankhandler(_FR(200, 'var records=["161725,x"];'), "t")   # 正常文案不抛
-    check("L1", "排行-正常响应清零计数",
-          fd._cbreak_state["tt"] == [0, 0.0], str(fd._cbreak_state["tt"]))
+    for attempt in (2, 3):
+        expect_raise("L1", f"排行-连续内容风控第{attempt}次",
+                     lambda: fd.assert_rankhandler(_FR(200, 'var r="无访问权限"'), "t"),
+                     "无访问权限" if attempt == 2 else "已自动熔断")
+    check("L1", "排行-连续三次内容风控触发熔断",
+          fd._COORDINATOR.snapshot("eastmoney")["circuit"] == "OPEN",
+          "第三次信号后协调器闸门 OPEN（core 路由；legacy 落盘文件已退位）")
+    fd._cbreak_file("tt").unlink(missing_ok=True)
+    _fresh_coordination()               # 闸门复位：风控演练不拖累后续东财请求
+
+    fd._cbreak_state["tt"] = [2, time.time()]
+    fd.assert_not_risk_control(_FR(500, "server error"), "tt", "t")
+    check("L1", "熔断-HTTP500不清零连击",
+          fd._cbreak_state["tt"][0] == 2, str(fd._cbreak_state["tt"]))
+    fd._cbreak_state["tt"] = [1, time.time()]
+    fd.assert_rankhandler(_FR(200, 'var records=["161725,x"];'), "t")
+    check("L1", "熔断-业务校验前不清零",
+          fd._cbreak_state["tt"][0] == 1, str(fd._cbreak_state["tt"]))
 
     expect_raise("L1", "排行-参数钳制fund_type",
                  lambda: fd.fund_rank(fund_type="mm"), "fund_type")
@@ -639,6 +701,248 @@ def test_l1_offline():
         for rel in ("rank/top_gp_ytd_20.json", "rank/top_gp_ytd_50.json",
                     "rank/top_gp_1m_20.json"):
             (fd.FUND_CACHE_DIR / rel).unlink(missing_ok=True)   # mock 数据不入真缓存
+
+    # 熔断成功语义：业务校验成功才清零，结构异常不得清零
+    try:
+        fd.ttfund_get = _fake_get
+        fd._cbreak_state["tt"] = [1, time.time()]
+        fd._rank_fetch("gp", "1nzf", 2)
+        check("L1", "熔断-业务校验成功清零",
+              fd._cbreak_state["tt"] == [0, 0.0], str(fd._cbreak_state["tt"]))
+        fd._cbreak_state["tt"] = [2, time.time()]
+        fd.ttfund_get = lambda *a, **k: _RR("var no_records_here")
+        expect_raise("L1", "熔断-排行结构异常拒绝",
+                     lambda: fd._rank_fetch("gp", "1nzf", 2), "返回空")
+        check("L1", "熔断-结构异常不清零",
+              fd._cbreak_state["tt"][0] == 2, str(fd._cbreak_state["tt"]))
+    finally:
+        fd.ttfund_get = _orig_get
+
+    # E2 风控页/结构异常不触发分拆降级
+    class _E2Resp:
+        def __init__(self, text):
+            self.status_code = 200
+            self.content = text.encode("utf-8")
+
+        def raise_for_status(self):
+            return None
+
+    def _no_degrade(*a, **k):
+        raise AssertionError("E2 异常路径不得调用分拆降级")
+
+    _orig_resolve_e2, _orig_get_e2, _orig_deg_e2 = (
+        fd.resolve_fund_code, fd.ttfund_get, fd._snapshot_degraded)
+    try:
+        fd.resolve_fund_code = lambda q: q
+        fd._snapshot_degraded = _no_degrade
+        fd._cbreak_file("tt").unlink(missing_ok=True)
+        fd._cbreak_state["tt"] = [0, 0.0]
+        fd.ttfund_get = lambda *a, **k: _E2Resp("无访问权限" + "x" * 1100)
+        expect_raise("L1", "E2-内容风控页不降级",
+                     lambda: fd.fund_snapshot("161725", force_refresh=True), "无访问权限")
+        fd.ttfund_get = lambda *a, **k: _E2Resp("var unrelated=1;" + "x" * 1100)
+        expect_raise("L1", "E2-结构异常不降级",
+                     lambda: fd.fund_snapshot("161725", force_refresh=True), "缺少关键变量")
+        check("L1", "E2-结构异常不清零风控连击",
+              fd._cbreak_state["tt"][0] == 1, str(fd._cbreak_state["tt"]))
+        fd.ttfund_get = lambda *a, **k: _E2Resp("<html>bad jump</html>")
+        expect_raise("L1", "E2-小型非空畸形体不降级",
+                     lambda: fd.fund_snapshot("161725", force_refresh=True), "缺少关键变量")
+        fd.ttfund_get = lambda *a, **k: _E2Resp("  \n")
+        expect_raise("L1", "E2-纯空白非空体不降级",
+                     lambda: fd.fund_snapshot("161725", force_refresh=True), "缺少关键变量")
+        fd._snapshot_degraded = lambda *a, **k: {"_meta": {"source": "degraded(mock)"}}
+        fd.ttfund_get = lambda *a, **k: _E2Resp("")
+        empty = fd.fund_snapshot("161725", force_refresh=True)
+        check("L1", "E2-真正空体允许降级",
+              empty["_meta"]["source"] == "degraded(mock)", empty["_meta"]["source"])
+    finally:
+        fd.resolve_fund_code, fd.ttfund_get, fd._snapshot_degraded = (
+            _orig_resolve_e2, _orig_get_e2, _orig_deg_e2)
+        fd._cbreak_file("tt").unlink(missing_ok=True)
+
+    # 降级链与穿透必须原样上抛风控，不得伪装成局部数据缺失
+    _orig_deg_parts = (fd.fund_nav_history, fd.fund_holdings, fd.fund_detail_danjuan)
+    try:
+        fd.fund_nav_history = lambda *a, **k: [
+            {"date": "2026-01-01", "nav": 1.0, "daily_return_pct": 0.0, "dividend": None}]
+        for branch in ("holdings", "danjuan"):
+            for exc_type in (fd.RiskControlError, fd.CircuitOpenError):
+                msg = f"{branch}-{exc_type.__name__}"
+                fd.fund_holdings = lambda *a, **k: []
+                fd.fund_detail_danjuan = lambda *a, **k: {"name": "测试基金"}
+                if branch == "holdings":
+                    fd.fund_holdings = lambda *a, _msg=msg, **k: (_ for _ in ()).throw(
+                        exc_type(_msg))
+                else:
+                    fd.fund_detail_danjuan = lambda *a, _msg=msg, **k: (_ for _ in ()).throw(
+                        exc_type(_msg))
+                expect_raise("L1", f"降级链-{msg}不吞异常",
+                             lambda: fd._snapshot_degraded("161725"), msg)
+    finally:
+        fd.fund_nav_history, fd.fund_holdings, fd.fund_detail_danjuan = _orig_deg_parts
+
+    _orig_pen_parts = (fd.resolve_fund_code, fd.fund_list, fd.fund_holdings,
+                       fd.tencent_quote, fd.concept_blocks)
+    try:
+        fd.resolve_fund_code = lambda q: q
+        fd.fund_list = lambda: [{"code": "161725", "name": "测试基金"}]
+        fd.fund_holdings = lambda *a, **k: [
+            {"period": "2026-09-30", "stock_code": "600519", "stock_name": "贵州茅台",
+             "nav_pct": 10.0}]
+        fd.tencent_quote = lambda *a, **k: {}
+        for exc_type in (fd.RiskControlError, fd.CircuitOpenError):
+            msg = f"板块-{exc_type.__name__}"
+            fd.concept_blocks = lambda *a, _msg=msg, **k: (_ for _ in ()).throw(
+                exc_type(_msg))
+            expect_raise("L1", f"穿透-{msg}不吞异常",
+                         lambda: fd.penetrate("161725"), msg)
+    finally:
+        fd.resolve_fund_code, fd.fund_list, fd.fund_holdings, fd.tencent_quote, fd.concept_blocks = (
+            _orig_pen_parts)
+
+    # 宏观公开函数各自确认成功；通用查询层不得提前清零
+    _orig_dc, _orig_rw_dc = fd._dc_query, (fd._cache_read, fd._cache_write)
+    try:
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda *a, **k: None
+        fd._dc_query = lambda *a, **k: ([{
+            "SOLAR_DATE": "2026-11-12", "EMM00588704": 1.4, "EMM00166466": 1.6}], False)
+        fd._cbreak_state["tt"] = [1, time.time()]
+        fd.treasury_yield_daily(days=1)
+        check("L1", "宏观-国债完整结果清零",
+              fd._cbreak_state["tt"] == [0, 0.0], str(fd._cbreak_state["tt"]))
+        fd._dc_query = lambda *a, **k: ([{
+            "REPORT_DATE": "2026-11-12", "REPORT_PERIOD": "1年(1Y)",
+            "MARKET": "上海银行同业拆借市场", "IR_RATE": 1.5, "CHANGE_RATE": 0.0}], False)
+        fd._cbreak_state["tt"] = [1, time.time()]
+        fd.shibor_history(period="1年(1Y)", days=1)
+        check("L1", "宏观-SHIBOR完整结果清零",
+              fd._cbreak_state["tt"] == [0, 0.0], str(fd._cbreak_state["tt"]))
+        fd._dc_query = lambda *a, **k: ([{"REPORT_DATE": "2026-11-12"}] * 5, False)
+        fd._cbreak_state["tt"] = [1, time.time()]
+        fd.benchmark_rate_history()
+        check("L1", "宏观-基准利率完整结果清零",
+              fd._cbreak_state["tt"] == [0, 0.0], str(fd._cbreak_state["tt"]))
+    finally:
+        fd._dc_query = _orig_dc
+        fd._cache_read, fd._cache_write = _orig_rw_dc
+
+    class _DCResp:
+        status_code = 200
+        content = b"{}"
+
+        def __init__(self, rows):
+            self._rows = rows
+
+        def json(self):
+            return {"success": True, "result": {"data": self._rows}}
+
+        def raise_for_status(self):
+            return None
+
+    _orig_get_dc, _orig_write_dc, _orig_read_dc = fd.ttfund_get, fd._cache_write, fd._cache_read
+    _dc_writes = []
+    try:
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda rel, payload: _dc_writes.append(rel)
+        fd._cbreak_state["tt"] = [2, time.time()]
+        fd.ttfund_get = lambda *a, **k: _DCResp([{"REPORT_DATE": "2026-11-12"}] * 4)
+        expect_raise("L1", "宏观-基准利率不足拒绝",
+                     lambda: fd.benchmark_rate_history(), "仅 4 条")
+        check("L1", "宏观-业务校验前不清零",
+              fd._cbreak_state["tt"][0] == 2, str(fd._cbreak_state["tt"]))
+        check("L1", "宏观-业务异常不写缓存", not _dc_writes, str(_dc_writes))
+    finally:
+        fd.ttfund_get, fd._cache_write, fd._cache_read = _orig_get_dc, _orig_write_dc, _orig_read_dc
+
+    # 宏观纯缓存命中正常返回，但不能证明上游风控已解除
+    _orig_macro_cache_parts = (fd._cache_read, fd.ttfund_get)
+    try:
+        def _macro_cache(rel, max_age_hours=None):
+            if rel.startswith("macro/tsy_"):
+                return [{"SOLAR_DATE": "2026-11-12", "EMM00588704": 1.4, "EMM00166466": 1.6}]
+            if rel.startswith("macro/shibor_"):
+                return [{"REPORT_DATE": "2026-11-12", "REPORT_PERIOD": "1年(1Y)",
+                         "MARKET": "上海银行同业拆借市场", "IR_RATE": 1.5, "CHANGE_RATE": 0.0}]
+            if rel == "macro/deposit_rate_all.json":
+                return [{"REPORT_DATE": "2026-11-12"}] * 5
+            return None
+
+        fd._cache_read = _macro_cache
+        fd.ttfund_get = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("宏观缓存测试不得发网络请求"))
+        for name, fn in (("国债", lambda: fd.treasury_yield_daily(days=1)),
+                         ("SHIBOR", lambda: fd.shibor_history(period="1年(1Y)", days=1)),
+                         ("基准利率", fd.benchmark_rate_history)):
+            fd._cbreak_state["tt"] = [2, time.time()]
+            fn()
+            check("L1", f"宏观-{name}纯缓存命中不清零",
+                  fd._cbreak_state["tt"][0] == 2, str(fd._cbreak_state["tt"]))
+    finally:
+        fd._cache_read, fd.ttfund_get = _orig_macro_cache_parts
+
+    # SHIBOR 全期限缓存键继续沿用 days×8，兼容已有缓存
+    _orig_shibor_parts = (fd._cache_read, fd._cache_write, fd.ttfund_get)
+    _shibor_reads, _shibor_writes = [], []
+    try:
+        def _old_shibor_cache(rel, max_age_hours=None):
+            _shibor_reads.append(rel)
+            if rel == "macro/shibor_all_240.json":
+                return [{"REPORT_DATE": "2026-11-12", "REPORT_PERIOD": "隔夜(O/N)",
+                         "MARKET": "上海银行同业拆借市场", "IR_RATE": 1.4, "CHANGE_RATE": 0.0}]
+            return None
+
+        fd._cache_read = _old_shibor_cache
+        fd._cache_write = lambda rel, payload: _shibor_writes.append(rel)
+        fd.ttfund_get = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("SHIBOR 旧缓存兼容测试不得发网络请求"))
+        fd._cbreak_state["tt"] = [2, time.time()]
+        rows = fd.shibor_history(period=None, days=30)
+        check("L1", "SHIBOR-全期限旧缓存键兼容",
+              rows and _shibor_reads == ["macro/shibor_all_240.json"]
+              and not _shibor_writes and fd._cbreak_state["tt"][0] == 2,
+              f"reads={_shibor_reads} writes={_shibor_writes}")
+    finally:
+        fd._cache_read, fd._cache_write, fd.ttfund_get = _orig_shibor_parts
+
+    # jbgk 真实成功 + 公司缓存命中应清零；直接公司ID纯缓存命中不清零
+    class _CompanyResp:
+        status_code = 200
+        content = '<a href="https://fund.eastmoney.com/company/80065113.html">基金公司</a>'.encode()
+
+    _orig_company_parts = (fd.resolve_fund_code, fd.ttfund_get, fd.fund_new_issues, fd._cache_read)
+    try:
+        fd.resolve_fund_code = lambda q: q
+        fd.fund_new_issues = lambda: []
+        fd._cache_read = lambda *a, **k: {"company_id": "80065113", "name": "测试公司"}
+        fd.ttfund_get = lambda *a, **k: _CompanyResp()
+        fd._cbreak_state["tt"] = [2, time.time()]
+        company = fd.fund_company("161725")
+        check("L1", "公司-jbgk成功且缓存命中清零",
+              company["name"] == "测试公司" and fd._cbreak_state["tt"] == [0, 0.0],
+              str(fd._cbreak_state["tt"]))
+        fd._cbreak_state["tt"] = [2, time.time()]
+        fd.fund_company("80065113")
+        check("L1", "公司-纯缓存命中不清零",
+              fd._cbreak_state["tt"][0] == 2, str(fd._cbreak_state["tt"]))
+    finally:
+        fd.resolve_fund_code, fd.ttfund_get, fd.fund_new_issues, fd._cache_read = _orig_company_parts
+
+    # 国债实时风险型错误不得落入中债降级
+    _orig_rt_parts = (fd._push2_get, fd.cb_yield_curve, fd._cache_read)
+    _rt_cb_calls = []
+    try:
+        fd._cache_read = lambda *a, **k: None
+        fd.cb_yield_curve = lambda *a, **k: _rt_cb_calls.append(1)
+        for exc_type in (fd.RiskControlError, fd.CircuitOpenError):
+            msg = f"国债-{exc_type.__name__}"
+            fd._push2_get = lambda *a, _msg=msg, **k: (_ for _ in ()).throw(exc_type(_msg))
+            expect_raise("L1", f"国债实时-{msg}不降级",
+                         lambda: fd.cn_treasury_realtime(), msg)
+        check("L1", "国债实时-风险路径零降级请求", not _rt_cb_calls, str(_rt_cb_calls))
+    finally:
+        fd._push2_get, fd.cb_yield_curve, fd._cache_read = _orig_rt_parts
 
     # cninfo 451 刷新重试（P20：钥匙时效非风控，不计熔断）
     class _CJ:
@@ -954,6 +1258,29 @@ def test_l1_offline():
         check("L1", "K线-风控路径零腾讯请求",
               fd.TENCENT_REQUEST_COUNT[0] == _tx0, f"腾讯账本 {fd.TENCENT_REQUEST_COUNT[0]}")
 
+        # core 路由：开闸由协调器三连击达成（legacy 落盘文件已退位为镜像）
+        for _sig in range(3):
+            try:
+                fd._cbreak_signal("em", "kline-风险熔断演练")
+            except fd.RiskControlError:
+                pass                      # 第 3 次触闸按 F2 契约抛出，闸门已开
+
+        def _raise_open(*a, **k):
+            fd._cbreak_check("em")
+
+        fd._push2_get = _raise_open
+        import urllib.request as _u_guard
+        _orig_bo_guard = _u_guard.build_opener
+        _u_guard.build_opener = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("风险熔断不得调用腾讯备胎"))
+        expect_raise("L1", "K线-风险熔断不降级",
+                     lambda: fd.kline_daily("1.000905", force_refresh=True), "熔断中")
+        _u_guard.build_opener = _orig_bo_guard
+        fd._cbreak_file("em").unlink(missing_ok=True)
+        _fresh_coordination()               # 闸门复位：演练不拖累后续用例
+        check("L1", "K线-风险熔断零腾讯请求",
+              fd.TENCENT_REQUEST_COUNT[0] == _tx0, f"腾讯账本 {fd.TENCENT_REQUEST_COUNT[0]}")
+
         def _raise_net(*a, **k):                    # P26 主干：通道网络失败→落腾讯备胎
             raise RuntimeError("push2 通道失败(mock 冷却)")
 
@@ -1055,22 +1382,23 @@ def test_l1_offline():
         fd._PUSH2_JITTER = (0.0, 0.0)             # 零抖动（离线快跑）
         fd._cross_proc_throttle = lambda *a, **k: None
         fd._cbreak_check = lambda *a, **k: None    # F2 真标记隔离（本机在线跑挂过不污染）
+        _fresh_coordination()   # 前序风控演练可能已开东财闸门：本块需要网关放行
         fd._push2_conn_fails[0] = 0
         fd.requests.Session = _ConnFailSess7
         expect_raise("L1", "熔断-首败上抛通道错",
-                     lambda: fd._push2_get("http://x", context="t1"), "push2 通道失败")
+                     lambda: fd._push2_get("https://push2his.eastmoney.com/api/qt/stock/kline/get", context="t1"), "push2 通道失败")
         check("L1", "熔断-首败仅计数不落盘",
               not fd._push2_conn_file().exists() and fd._push2_conn_fails[0] == 1
               and _mk7[0] == 1,
               f"Session 建 {_mk7[0]} 次，连败计数 1（未触发停机）")
         expect_raise("L1", "熔断-二连败触发停机",
-                     lambda: fd._push2_get("http://x", context="t2"), "push2 通道失败")
+                     lambda: fd._push2_get("https://push2his.eastmoney.com/api/qt/stock/kline/get", context="t2"), "push2 通道失败")
         check("L1", "熔断-停机标记落盘",
               fd._push2_conn_file().exists() and _mk7[0] == 2,
               f".cbreak_push2conn 已写（Session 建 {_mk7[0]} 次，独立于 F2 标记文件）")
         _mk_before = _mk7[0]
         expect_raise("L1", "熔断-停机期零网络直通",
-                     lambda: fd._push2_get("http://x", context="t3"), "熔断中")
+                     lambda: fd._push2_get("https://push2his.eastmoney.com/api/qt/stock/kline/get", context="t3"), "熔断中")
         check("L1", "熔断-停机期不再发请求",
               _mk7[0] == _mk_before,
               f"停机期 Session 新建 {_mk7[0] - _mk_before} 次（应为 0——降级链接管）")
@@ -1078,23 +1406,23 @@ def test_l1_offline():
         fd._push2_conn_file().unlink()
         fd._push2_conn_fails[0] = 0
         expect_raise("L1", "熔断-清零场景首败",
-                     lambda: fd._push2_get("http://x", context="t4"), "push2 通道失败")
+                     lambda: fd._push2_get("https://push2his.eastmoney.com/api/qt/stock/kline/get", context="t4"), "push2 通道失败")
         fd.requests.Session = _OkSess7
-        d7 = fd._push2_get("http://x", context="ok")
+        d7 = fd._push2_get("https://push2his.eastmoney.com/api/qt/stock/kline/get", context="ok")
         check("L1", "熔断-成功清零+期满自愈放行",
               d7 == {"rc": 0} and fd._push2_conn_fails[0] == 0
               and not fd._push2_conn_file().exists(),
               "成功响应清零连败计数；过/删标记后正常放行")
         fd.requests.Session = _ConnFailSess7
         expect_raise("L1", "熔断-清零后孤立失败",
-                     lambda: fd._push2_get("http://x", context="t5"), "push2 通道失败")
+                     lambda: fd._push2_get("https://push2his.eastmoney.com/api/qt/stock/kline/get", context="t5"), "push2 通道失败")
         check("L1", "熔断-孤立失败不累积停机",
               fd._push2_conn_fails[0] == 1 and not fd._push2_conn_file().exists(),
               "成功清零后单次失败重新从 1 计（不误停机）")
         # 过期标记自动复位（有界试探：写远过去 until → check 复位放行）
         fd._push2_conn_file().write_text("1000")
         fd.requests.Session = _OkSess7
-        d7b = fd._push2_get("http://x", context="heal")
+        d7b = fd._push2_get("https://push2his.eastmoney.com/api/qt/stock/kline/get", context="heal")
         check("L1", "熔断-过期标记自动复位",
               d7b == {"rc": 0} and not fd._push2_conn_file().exists(),
               "停机期满自动复位放行（每小时探测有界）")
@@ -1155,7 +1483,7 @@ def test_l1_offline():
     # 备胎成功回落路径（审查覆盖缺口）：EM 短返 1 行 → 腾讯 mock 满 10 行
     import types as _types
     import urllib.request as _u
-    _orig_get7, _orig_bo = fd.ttfund_get, _u.build_opener
+    _orig_get7, _orig_bo, _orig_p2g7 = fd.ttfund_get, _u.build_opener, fd._push2_get
     _tx7 = fd.TENCENT_REQUEST_COUNT[0]
     _cw7 = (fd._cache_read, fd._cache_write)
     try:
@@ -1185,6 +1513,7 @@ def test_l1_offline():
               f"{len(rows)} 根来自备胎（腾讯账本 +{fd.TENCENT_REQUEST_COUNT[0] - _tx7}，source=tencent）")
     finally:
         fd.ttfund_get = _orig_get7
+        fd._push2_get = _orig_p2g7
         _u.build_opener = _orig_bo
         fd._cache_read, fd._cache_write = _cw7
         fd.TENCENT_REQUEST_COUNT[0] = _tx7
@@ -1418,6 +1747,12 @@ def test_l1_offline():
     # ── 盲区补测：fund_list 解析结构 + <5000 防线（30 天缓存主键表）──
     _orig_get11, _cw11 = fd.ttfund_get, (fd._cache_read, fd._cache_write)
     _mem_backup = list(fd._FUND_LIST_MEM)
+    _repo_backup11 = fd._CACHE_REPO
+    _tmp11 = tempfile.TemporaryDirectory(prefix="fund-l1-fundlist-mock-")
+    from fund_data_core import CacheRepository as _Repo11
+    # Sprint 3：core 路径经 repo 直写、不再过 _cache_write——mock 拦截点改为
+    # 换 repo 根到临时目录，假清单绝不落沙箱（原 _cache_write mock 仅拦 legacy 回退）。
+    fd._CACHE_REPO = _Repo11(Path(_tmp11.name))
     try:
         fd._cache_read = lambda *a, **k: None
         fd._cache_write = lambda *a, **k: None
@@ -1440,11 +1775,14 @@ def test_l1_offline():
         fd.ttfund_get = _orig_get11
         fd._cache_read, fd._cache_write = _cw11
         fd._FUND_LIST_MEM[:] = _mem_backup          # mock 清单不得残留进程内存
+        fd._CACHE_REPO = _repo_backup11
+        _tmp11.cleanup()
 
 
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
 def test_l2_smoke():
-    fl = fd.fund_list()
+    # 在线首测强制真实抓取：覆盖沙箱里的离线密闭性合成种子（E1 端点真验证）
+    fl = fd.fund_list(force_refresh=True)
     check("L2", "E1 清单规模", len(fl) > 5000, f"{len(fl)} 只")
     check("L2", "E1 清单含货基000198",
           any(f["code"] == "000198" for f in fl))
@@ -1859,8 +2197,13 @@ def test_f_guard_band():                             # 防封专项（F1/F2/F6�
     (fd.FUND_CACHE_DIR / "snapshots" / "161725.json").unlink(missing_ok=True)
 
     # F2: 熔断冷却期内 ttfund_get 直接拒绝（不发网络请求）
-    fd._cbreak_file("tt").parent.mkdir(parents=True, exist_ok=True)
-    fd._cbreak_file("tt").write_text(str(time.time() + 5))
+    # core 路由：冷却闸门由协调器三连击开启（legacy 落盘文件已退位为镜像）；
+    # 拒绝发生在网关 acquire，transport 与请求账本都不会被触碰。
+    for _sig in range(3):
+        try:
+            fd._cbreak_signal("tt", "F2 冷却演练")
+        except fd.RiskControlError:
+            pass
     n_before = fd.TT_REQUEST_COUNT[0]
     try:
         fd.ttfund_get("https://fund.eastmoney.com/js/fundcode_search.js")
@@ -1870,6 +2213,7 @@ def test_f_guard_band():                             # 防封专项（F1/F2/F6�
         check("F2", "冷却期拒绝请求", "熔断" in str(e) and zero_net,
               f"拒绝且零网络请求 ✓ {str(e)[:30]}")
     fd._cbreak_file("tt").unlink(missing_ok=True)
+    _fresh_coordination()               # 闸门复位，后续在线用例不受演练影响
 
     # F1: 双进程并发节流——合并间隔不得小于单线阈值×0.8
     code = (
@@ -1930,9 +2274,367 @@ def test_f_cache_band():                             # F4/F7 缓存专项（在�
     fd.TT_REQUEST_COUNT[1].clear()          # F 段复位清零后同步清 host 明细，账本打印自洽
 
 
+def test_sprint2_integration_offline():
+    """真实业务函数 + fake transport 的协调器集成回归（零上游、临时状态）。"""
+    from fund_data_core import RiskControlError as CoreRisk, CircuitOpenError as CoreCircuit
+
+    class _Clock:
+        def __init__(self):
+            self.now = 1000.0
+
+        def time(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += max(0.0, seconds)
+
+    class _Resp:
+        def __init__(self, status=200, text="", payload=None):
+            self.status_code = status
+            self.text = text
+            self.content = text.encode("utf-8")
+            self._payload = payload
+
+        def json(self):
+            if self._payload is not None:
+                return self._payload
+            return json.loads(self.text)
+
+        def raise_for_status(self):
+            return None
+
+    temps = []
+    _clock_box = {}
+
+    def _reset():
+        tmp = tempfile.TemporaryDirectory(prefix="fund-s2-integration-")
+        temps.append(tmp)
+        fd.FUND_CACHE_DIR = Path(tmp.name)
+        clock = _Clock()
+        _clock_box["clock"] = clock
+        coordinator = fd._reset_request_coordination(clock=clock)
+        fd._FUND_LIST_MEM[:] = []
+        for line in ("tt", "em", "cninfo", "danjuan"):
+            fd._cbreak_state[line] = [0, 0.0]
+        return coordinator
+
+    def _list_body(count=5000):
+        rows = [[f"{i:06d}", f"基金{i}", f"fund{i}", "混合型-偏股"]
+                for i in range(count)]
+        return "var fundcode_search = " + json.dumps(rows, ensure_ascii=False)
+
+    def _counts(coordinator, provider):
+        snap = coordinator.snapshot(provider)
+        return (snap["reserved_slots"], snap["network_started"], snap["responses"],
+                snap["active_in_flight"])
+
+    orig_get, orig_post = fd.TT_SESSION.get, fd.TT_SESSION.post
+    orig_session = fd.requests.Session
+    orig_build_opener = fd.urllib.request.build_opener
+    orig_push2, orig_key = fd._push2_get, fd._cninfo_enckey
+    orig_cache_dir = fd.FUND_CACHE_DIR
+    try:
+        coordinator = _reset()
+        check("S2", "异常类型与core统一",
+              fd.RiskControlError is CoreRisk and fd.CircuitOpenError is CoreCircuit)
+        check("S2", "默认预算东财240/300且cninfo间隔1.5",
+              coordinator.policies["eastmoney"].max_requests == 240
+              and coordinator.policies["eastmoney"].window_seconds == 300
+              and coordinator.policies["cninfo"].min_interval == 1.5)
+        # 策略字段覆盖必须在模块预算之上合并（240 余量绝不能回落 DEFAULT 的 300）。
+        coordinator = _reset()
+        overridden = fd._reset_request_coordination(
+            clock=_Clock(), policies={"eastmoney": {"min_interval": 0}})
+        check("S2", "策略覆盖不丢防封预算余量",
+              overridden.policies["eastmoney"].max_requests == 240
+              and overridden.policies["eastmoney"].min_interval == 0)
+
+        coordinator = _reset()
+        fd.TT_SESSION.get = lambda *a, **k: _Resp(200, _list_body())
+        fd.fund_list(force_refresh=True)
+        fd.fund_list(force_refresh=True)
+        check("S2", "同进程两次真实业务调用全分账且无许可泄漏",
+              _counts(coordinator, "eastmoney") == (2, 2, 2, 0)
+              and fd.TT_REQUEST_COUNT[0] >= 2, str(_counts(coordinator, "eastmoney")))
+
+        for status, body in ((403, "forbidden"), (429, "limited"), (200, "无访问权限")):
+            coordinator = _reset()
+            fd.TT_SESSION.get = lambda *a, s=status, b=body, **k: _Resp(s, b)
+            try:
+                fd.ttfund_get("https://fund.eastmoney.com/x")
+                check("S2", f"真实入口风控{status}/{body}", False, "未抛错")
+            except fd.RiskControlError:
+                check("S2", f"真实入口风控{status}/{body}", True)
+            snap = coordinator.snapshot("eastmoney")
+            check("S2", f"风控{status}/{body}响应分账",
+                  (snap["reserved_slots"], snap["network_started"], snap["responses"],
+                   snap["consecutive_risk"], snap["active_in_flight"]) == (1, 1, 1, 1, 0))
+
+        coordinator = _reset()
+        calls = []
+        fd.TT_SESSION.get = lambda *a, **k: calls.append(1) or _Resp(403, "forbidden")
+        for _ in range(3):
+            try:
+                fd.ttfund_get("https://fund.eastmoney.com/x")
+            except fd.RiskControlError:
+                pass
+        try:
+            fd.ttfund_get("https://fund.eastmoney.com/x")
+            check("S2", "OPEN阻止真实transport", False, "未抛CircuitOpenError")
+        except fd.CircuitOpenError:
+            check("S2", "OPEN阻止真实transport", len(calls) == 3,
+                  f"transport={len(calls)}")
+
+        # 半开恢复闭环：开闸 → 冷却期满 → 健康探针 + 业务校验成功 → 闸门 CLOSED。
+        # （若探针中性结算被误判为失败重开、或业务清零不关闸，此处必然卡死在 OPEN。）
+        _clock_box["clock"].now += 601
+        fd.TT_SESSION.get = lambda *a, **k: _Resp(200, _list_body())
+        fd.fund_list(force_refresh=True)
+        snap = coordinator.snapshot("eastmoney")
+        check("S2", "半开探针+业务成功后闸门恢复",
+              snap["circuit"] == "CLOSED" and snap["consecutive_risk"] == 0,
+              f"circuit={snap['circuit']} streak={snap['consecutive_risk']}")
+
+        coordinator = _reset()
+        fd.TT_SESSION.get = lambda *a, **k: _Resp(500, "server error")
+        response = fd.ttfund_get("https://fund.eastmoney.com/x")
+        snap = coordinator.snapshot("eastmoney")
+        check("S2", "HTTP500计响应但非业务成功且释放许可",
+              response.status_code == 500 and snap["responses"] == 1
+              and snap["consecutive_risk"] == 0 and snap["active_in_flight"] == 0)
+
+        coordinator = _reset()
+        fd._cbreak_signal("tt", "seed")
+        fd.TT_SESSION.get = lambda *a, **k: _Resp(200, _list_body(12))
+        try:
+            fd.fund_list(force_refresh=True)
+        except RuntimeError:
+            pass
+        check("S2", "解析失败不清业务连击",
+              coordinator.snapshot("eastmoney")["consecutive_risk"] == 1
+              and coordinator.snapshot("eastmoney")["active_in_flight"] == 0)
+        fd.TT_SESSION.get = lambda *a, **k: _Resp(200, _list_body())
+        fd.fund_list(force_refresh=True)
+        check("S2", "业务完整性成功后才清零",
+              coordinator.snapshot("eastmoney")["consecutive_risk"] == 0)
+
+        coordinator = _reset()
+        outcomes = [fd.requests.RequestException("reset"), _Resp(200, "ok")]
+        fd.TT_SESSION.get = lambda *a, **k: outcomes.pop(0)
+        before_tt = fd.TT_REQUEST_COUNT[0]
+        fd.ttfund_get("https://fund.eastmoney.com/x")
+        check("S2", "网络重试独立预留和计数",
+              _counts(coordinator, "eastmoney") == (2, 2, 1, 0)
+              and fd.TT_REQUEST_COUNT[0] == before_tt + 2,
+              str(_counts(coordinator, "eastmoney")))
+
+        coordinator = _reset()
+        fd._cbreak_signal("em", "seed")
+        fd._push2_get = lambda *a, **k: {"data": {"klines": ["2026-01-02,3000.5"]}}
+        payload = {"data": {"sz000905": {"qfqday": [
+            ["2026-01-02", "1", "3.0"], ["2026-01-03", "1", "3.1"],
+            ["2026-01-06", "1", "3.2"], ["2026-01-07", "1", "3.3"],
+            ["2026-01-08", "1", "3.4"], ["2026-01-09", "1", "3.5"],
+            ["2026-01-10", "1", "3.6"], ["2026-01-13", "1", "3.7"],
+            ["2026-01-14", "1", "3.8"], ["2026-01-15", "1", "3.9"]]}}}
+        fd.urllib.request.build_opener = lambda *a, **k: type("Opener", (), {
+            "open": lambda self, req, timeout=None: type("R", (), {
+                "read": lambda self: json.dumps(payload).encode("utf-8")})()})()
+        rows = fd.kline_daily("0.000905", lmt=10, force_refresh=True)
+        check("S2", "腾讯备胎成功不清东财成功语义",
+              len(rows) == 10 and coordinator.snapshot("eastmoney")["consecutive_risk"] == 1
+              and _counts(coordinator, "tencent") == (1, 1, 1, 0))
+
+        coordinator = _reset()
+        seq = [_Resp(200, payload={"resultcode": 451, "resultmsg": "token null"}),
+               _Resp(200, payload={"resultcode": 200, "records": [{"SECCODE": "300308"}]})]
+        fd.TT_SESSION.post = lambda *a, **k: seq.pop(0)
+        fd._cninfo_enckey = lambda ts=None: "mock="
+        fd._cninfo_post("p_sysapi1112", {}, "S2")
+        check("S2", "cninfo451两次独立配额和响应",
+              _counts(coordinator, "cninfo") == (2, 2, 2, 0))
+
+        coordinator = _reset()
+        fd.TT_SESSION.get = lambda *a, **k: _Resp(200, _list_body())
+        fd.fund_list(force_refresh=True)
+        fd._cbreak_signal("tt", "cache-seed")
+        before = _counts(coordinator, "eastmoney")
+        fd.fund_list()
+        check("S2", "纯缓存0配额且不清零",
+              _counts(coordinator, "eastmoney") == before
+              and coordinator.snapshot("eastmoney")["consecutive_risk"] == 1)
+
+        coordinator = _reset()
+        calls = []
+        fd.TT_SESSION.get = lambda *a, **k: calls.append(1) or _Resp(200, "ok")
+        try:
+            fd.ttfund_get("https://example.com/x")
+            check("S2", "未知host拒绝且零transport", False, "未抛错")
+        except Exception as exc:
+            check("S2", "未知host拒绝且零transport",
+                  type(exc).__name__ == "UnknownHostError" and not calls)
+
+        coordinator = _reset()
+        fd.TT_SESSION.get = lambda *a, **k: _Resp(200, "{}")
+        fd.ttfund_get("https://danjuanfunds.com/djapi/fund/161725")
+        check("S2", "蛋卷独立provider不消耗东财配额",
+              _counts(coordinator, "danjuan") == (1, 1, 1, 0)
+              and _counts(coordinator, "eastmoney") == (0, 0, 0, 0))
+    finally:
+        fd.TT_SESSION.get, fd.TT_SESSION.post = orig_get, orig_post
+        fd.requests.Session = orig_session
+        fd.urllib.request.build_opener = orig_build_opener
+        fd._push2_get, fd._cninfo_enckey = orig_push2, orig_key
+        fd.FUND_CACHE_DIR = orig_cache_dir
+        # 在线分层测试同样走 core 路径：重建真实时钟/真实状态目录的协调器，
+        # 不携带 FakeClock 脏状态。
+        fd._reset_request_coordination()
+        for tmp in temps:
+            tmp.cleanup()
+
+
+def test_sprint3_integration_offline():
+    """Sprint 3 缓存核心接入回归：平移层字节兼容 + fund_list get_or_load 榜样。"""
+    from fund_data_core import StaleDataError as CoreStale
+
+    class _Resp:
+        def __init__(self, status=200, text=""):
+            self.status_code = status
+            self.text = text
+            self.content = text.encode("utf-8")
+
+        def raise_for_status(self):
+            return None
+
+    def _list_body(count=5000):
+        rows = [[f"{i:06d}", f"基金{i}", f"fund{i}", "混合型-偏股"]
+                for i in range(count)]
+        return "var fundcode_search = " + json.dumps(rows, ensure_ascii=False)
+
+    temps = []
+
+    def _reset():
+        tmp = tempfile.TemporaryDirectory(prefix="fund-s3-integration-")
+        temps.append(tmp)
+        fd.FUND_CACHE_DIR = Path(tmp.name)
+        fd._reset_request_coordination(policies=_ZERO_POLICY)
+        fd._FUND_LIST_MEM[:] = []
+        return fd._CACHE_REPO
+
+    check("S3", "异常类型与core统一", fd.StaleDataError is CoreStale)
+
+    # ── 平移层：_cache_read/_cache_write 与 legacy JSON 语义等价 ──
+    _reset()
+    fd._cache_write("unit/t1.json", {"a": 1, "中文": True})
+    raw = (fd.FUND_CACHE_DIR / "unit" / "t1.json").read_text(encoding="utf-8")
+    check("S3", "平移-写路径JSON语义等价（紧凑序列化、无schema标记）",
+          json.loads(raw) == {"a": 1, "中文": True} and "_meta" not in raw)
+    check("S3", "平移-新鲜命中", fd._cache_read("unit/t1.json", 1) == {"a": 1, "中文": True})
+    check("S3", "平移-miss返回None", fd._cache_read("unit/none.json", 1) is None)
+    p = fd.FUND_CACHE_DIR / "unit" / "t1.json"
+    old = time.time() - 7200
+    os.utime(p, (old, old))
+    check("S3", "平移-过期返回None", fd._cache_read("unit/t1.json", 1) is None)
+    check("S3", "平移-ttl不过期", fd._cache_read("unit/t1.json", None) == {"a": 1, "中文": True})
+    p.write_text("{broken", encoding="utf-8")
+    check("S3", "平移-损坏返回None不抛", fd._cache_read("unit/t1.json", 1) is None)
+
+    # ── fund_list get_or_load 榜样：冷启装载/命中零请求/失败不写缓存/异常保真 ──
+    orig_get = fd.TT_SESSION.get                       # 先存原值再打补丁（S2 同款写法）
+    fd.TT_SESSION.get = lambda *a, **k: _Resp(200, _list_body())
+    try:
+        repo = _reset()
+        before = fd.TT_REQUEST_COUNT[0]
+        rows = fd.fund_list(force_refresh=True)
+        check("S3", "榜样板-冷启装载",
+              len(rows) == 5000 and fd.TT_REQUEST_COUNT[0] == before + 1
+              and (fd.FUND_CACHE_DIR / "fund_list.json").exists())
+        fd._FUND_LIST_MEM[:] = []                      # 清进程内存，逼走文件缓存
+        before = fd.TT_REQUEST_COUNT[0]
+        rows2 = fd.fund_list()
+        check("S3", "榜样板-文件命中零请求零配额",
+              fd.TT_REQUEST_COUNT[0] == before
+              and fd._COORDINATOR.snapshot("eastmoney")["reserved_slots"] == 1
+              and rows2[0]["code"] == "000000")
+
+        repo = _reset()
+        fd.TT_SESSION.get = lambda *a, **k: _Resp(200, _list_body(12))
+        expect_raise("S3", "榜样板-结构异常上抛",
+                     lambda: fd.fund_list(force_refresh=True), "疑似上游结构变更")
+        check("S3", "榜样板-失败不写缓存",
+              not (fd.FUND_CACHE_DIR / "fund_list.json").exists())
+        fd.TT_SESSION.get = lambda *a, **k: _Resp(200, _list_body())
+        rows3 = fd.fund_list(force_refresh=True)       # retry_after=0：立刻重试可成功
+        check("S3", "榜样板-失败后立即重试成功", len(rows3) == 5000)
+
+        repo = _reset()
+        fd._cache_write("fund_list.json", [{"code": "旧", "pinyin": "j",
+                                            "name": "旧清单", "type": "x"}])
+        stale = fd.FUND_CACHE_DIR / "fund_list.json"
+        past = time.time() - 40 * 24 * 3600
+        os.utime(stale, (past, past))
+        fd.TT_SESSION.get = lambda *a, **k: _Resp(403, "forbidden")
+        try:
+            fd.fund_list()
+            check("S3", "榜样板-旧缓存不吞风控异常", False, "未抛错")
+        except fd.RiskControlError:
+            check("S3", "榜样板-旧缓存不吞风控异常",
+                  True, "StaleDataError 保真上抛诱因 RiskControlError")
+        except Exception as e:
+            check("S3", "榜样板-旧缓存不吞风控异常", False,
+                  f"错误类型: {type(e).__name__}")
+
+        # 并发冷启收敛：4 线程同时首调，装载器只执行一次（跨线程锁）
+        repo = _reset()
+        hits = []
+
+        def _slow_load(*a, **k):
+            hits.append(1)
+            time.sleep(0.25)
+            return _Resp(200, _list_body())
+
+        fd.TT_SESSION.get = _slow_load
+        import threading
+        barrier = threading.Barrier(4)
+        results = [None] * 4
+
+        def _worker(i):
+            barrier.wait(5)
+            results[i] = len(fd.fund_list())
+
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        check("S3", "榜样板-并发冷启单一装载",
+              len(hits) == 1 and all(r == 5000 for r in results),
+              f"装载 {len(hits)} 次，结果一致 {all(r == 5000 for r in results)}")
+
+        # teardown 回退：repo 置 None 后 legacy 直读写路径仍可用
+        fd._teardown_request_coordination()
+        fd._cache_write("unit/legacy.json", [1, 2])
+        check("S3", "teardown回退-legacy直读写",
+              fd._cache_read("unit/legacy.json", 1) == [1, 2]
+              and fd._CACHE_REPO is None and fd._REQUEST_GATEWAY is None)
+    finally:
+        fd.TT_SESSION.get = orig_get
+        fd._FUND_LIST_MEM[:] = []          # 假清单不得残留进程内存（在线层在后面跑）
+        fd._teardown_request_coordination()
+        fd.FUND_CACHE_DIR = Path(_TEST_CACHE_TMP.name)
+        if OFFLINE_ONLY:
+            fd._reset_request_coordination(policies=_ZERO_POLICY)
+        else:                              # 在线层保持真实策略（S2 finally 同口径，防封节流不裸奔）
+            fd._reset_request_coordination()
+        for tmp in temps:
+            tmp.cleanup()
+
+
 def main():
     print(f"fund-data {fd.__version__} 分层测试  offline_only={OFFLINE_ONLY}\n")
     test_l1_offline()
+    test_sprint2_integration_offline()
+    test_sprint3_integration_offline()
     if not OFFLINE_ONLY:
         # 逐函数隔离（冷跑教训：单函数 transient 逃逸曾连带跳过 L3/L4/L5/F 全部信号）；
         # 栈全文走 stdout（print_exc 走 stderr 会与 check 的 stdout 在管道下错序截断）

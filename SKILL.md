@@ -57,7 +57,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 
 | 故障 | 行为 | 硬边界 |
 |---|---|---|
-| E2 快照失败/风控页/空体 | **自动降级** E3+E4a+蛋卷（source=degraded），不污染缓存 | 窗口默认 1 年 |
+| E2 网络失败/真正空体 | **自动降级** E3+E4a+蛋卷（source=degraded），不污染缓存 | 窗口默认 1 年；风控页/结构异常显式上抛，不降级 |
 | 历史净值兜底 | E3 lsjz 逐页（TotalCount 强校验） | **跨域无备胎（P17 三候选全死）** |
 | 个股行情 | 腾讯通道（不封 IP） | — |
 | 利率曲线 | 中债 curl 通道（TLS 指纹墙 P11） | 东财 datacenter 互证 |
@@ -101,7 +101,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | `benchmark_rate_history()` | 一年期存/贷款基准利率历次调整（东财 RPT_ECONOMY_DEP |
 | `repo_rate_gc()` | GC007 交易所质押式回购利率（腾讯通道，1 请求）——DR007 |
 | `cn_treasury_realtime()` | 国债收益率盘中（push2 全球债券行情 CN2Y/5Y/10Y/3 |
-| `assert_rankhandler(resp, context='rankhandler')` | rankhandler 家族内容级风控断言（坑P19）：被拦时是 2 |
+| `assert_rankhandler(resp, context='rankhandler')` | rankhandler 家族内容级风控断言；业务成功由完整记录校验后 |
 | `fund_rank(top=None, fund_type='all', sort='ytd', ascending=False, force_refresh=False)` | 全市场基金排行 / 初筛底座（坑P19；全量 = 1 请求） |
 | `fund_new_issues(force_refresh=False)` | 在发/新成立基金全量（FundNewIssue.aspx，tt 线  |
 | `fund_company(query, force_refresh=False)` | 基金公司画像（company/{id}.html 服务端直出，24h |
