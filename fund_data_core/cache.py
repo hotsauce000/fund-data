@@ -14,16 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Generic, Iterator, Optional, TypeVar
 
 from .cache_policies import CachePolicy, safe_cache_path, sharded_key_path
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - exercised only on Windows
-    fcntl = None
-
-try:
-    import msvcrt
-except ImportError:  # pragma: no cover - available only on Windows
-    msvcrt = None
+from .locks import file_lock
 
 
 T = TypeVar("T")
@@ -121,10 +112,6 @@ class _Failure:
 class _MemoryItem:
     entry: _Entry
     stored_at: float
-
-
-_THREAD_LOCKS: Dict[str, threading.Lock] = {}
-_THREAD_LOCKS_GUARD = threading.Lock()
 
 
 def _iso_timestamp(timestamp: float) -> str:
@@ -510,30 +497,8 @@ class CacheRepository:
 
     @contextmanager
     def _exclusive_lock(self, key: str) -> Iterator[None]:
-        path = self.lock_path(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lock_name = str(path)
-        with _THREAD_LOCKS_GUARD:
-            thread_lock = _THREAD_LOCKS.setdefault(lock_name, threading.Lock())
-        with thread_lock:
-            with path.open("a+b") as handle:
-                if fcntl is not None:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                elif msvcrt is not None:  # pragma: no cover - Windows only
-                    handle.seek(0, os.SEEK_END)
-                    if handle.tell() == 0:
-                        handle.write(b"\0")
-                        handle.flush()
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-                try:
-                    yield
-                finally:
-                    if fcntl is not None:
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                    elif msvcrt is not None:  # pragma: no cover - Windows only
-                        handle.seek(0)
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        with file_lock(self.lock_path(key)):
+            yield
 
 
 __all__ = [

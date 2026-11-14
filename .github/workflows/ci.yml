@@ -1,0 +1,39 @@
+name: ci
+
+# 三平台同等矩阵：离线全量（锁契约 + core 四套 + 主套件 234 条）。
+# 平台差异已收敛到 locks 抽象层（能力检测），任何平台的红都是真红。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  offline:
+    name: offline (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: core suites（锁契约 + cache/策略/协调器/网关 + 平台硬编码守卫）
+        run: python -m unittest test_locks test_no_platform_hardcoding test_cache test_cache_policies test_coordinator test_gateway
+      - name: 主套件离线 234 条（零网络）
+        run: python test_fund_data.py
+      - name: flake 压测（多进程冷启动 x5，锁与路径竞态回归）
+        run: |
+          import subprocess, sys
+          for round_index in range(5):
+              result = subprocess.run(
+                  [sys.executable, "-m", "unittest", "test_cache.CacheRepositoryTest"],
+                  capture_output=True, text=True, timeout=300)
+              print(f"round {round_index}: {'OK' if result.returncode == 0 else 'FAIL'}")
+              if result.returncode != 0:
+                  print(result.stderr[-2000:])
+                  sys.exit(1)
+        shell: python

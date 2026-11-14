@@ -457,8 +457,9 @@ class CoordinatorTests(unittest.TestCase):
             coordinator.cancel(permit)
 
 
-@unittest.skipUnless(hasattr(os, "fork"), "需要 POSIX 多进程语义")
 class MultiProcessTests(unittest.TestCase):
+    """跨进程契约（spawn 机制，全平台通用；锁语义由 locks 抽象层保证一致）。"""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="fund-coordinator-mp-")
         self.addCleanup(self.tmp.cleanup)
@@ -507,8 +508,9 @@ class MultiProcessTests(unittest.TestCase):
         process = self.context.Process(target=process_crash_after_start,
                                        args=(str(self.root), queue))
         process.start()
-        self.assertEqual(queue.get(timeout=5)[0], "started")
-        process.join(timeout=10)
+        # spawn 冷启动在负载下可达数秒（Windows CI 尤甚），对齐 finish 的 15s 窗口
+        self.assertEqual(queue.get(timeout=15)[0], "started")
+        process.join(timeout=15)
         self.assertEqual(process.exitcode, 0)
         coordinator = Coordinator(self.root, policies={"eastmoney": policy(
             min_interval=0, max_in_flight=1, lease_seconds=0.15)})

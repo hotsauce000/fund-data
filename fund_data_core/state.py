@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""fcntl 文件锁与原子 JSON 状态存储。
+"""跨进程文件锁与原子 JSON 状态存储。
 
-锁文件永不替换，JSON 文件只在持锁时通过同目录临时文件 + os.replace 替换。
-任何读取、解析、校验、加锁或写入异常都转成 CoordinatorStateError。
+锁经 locks 抽象层（能力检测选择机制，语义全平台一致）；锁文件永不替换，
+JSON 文件只在持锁时通过同目录临时文件 + os.replace 替换。任何读取、解析、
+校验、加锁或写入异常都转成 CoordinatorStateError。
 """
 
 import json
@@ -12,12 +13,8 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-from .errors import CoordinatorStateError
-
-try:
-    import fcntl
-except ImportError:  # Windows 没有可依赖的跨进程 flock，不做内存降级。
-    fcntl = None
+from .errors import (CoordinatorStateError, LockBackendError, LockTimeoutError)
+from .locks import file_lock
 
 
 STATE_VERSION = 1
@@ -113,35 +110,18 @@ class JsonStateStore:
 
     @contextmanager
     def locked(self):
-        """独占跨进程锁；同进程 RLock 防止线程绕过 flock 语义。"""
+        """独占跨进程锁；同进程 RLock 防止线程绕过文件锁语义。"""
 
-        if fcntl is None:
-            raise CoordinatorStateError("当前平台无 fcntl，无法保证跨进程安全；已 fail-closed")
         with self._thread_lock:
-            handle = None
-            locked = False
             try:
-                self.state_path.parent.mkdir(parents=True, exist_ok=True)
-                handle = self.lock_path.open("a+", encoding="utf-8")
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                locked = True
-                yield
+                with file_lock(self.lock_path):
+                    yield
             except CoordinatorStateError:
                 raise
-            except (OSError, ValueError, TypeError) as exc:
+            except (OSError, ValueError, TypeError,
+                    LockBackendError, LockTimeoutError) as exc:
                 raise CoordinatorStateError(
                     f"无法取得协调器锁 {self.lock_path}: {exc}；已 fail-closed") from exc
-            finally:
-                if handle is not None:
-                    try:
-                        if locked:
-                            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                    except OSError as exc:
-                        if locked:
-                            raise CoordinatorStateError(
-                                f"释放协调器锁失败: {exc}；已 fail-closed") from exc
-                    finally:
-                        handle.close()
 
     @contextmanager
     def transaction(self):

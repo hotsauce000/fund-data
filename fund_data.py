@@ -59,7 +59,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.7.1"
+__version__ = "0.7.2"
 
 # ══════════════════════════════════════════════════════════════════
 # L1 前置层：限流入口 / 缓存目录 / 请求计数
@@ -81,14 +81,12 @@ TT_SESSION.trust_env = False                          # 直连：绕过系统代
 TT_SESSION.headers.update({"User-Agent": UA})
 TT_REQUEST_COUNT = [0, {}]       # [总请求数, {host: 次数}] — 预算审计用，ttfund_get 自增
 
-# ── F1：跨进程节流锁（fcntl + 磁盘时间戳）─────────────────────────────
+# ── F1：跨进程节流锁（文件锁 + 磁盘时间戳）───────────────────────────
 # 原实现的时间戳在进程内存里——licai-map 服务、AI 会话、手跑脚本各持一份限流器，
 # 合并速率 = 进程数 × 0.67req/s，双进程批量即可越 300req/5min 封禁线（审计 F1）。
 # 现改为磁盘时间戳 + 文件锁：同机所有进程强制串行，锁等待自动吸收间隔。
-try:
-    import fcntl  # macOS/Linux；Windows 缺此模块时降级为进程内节流
-except ImportError:
-    fcntl = None
+# 锁经 fund_data_core.locks 抽象层（能力检测选机制，全平台同一语义，
+# 与 flock 时代一致不再有平台静默降级——多进程限流保证不分操作系统）。
 
 _CBREAK_COOLDOWN = 600           # F2：熔断冷却 10 分钟
 _CBREAK_TRIP = 3                 # 连续 3 次风控信号触发熔断
@@ -99,6 +97,7 @@ from fund_data_core import CachePolicy, CacheRepository, StaleDataError
 from fund_data_core.cache_policies import FUND_LIST_TTL_SECONDS
 from fund_data_core.errors import (CircuitOpenError, LeaseError,
                                    RiskControlError)
+from fund_data_core.locks import file_lock
 
 FUND_LIST_TTL_DAYS = FUND_LIST_TTL_SECONDS // 86400   # 单一来源：core 常量派生（30 天）
 
@@ -246,31 +245,28 @@ def _cbreak_file(line: str) -> Path:
 
 
 def _cross_proc_throttle(line: str, min_interval: float):
-    """F1 跨进程节流：flock 抢锁 → 读磁盘时间戳 → 睡足间隔 → 写回 → 放锁。
+    """F1 跨进程节流：文件锁抢锁 → 读磁盘时间戳 → 睡足间隔 → 写回 → 放锁。
 
     时间戳语义=放行时刻（非请求完成时刻）：慢响应下相邻请求**发起**间隔恒 ≥interval
     （V0.3.0 是间隔+响应耗时，本版略松但仍在设计线内，见 ttfund_get docstring）。
+    锁文件与时间戳文件分离（与 core 的 state/cache 同格局）：旧版时间戳写在锁文件
+    本体里，升级后原文件继续作为时间戳载体无缝衔接，锁改为旁挂 .lock 兄弟文件。
     """
-    if fcntl is None:                                 # Windows 降级：进程内保守节流
-        time.sleep(min_interval * random.uniform(0.8, 1.2))
-        return
-    lock_path = _throttle_file(line)
+    ts_path = _throttle_file(line)
+    lock_path = Path(str(ts_path) + ".lock")
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        open(lock_path, "a").close()                   # O_CREAT 原子首建，绝不截断已有内容
-        with open(lock_path, "r+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        with file_lock(lock_path):
+            ts_path.touch(exist_ok=True)               # O_CREAT 原子首建，绝不截断已有内容
             try:
-                last = float(f.read().strip() or 0)
+                last = float(ts_path.read_text().strip() or 0)
             except ValueError:
                 last = 0.0
             now = time.time()                          # 拿锁后再取样（排队时长不计入间隔）
             wait = min_interval - (now - last)
             if wait > 0:
                 time.sleep(wait + random.uniform(0.05, 0.3))
-            f.seek(0)
-            f.truncate()
-            f.write(f"{time.time():.6f}")
+            ts_path.write_text(f"{time.time():.6f}")
     except OSError:
         # 锁文件异常 → 降级进程内保守节流（保持可用性优先）
         time.sleep(min_interval * random.uniform(0.8, 1.2))

@@ -1,0 +1,26 @@
+name: online
+
+# 在线全量 304 条（真实上游）。仅手动触发：按坑 P26 的教训，诊断/验证行为
+# 本身消耗上游 IP 额度，绝不随 push 自动跑。发版前在一个平台全量跑一次，
+# 小版本间可轮换平台抽测。
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "运行平台"
+        required: false
+        default: ubuntu-latest
+        type: choice
+        options: [ubuntu-latest, macos-latest, windows-latest]
+
+jobs:
+  online:
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 在线全量（含离线 234 + 在线 70，打印四线请求账本）
+        run: python test_fund_data.py --online

@@ -1,13 +1,19 @@
-# fund-data 完整参考（reference.md · 按需读取层）V0.7.1
+# fund-data 完整参考（reference.md · 按需读取层）V0.7.2
 
 > 本文件按需读取：调试 / 扩展 / 排查坑时才打开，勿随 skill 激活预加载。
 > 路由与签名速查见 SKILL.md；本文件内嵌代码与 fund_data.py 同源直拼（构建时生成）。
 
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 
-# fund-data 基金底层数据工具包 V0.7.1 模块全档
+# fund-data 基金底层数据工具包 V0.7.2 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入：234/234 离线断言通过**（L1 单元 198 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 75 条。在线层 L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11 须显式 `--online`），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入：234/234 离线断言通过**（L1 单元 198 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11 须显式 `--online`），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.7.2 三平台同等支持（锁抽象层）：**
+- 🟢 **`fund_data_core.locks` 锁抽象层**：跨进程文件锁按**能力检测**选机制（flock / 字节范围锁），机制命名、零平台分支（守卫测试强制）；进程内注册表按归一化路径互斥（剥 `\\?\` 前缀+大小写归一），不可重入契约显式报错（宁可 loud 不死锁），有界后端外层重试补齐无限阻塞语义
+- 🔴 **消灭 F1 静默降级**：原 fcntl 缺失环境下节流降级为进程内——多进程并发时限流失效且无告警（与「绝不静默」立场冲突）；现三平台同一锁语义，锁文件与时间戳文件分离（旧时间戳无缝衔接）
+- 🟢 **修 `safe_cache_path` 扩展前缀竞态**：并发创建瞬间 resolve 可能返回 `\?\` 形态与普通形态 root 假性不等 → 误报 escapes（多进程冷启动偶发）；双侧剥前缀 + resolve 瞬态与真逃逸分开上报
+- 🟢 **CI 三平台矩阵**（离线全量 + flake 压测）+ 在线 workflow_dispatch 手动触发；Windows 实机原生全绿：core 92 + 离线 234/234 + 在线 304/304，flaky 压测 10/10
 
 **V0.7.1 push2 防复发加固（IP 缓释桶定案，五发探针实证）：**
 - 🔴 **P26 定性修正**：封锁=**IP 级缓释桶限流**——健康期容量大（treasury 4 连发数周无事）、惩罚期容量极小（3 连发即放空、第 4 发 RST）且恢复慢；12:16 三连过（同栈同 UA）**证伪「TLS 指纹永久黑名单」**，12:22/12:23 两连挂定案重触机制（上午 12 连发 0/6、1/6 是热窗观测，混淆了冷却与指纹）。教训：**诊断行为本身会烧 IP 额度——排查封锁先 ≤5 次小样本，绝不做几十连发**
@@ -181,6 +187,7 @@
 | P24 FOF 底层无接口 | 五源（东财F10/App/蛋卷/好买/新浪）均只有股票直持仓 | 基金投资明细仅存季报 PDF——诚实边界，FOF 驾驶舱降级为池+仓位史+直持仓穿透 |
 | P25 push2his日K形态 | fields2 只取 f51,f53（日期,收盘）；市场2（中证指数公司）无腾讯代码不可备胎；缓存键必须含 lmt 防窗口截断 | `kline_daily` F6 分流（RiskControlError 不降级）+ 日期去重 + need=min(lmt,100) 下限 |
 | P26 push2系IP缓释桶 | 封锁=**IP 级缓释桶**：惩罚期容量极小（3 连发即放空、第 4 发 RST）、恢复慢（小时级续量）、溢出全客户端全掐（curl 亦然）；健康期容量大（4 连发数周无事）。12:16 三连过证伪「TLS 指纹永久黑名单」，12:22/12:23 两连挂定案重触（上午 12 连发系热窗观测）。教训：诊断行为本身烧 IP 额度，排查先 ≤5 次小样本 | `_push2_get` 单发即弃 + flock 地板 + 0.5~3.0s 抖动 + **连接级熔断**（2 连败停 1h，独立标记 `.cbreak_push2conn`，停机期零网络）+ 降级链（kline→腾讯备胎/国债→中债收盘 300s 短缓存+值域守卫/板块→穿透单股降级）；TLS 指纹假说未排除但不伪装（不军备竞赛） |
+| P27 跨平台锁与路径形态 | ①Windows 扩展前缀竞态：并发创建瞬间 `resolve(strict=False)` 可返回 `\?\` 形态与普通形态 containment 假性不等→误报 escapes（多进程冷启动偶发）；②字节范围锁同进程不同句柄互斥（嵌套=死锁→显式报错）；③LK_LOCK ~10s 即弃（需外层重试补无限阻塞） | `locks` 抽象层：能力检测选机制+注册表互斥+不可重入报错+外层重试；`drop_extended_prefix` 归一入口；契约测试 14 条 |
 
 ## Prerequisites
 
@@ -256,7 +263,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.7.1"
+__version__ = "0.7.2"
 
 
 FUND_CACHE_DIR = Path.home() / ".fund_data_cache"
@@ -275,14 +282,12 @@ TT_SESSION.trust_env = False                          # 直连：绕过系统代
 TT_SESSION.headers.update({"User-Agent": UA})
 TT_REQUEST_COUNT = [0, {}]       # [总请求数, {host: 次数}] — 预算审计用，ttfund_get 自增
 
-# ── F1：跨进程节流锁（fcntl + 磁盘时间戳）─────────────────────────────
+# ── F1：跨进程节流锁（文件锁 + 磁盘时间戳）───────────────────────────
 # 原实现的时间戳在进程内存里——licai-map 服务、AI 会话、手跑脚本各持一份限流器，
 # 合并速率 = 进程数 × 0.67req/s，双进程批量即可越 300req/5min 封禁线（审计 F1）。
 # 现改为磁盘时间戳 + 文件锁：同机所有进程强制串行，锁等待自动吸收间隔。
-try:
-    import fcntl  # macOS/Linux；Windows 缺此模块时降级为进程内节流
-except ImportError:
-    fcntl = None
+# 锁经 fund_data_core.locks 抽象层（能力检测选机制，全平台同一语义，
+# 与 flock 时代一致不再有平台静默降级——多进程限流保证不分操作系统）。
 
 _CBREAK_COOLDOWN = 600           # F2：熔断冷却 10 分钟
 _CBREAK_TRIP = 3                 # 连续 3 次风控信号触发熔断
@@ -293,6 +298,7 @@ from fund_data_core import CachePolicy, CacheRepository, StaleDataError
 from fund_data_core.cache_policies import FUND_LIST_TTL_SECONDS
 from fund_data_core.errors import (CircuitOpenError, LeaseError,
                                    RiskControlError)
+from fund_data_core.locks import file_lock
 
 FUND_LIST_TTL_DAYS = FUND_LIST_TTL_SECONDS // 86400   # 单一来源：core 常量派生（30 天）
 
@@ -440,31 +446,28 @@ def _cbreak_file(line: str) -> Path:
 
 
 def _cross_proc_throttle(line: str, min_interval: float):
-    """F1 跨进程节流：flock 抢锁 → 读磁盘时间戳 → 睡足间隔 → 写回 → 放锁。
+    """F1 跨进程节流：文件锁抢锁 → 读磁盘时间戳 → 睡足间隔 → 写回 → 放锁。
 
     时间戳语义=放行时刻（非请求完成时刻）：慢响应下相邻请求**发起**间隔恒 ≥interval
     （V0.3.0 是间隔+响应耗时，本版略松但仍在设计线内，见 ttfund_get docstring）。
+    锁文件与时间戳文件分离（与 core 的 state/cache 同格局）：旧版时间戳写在锁文件
+    本体里，升级后原文件继续作为时间戳载体无缝衔接，锁改为旁挂 .lock 兄弟文件。
     """
-    if fcntl is None:                                 # Windows 降级：进程内保守节流
-        time.sleep(min_interval * random.uniform(0.8, 1.2))
-        return
-    lock_path = _throttle_file(line)
+    ts_path = _throttle_file(line)
+    lock_path = Path(str(ts_path) + ".lock")
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        open(lock_path, "a").close()                   # O_CREAT 原子首建，绝不截断已有内容
-        with open(lock_path, "r+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        with file_lock(lock_path):
+            ts_path.touch(exist_ok=True)               # O_CREAT 原子首建，绝不截断已有内容
             try:
-                last = float(f.read().strip() or 0)
+                last = float(ts_path.read_text().strip() or 0)
             except ValueError:
                 last = 0.0
             now = time.time()                          # 拿锁后再取样（排队时长不计入间隔）
             wait = min_interval - (now - last)
             if wait > 0:
                 time.sleep(wait + random.uniform(0.05, 0.3))
-            f.seek(0)
-            f.truncate()
-            f.write(f"{time.time():.6f}")
+            ts_path.write_text(f"{time.time():.6f}")
     except OSError:
         # 锁文件异常 → 降级进程内保守节流（保持可用性优先）
         time.sleep(min_interval * random.uniform(0.8, 1.2))

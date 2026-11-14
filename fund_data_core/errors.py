@@ -40,3 +40,20 @@ class CoordinatorStateError(RiskControlError):
 
 class LeaseError(RuntimeError):
     """许可不存在、已过期、已取消或生命周期操作顺序错误。"""
+
+
+class LockBackendError(RuntimeError):
+    """无可用文件锁后端（flock 与字节范围锁机制均不可用）；fail-closed。"""
+
+
+class LockTimeoutError(RuntimeError):
+    """在 timeout 期限内未取得文件锁。
+
+    仅对「有界后端」（acquire 自身会放弃）生效；无界后端（如 flock）
+    阻塞在系统调用内，deadline 只在两次 acquire 之间检查。
+    """
+
+    def __init__(self, message, path=None, timeout=None):
+        super().__init__(message)
+        self.path = path
+        self.timeout = timeout

@@ -8,6 +8,8 @@ from hashlib import sha256
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Callable, Optional
 
+from .locks import drop_extended_prefix
+
 
 SNAPSHOT_SCHEMA_VERSION = "1"
 SNAPSHOT_TTL_SECONDS = 20 * 60 * 60
@@ -179,13 +181,21 @@ def safe_cache_path(root: str | Path, key: str) -> Path:
     if not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
         raise ValueError("cache key contains an unsafe path component")
 
-    root_path = Path(root).expanduser().resolve(strict=False)
+    root_path = drop_extended_prefix(
+        str(Path(root).expanduser().resolve(strict=False)))
     try:
-        candidate = root_path.joinpath(*relative.parts).resolve(strict=False)
-        candidate.relative_to(root_path)
-    except (ValueError, RuntimeError, OSError) as exc:
+        candidate = Path(root_path).joinpath(*relative.parts).resolve(strict=False)
+    except (RuntimeError, OSError) as exc:
+        # IO/解析瞬态（如并发创建目录时的瞬时失败）≠ 路径逃逸：分开上报，
+        # 不许伪装成安全拦截（曾致多进程冷启动偶发误报 escapes）。
+        raise ValueError(f"cache path resolve 失败: {key!r} ({exc})") from exc
+    try:
+        Path(drop_extended_prefix(str(candidate))).relative_to(Path(root_path))
+    except ValueError as exc:
         raise ValueError(f"cache key escapes cache root: {key!r}") from exc
-    return candidate
+    # 返回剥前缀形态（跨调用可比、可作字典键）；>260 字符的缓存根会因此
+    # 失去扩展前缀保护——缓存根勿深埋（README 平台支持节已声明该边界）。
+    return Path(drop_extended_prefix(str(candidate)))
 
 
 def sharded_key_path(

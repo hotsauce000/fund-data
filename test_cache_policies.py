@@ -27,6 +27,16 @@ from fund_data_core.cache_policies import (
 )
 
 
+def _symlinks_supported() -> bool:
+    """能力探测：能否创建符号链接（部分环境需要提权/开发者模式才可建）。"""
+    with tempfile.TemporaryDirectory(prefix="symlink-probe-") as probe_dir:
+        try:
+            (Path(probe_dir) / "link").symlink_to(probe_dir, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            return False
+        return True
+
+
 class CachePolicyTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="fund-policy-test-")
@@ -216,6 +226,8 @@ class CachePolicyTest(unittest.TestCase):
                         lambda: (_ for _ in ()).throw(AssertionError("unsafe loader called")),
                     )
 
+    @unittest.skipUnless(_symlinks_supported(), "符号链接能力不可用（需提权/开发者模式）")
+    def test_symlink_escape_is_rejected(self):
         with tempfile.TemporaryDirectory(prefix="fund-cache-outside-") as outside:
             link = self.root / "linked"
             link.symlink_to(outside, target_is_directory=True)
