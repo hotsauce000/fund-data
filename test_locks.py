@@ -54,6 +54,23 @@ class DropExtendedPrefixTests(unittest.TestCase):
         self.assertEqual(drop_extended_prefix("\\\\server\\share"), "\\\\server\\share")
 
 
+def _extended_prefix_paths_supported() -> bool:
+    """能力探测：本环境的路径形态是否真的存在「扩展前缀」概念。
+
+    用 os.path.samefile 问操作系统本身——扩展前缀拼出的字符串只有在该
+    形态真实存在的环境里才与普通形态指向同一文件；否则视为不存在该
+    形态（如 POSIX 上反斜杠只是普通文件名字符，拼出的串是另一个路径）。
+    """
+    with tempfile.TemporaryDirectory(prefix="ext-probe-") as probe_dir:
+        plain = Path(probe_dir) / "x"
+        plain.touch()
+        extended = "\\\\?\\" + str(plain)
+        try:
+            return os.path.samefile(plain, extended)
+        except OSError:
+            return False
+
+
 class RegistryKeyTests(unittest.TestCase):
     def test_equivalent_spellings_share_key(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -63,6 +80,8 @@ class RegistryKeyTests(unittest.TestCase):
             self.assertEqual(_registry_key(Path(str(base / "x.lock"))),
                              _registry_key(base / "x.lock"))
 
+    @unittest.skipUnless(_extended_prefix_paths_supported(),
+                         "扩展前缀路径形态在本环境不存在")
     def test_extended_prefix_form_shares_key(self):
         with tempfile.TemporaryDirectory() as tmp:
             plain = str(Path(tmp) / "x.lock")

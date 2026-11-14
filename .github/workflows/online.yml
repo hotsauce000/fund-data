@@ -22,5 +22,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: 安装依赖（requests/pandas）
+        run: python -m pip install requests pandas
       - name: 在线全量（含离线 234 + 在线 70，打印四线请求账本）
         run: python test_fund_data.py --online

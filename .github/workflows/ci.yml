@@ -21,6 +21,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: 安装依赖（requests/pandas——core 包本身零依赖，主套件需要）
+        run: python -m pip install requests pandas
       - name: core suites（锁契约 + cache/策略/协调器/网关 + 平台硬编码守卫）
         run: python -m unittest test_locks test_no_platform_hardcoding test_cache test_cache_policies test_coordinator test_gateway
       - name: 主套件离线 234 条（零网络）
