@@ -17,6 +17,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import fund_data as fd
 
+# 输出编码加固：本套件打印 emoji/中文，传统 Windows 控制台默认 cp1252/gbk
+# 会 UnicodeEncodeError 崩溃（CI windows runner 实测）。errors="replace" 让
+# 不可编码字符降级为 ? 而非中断——断言结果永不因控制台编码而丢失。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, OSError):
+        pass  # 非 TextIO 或不可重配的流：维持原状
+
 # 全部离线测试（含后续 mock 的缓存写入）都隔离在临时目录，绝不碰真实用户缓存。
 _TEST_CACHE_TMP = tempfile.TemporaryDirectory(prefix="fund-data-offline-cache-")
 fd.FUND_CACHE_DIR = Path(_TEST_CACHE_TMP.name)
