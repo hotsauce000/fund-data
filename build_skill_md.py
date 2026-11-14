@@ -489,6 +489,7 @@ assert "IP 缓释桶" in ref_text                                          # P26
 assert 'rows.append({"date": p[0], "close": float(p[1]), "source": "push2his"})' in ref_text  # source 标注
 assert "_SH_INDEX_Q = ({v.split" in ref_text                            # 指数路由派生
 assert "P25" in ref_text
+assert "P27" in ref_text                                                 # V0.7.2 跨平台锁坑入册
 assert "def fund_manager(query: str, force_refresh: bool = False) -> dict:" in ref_text  # V0.6 内嵌同源
 assert all(p2 in ref_text for p2 in ("P22", "P23", "P24"))                     # 坑区 V0.6 齐全
 
@@ -512,7 +513,8 @@ if core_dst.exists():
     shutil.rmtree(core_dst)
 core_new.rename(core_dst)
 for _name in ("test_coordinator.py", "test_gateway.py",
-              "test_cache.py", "test_cache_policies.py"):
+              "test_cache.py", "test_cache_policies.py",
+              "test_locks.py", "test_no_platform_hardcoding.py"):   # V0.7.2 锁契约+平台守卫
     shutil.copy2(HERE / _name, SKILL_DIR / _name)
 print(f"OK: SKILL.md 路由层 {thin_bytes}B（token 下限粗估 ≈{thin_bytes // 3 // 1000}K）+ "
       f"reference.md {len(ref_text.encode('utf-8'))}B；函数速查 {len(_sig_rows())} 个全覆盖")
