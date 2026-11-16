@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-fund-data V0.7.3 分层测试运行器（按测试计划 V1.0）
+fund-data V0.7.4 分层测试运行器（按测试计划 V1.0）
   L1 单元（零网络）· L2 端点 smoke（结构断言）· L3 交叉验证（三源互证）
   L4 请求预算审计 · L5 降级演练与坑回归 · L6 穿透层（确定性/降级/路由/清洗）
 用法: python3 test_fund_data.py [--offline-only | --online]（默认离线）

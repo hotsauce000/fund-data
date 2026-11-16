@@ -5,6 +5,9 @@
   防封铁律 + 场景路由表 + 失效/备源路由表 + 函数签名速查（ast 从模块自动抽取）
 产物二 reference.md（全量参考）：按需读取——完整内嵌代码（与源码同源直拼）
   + P1~P18 完整坑区 + 端点路由 + 使用示例 + 版本记录
+产物三 examples.md（菜谱+FAQ 层，V0.7.4）：按需读取——12 场景复制即用示例
+  + 按现象组织的 FAQ。手工维护（非自动生成），构建时同步到 skill 目录并
+  校验章节齐全（评测扣分项"示例与 FAQ 不集中"的对症层）。
 防漂移：签名表自动生成；构建时强校验（瘦身体积上限 + 签名覆盖全部公开函数）。
 """
 import ast
@@ -56,7 +59,7 @@ def _sig_rows() -> list:
     return rows
 
 
-VERSION = "0.7.3"
+VERSION = "0.7.4"
 DESCRIPTION = (
     "写代码实际获取基金领域底层数据时使用——零key零登录，八层能力："
     "【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:"
@@ -97,7 +100,7 @@ version: {VERSION}
 
 # fund-data 路由层 V{VERSION}
 
-本文件是**路由层**（≈4K token，激活只加载本文件）。细节/坑区/内嵌代码在同目录 **reference.md（按需读取）**；运行代码 `fund_data.py`（import 用，勿通读）：
+本文件是**路由层**（≈4K token，激活只加载本文件）。细节/坑区/内嵌代码在同目录 **reference.md（按需读取）**；复制即用示例与 FAQ 在 **examples.md（按需读取）**；运行代码 `fund_data.py`（import 用，勿通读）：
 
 ```python
 import sys
@@ -164,7 +167,8 @@ THIN.append("""## When to Activate
 
 ## 深读与边界（按需）
 
-- 实现细节/坑区 P1~P26/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
+- 复制即用示例（12 场景菜谱）+ 按现象查 FAQ → 同目录 `examples.md`（写调用代码/排错前读）
+- 实现细节/坑区 P1~P27/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
 - 不覆盖：账户持仓/交易下单（ttskill）、盘中实时估值、货基万份收益、单基金行业史（E2停供）、语义选基、FOF底层明细与经理姓名索引（P23/P24）
 - 个股深度 → a-stock-data；holding_map() 是官方桥
 """)
@@ -182,9 +186,14 @@ REF.append(f"""# fund-data 完整参考（reference.md · 按需读取层）V{VE
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 """)
 
-REF.append(r"""# fund-data 基金底层数据工具包 V0.7.3 模块全档
+REF.append(r"""# fund-data 基金底层数据工具包 V0.7.4 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复：264/264 离线断言通过**（L1 单元 228 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11 须显式 `--online`），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复 + V0.7.4 文档三层：264/264 离线断言通过**（L1 单元 228 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11 须显式 `--online`），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）、`examples.md`（菜谱+FAQ 层）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.7.4 文档三层（examples.md 菜谱+FAQ 层）：**
+- 🟢 **第三产物 examples.md**：12 场景复制即用菜谱（意图+代码+输出形态+坑提醒四件套）+ 16 条按现象组织的 FAQ（坑号深链 reference.md）——对症分发平台评测扣分项「示例与 FAQ 不集中、要翻较长文档」
+- 🟢 **构建管线接入**：build_skill_md.py 同步第三产物并断言（逐场景锚点带「 ·」防 1 被 10 子串掩盖；版本号双向防漂移——bump 忘改 examples.md 头部版本必炸构建）；SKILL.md 路由层两处指路（intro 行 + 深读区）
+- ⚪ 零代码行为变更（仅版本号 bump；快照缓存按版本失效一次属预期，每基金重取 1 请求）
 
 **V0.7.3 审查修复（证券身份、收益口径与缓存一致性）：**
 - 🔴 **同码股票/指数分流**：腾讯路由默认按股票，指数须显式上下文或前缀——修 000016 等深股被静默导到沪指的问题
@@ -499,9 +508,19 @@ assert "P27" in ref_text                                                 # V0.7.
 assert "def fund_manager(query: str, force_refresh: bool = False) -> dict:" in ref_text  # V0.6 内嵌同源
 assert all(p2 in ref_text for p2 in ("P22", "P23", "P24"))                     # 坑区 V0.6 齐全
 
+# 产物三 examples.md（手工维护）：校验章节齐全后原样同步到 skill 目录
+examples_src = HERE / "examples.md"
+examples_text = examples_src.read_text(encoding="utf-8")
+assert "## 环境准备" in examples_text, "examples.md 缺「环境准备」章节"
+for _i in range(1, 13):                                # 逐场景断言：任一场景被删即拦住（锚点带" ·"防 1 被 10 子串掩盖）
+    assert f"## 场景 {_i} ·" in examples_text, f"examples.md 缺「场景 {_i}」"
+assert "# FAQ" in examples_text, "examples.md 缺 FAQ 区"
+assert f"V{VERSION}" in examples_text, f"examples.md 版本号未对齐 V{VERSION}"
+
 for dest in (SKILL_DIR, HERE):
     (dest / "SKILL.md").write_text(thin_text, encoding="utf-8")
     (dest / "reference.md").write_text(ref_text, encoding="utf-8")
+(SKILL_DIR / "examples.md").write_text(examples_text, encoding="utf-8")
 (SKILL_DIR / "fund_data.py").write_text(SRC, encoding="utf-8")
 (SKILL_DIR / "test_fund_data.py").write_text(
     (HERE / "test_fund_data.py").read_text(encoding="utf-8"), encoding="utf-8")
@@ -523,4 +542,5 @@ for _name in ("test_coordinator.py", "test_gateway.py",
               "test_locks.py", "test_no_platform_hardcoding.py"):   # V0.7.2 锁契约+平台守卫
     shutil.copy2(HERE / _name, SKILL_DIR / _name)
 print(f"OK: SKILL.md 路由层 {thin_bytes}B（token 下限粗估 ≈{thin_bytes // 3 // 1000}K）+ "
-      f"reference.md {len(ref_text.encode('utf-8'))}B；函数速查 {len(_sig_rows())} 个全覆盖")
+      f"reference.md {len(ref_text.encode('utf-8'))}B + "
+      f"examples.md {len(examples_text.encode('utf-8'))}B；函数速查 {len(_sig_rows())} 个全覆盖")

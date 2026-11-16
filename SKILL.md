@@ -9,12 +9,12 @@ description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集�
 description_en: The full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), plain-language holdings maps, 24,792-fund market rankings, manager profiles and crowding, 10-year index klines, 53-period scale history. Zero keys, zero login, layered assertions green. The ground every fund application builds on.
 author: hotsauce000
 origin: custom
-version: 0.7.3
+version: 0.7.4
 ---
 
-# fund-data 路由层 V0.7.3
+# fund-data 路由层 V0.7.4
 
-本文件是**路由层**（≈4K token，激活只加载本文件）。细节/坑区/内嵌代码在同目录 **reference.md（按需读取）**；运行代码 `fund_data.py`（import 用，勿通读）：
+本文件是**路由层**（≈4K token，激活只加载本文件）。细节/坑区/内嵌代码在同目录 **reference.md（按需读取）**；复制即用示例与 FAQ 在 **examples.md（按需读取）**；运行代码 `fund_data.py`（import 用，勿通读）：
 
 ```python
 import sys
@@ -124,6 +124,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 
 ## 深读与边界（按需）
 
-- 实现细节/坑区 P1~P26/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
+- 复制即用示例（12 场景菜谱）+ 按现象查 FAQ → 同目录 `examples.md`（写调用代码/排错前读）
+- 实现细节/坑区 P1~P27/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
 - 不覆盖：账户持仓/交易下单（ttskill）、盘中实时估值、货基万份收益、单基金行业史（E2停供）、语义选基、FOF底层明细与经理姓名索引（P23/P24）
 - 个股深度 → a-stock-data；holding_map() 是官方桥

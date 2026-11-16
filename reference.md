@@ -1,13 +1,18 @@
-# fund-data 完整参考（reference.md · 按需读取层）V0.7.3
+# fund-data 完整参考（reference.md · 按需读取层）V0.7.4
 
 > 本文件按需读取：调试 / 扩展 / 排查坑时才打开，勿随 skill 激活预加载。
 > 路由与签名速查见 SKILL.md；本文件内嵌代码与 fund_data.py 同源直拼（构建时生成）。
 
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 
-# fund-data 基金底层数据工具包 V0.7.3 模块全档
+# fund-data 基金底层数据工具包 V0.7.4 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复：264/264 离线断言通过**（L1 单元 228 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11 须显式 `--online`），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复 + V0.7.4 文档三层：264/264 离线断言通过**（L1 单元 228 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11 须显式 `--online`），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）、`examples.md`（菜谱+FAQ 层）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.7.4 文档三层（examples.md 菜谱+FAQ 层）：**
+- 🟢 **第三产物 examples.md**：12 场景复制即用菜谱（意图+代码+输出形态+坑提醒四件套）+ 16 条按现象组织的 FAQ（坑号深链 reference.md）——对症分发平台评测扣分项「示例与 FAQ 不集中、要翻较长文档」
+- 🟢 **构建管线接入**：build_skill_md.py 同步第三产物并断言（逐场景锚点带「 ·」防 1 被 10 子串掩盖；版本号双向防漂移——bump 忘改 examples.md 头部版本必炸构建）；SKILL.md 路由层两处指路（intro 行 + 深读区）
+- ⚪ 零代码行为变更（仅版本号 bump；快照缓存按版本失效一次属预期，每基金重取 1 请求）
 
 **V0.7.3 审查修复（证券身份、收益口径与缓存一致性）：**
 - 🔴 **同码股票/指数分流**：腾讯路由默认按股票，指数须显式上下文或前缀——修 000016 等深股被静默导到沪指的问题
@@ -210,7 +215,7 @@ pip install requests
 ```python
 # -*- coding: utf-8 -*-
 """
-fund-data V0.7.3 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层）
+fund-data V0.7.4 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤2 请求（1×pingzhongdata，0~1×lsjz）
@@ -269,7 +274,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.7.3"
+__version__ = "0.7.4"
 
 
 FUND_CACHE_DIR = Path.home() / ".fund_data_cache"
