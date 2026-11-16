@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-fund-data V0.2 分层测试运行器（按测试计划 V1.0）
+fund-data V0.7.3 分层测试运行器（按测试计划 V1.0）
   L1 单元（零网络）· L2 端点 smoke（结构断言）· L3 交叉验证（三源互证）
   L4 请求预算审计 · L5 降级演练与坑回归 · L6 穿透层（确定性/降级/路由/清洗）
 用法: python3 test_fund_data.py [--offline-only | --online]（默认离线）
@@ -191,8 +191,8 @@ def test_l1_offline():
 
     # ── L6 穿透层单元（零网络）：路由 / 标签清洗 / 注入拦截 ──
     cases = {"920982": "bj920982", "832982": "bj832982", "430047": "bj430047",
-             "600519": "sh600519", "000858": "sz000858", "000300": "sh000300",
-             "204007": "sh204007"}                       # 沪市回购 GC 族（repo_rate_gc 依赖）
+             "600519": "sh600519", "000858": "sz000858", "000300": "sz000300",
+             "204007": "sh204007"}                       # 默认均为股票上下文；指数另测 kind="index"
     check("L1", "穿透-腾讯前缀路由(92段先于9x+204回购)",
           all(fd._tencent_prefix(k) == v for k, v in cases.items()),
           " ".join(f"{k}→{fd._tencent_prefix(k)}" for k in cases))
@@ -1111,7 +1111,8 @@ def test_l1_offline():
             {"period": "2026-09-30", "stock_code": "600519", "stock_name": "贵州茅台", "nav_pct": 8.04},
             {"period": "2026-09-30", "stock_code": "00700", "stock_name": "腾讯控股", "nav_pct": 3.0}]
         fd._tencent_kline = lambda c, bars=90, force_refresh=False: [
-            {"date": "2026-10-08", "close": 100.0}, {"date": "2026-10-31", "close": 108.0}]
+            {"date": "2026-09-25", "close": 100.0},
+            {"date": "2026-10-08", "close": 103.0}, {"date": "2026-10-31", "close": 108.0}]
         nd = fd.nav_divergence("161725")
         # 基点=报告期前最后净值1.0→基金 1.05/1.00-1=5.0%；重仓 108/100-1=8%×权重8.04%
         # →加权0.64%；背离=5.0-0.64=+4.36pp（≤5 → 持仓一致）
@@ -1328,18 +1329,16 @@ def test_l1_offline():
           and fd._kline_resolve("399006") == ("index", "0.399006"),
           "前缀保留市场信息+值域回index+399深指号段")
 
-    # ── V0.7.1 tencent_quote 指数路由派生锁（_SH_INDEX_Q 从 BENCH_SECID 派生）──
-    # 旧手工集合漏 000922/000906/000015/000510/000985——裸码曾被误路由 sz 深股
-    # （sh000016 同族静默错数据）；派生后单一事实源，加指数不再漂移
+    # ── 指数路由派生锁：只有显式指数上下文才查询 _SH_INDEX_Q ──
     check("L1", "路由-中证沪指码派生覆盖",
-          fd._tencent_prefix("000922") == "sh000922"
-          and fd._tencent_prefix("000906") == "sh000906"
-          and fd._tencent_prefix("000015") == "sh000015"
-          and fd._tencent_prefix("000510") == "sh000510"
-          and fd._tencent_prefix("000985") == "sh000985"
-          and fd._tencent_prefix("000300") == "sh000300"
-          and fd._tencent_prefix("000010") == "sh000010",
-          "5 个此前误路由码全部回沪（历史成员 000010 保留）")
+          fd._tencent_prefix("000922", kind="index") == "sh000922"
+          and fd._tencent_prefix("000906", kind="index") == "sh000906"
+          and fd._tencent_prefix("000015", kind="index") == "sh000015"
+          and fd._tencent_prefix("000510", kind="index") == "sh000510"
+          and fd._tencent_prefix("000985", kind="index") == "sh000985"
+          and fd._tencent_prefix("000300", kind="index") == "sh000300"
+          and fd._tencent_prefix("000010", kind="index") == "sh000010",
+          "显式指数上下文全部回沪（历史成员 000010 保留）")
     check("L1", "路由-股票码不受派生影响",
           fd._tencent_prefix("000001") == "sz000001"
           and fd._tencent_prefix("600519") == "sh600519"
@@ -1786,6 +1785,451 @@ def test_l1_offline():
         fd._FUND_LIST_MEM[:] = _mem_backup          # mock 清单不得残留进程内存
         fd._CACHE_REPO = _repo_backup11
         _tmp11.cleanup()
+
+    # ── V0.7.3 审查修复回归：先钉住静默错数据与口径错位 ──
+    check("L1", "审查修复-同码股票默认走深市而非沪指",
+          fd._tencent_prefix("000016") == "sz000016"
+          and fd._tencent_prefix("000510") == "sz000510")
+
+    _orig_review = (fd.fund_snapshot, fd.fund_holdings, fd._tencent_kline)
+    _refresh_calls = []
+    try:
+        _review_snap = {"_meta": {"code": "161725"}, "name": "离线样本", "nav_history": [
+            {"date": "2026-09-30", "nav": 1.0, "daily_return": 0.0},
+            {"date": "2026-10-01", "nav": 1.1, "daily_return": 10.0},
+            {"date": "2026-10-02", "nav": 1.21, "daily_return": 10.0}]}
+        fd.fund_snapshot = lambda q, **k: _refresh_calls.append(("snapshot", k)) or _review_snap
+        fd.fund_holdings = lambda q, **k: _refresh_calls.append(("holdings", k)) or [
+            {"period": "2026-09-30", "stock_code": "600519", "stock_name": "样本股", "nav_pct": 100.0}]
+        fd._tencent_kline = lambda *a, **k: _refresh_calls.append(("kline", k)) or [
+            {"date": "2026-09-30", "close": 100.0},
+            {"date": "2026-10-01", "close": 110.0},
+            {"date": "2026-10-02", "close": 121.0}]
+        _review_nd = fd.nav_divergence("161725", force_refresh=True)
+        check("L1", "审查修复-重仓探测同走势零背离",
+              _review_nd["fund_return_pct"] == 21.0
+              and _review_nd["holdings_weighted_return_pct"] == 21.0
+              and _review_nd["divergence_pp"] == 0.0,
+              f"基金{_review_nd['fund_return_pct']}% 股票{_review_nd['holdings_weighted_return_pct']}%")
+        check("L1", "审查修复-重仓探测强制刷新全链路",
+              len(_refresh_calls) == 3
+              and all(kw.get("force_refresh") is True for _, kw in _refresh_calls),
+              str(_refresh_calls))
+    finally:
+        fd.fund_snapshot, fd.fund_holdings, fd._tencent_kline = _orig_review
+
+    _review_relative = fd.relative_performance({
+        "nav_history": [
+            {"date": "2026-01-02", "nav": 1.0, "daily_return": 0.0},
+            {"date": "2026-01-03", "nav": 1.1, "daily_return": 10.0}],
+        "benchmark_curves": [{"name": "沪深300", "points": [
+            {"date": "2026-01-01", "return_pct": 0.0},
+            {"date": "2026-01-02", "return_pct": 10.0},
+            {"date": "2026-01-03", "return_pct": 21.0}]}]}, min_overlap=1)
+    check("L1", "审查修复-相对表现共同窗口",
+          _review_relative["fund_return_pct"] == 10.0
+          and _review_relative["benchmark_return_pct"] == 10.0
+          and _review_relative["relative_return_pct"] == 0.0
+          and _review_relative["window"]["start"] == "2026-01-02",
+          str(_review_relative))
+
+    class _ReviewResp:
+        status_code = 200
+        def __init__(self, text="", payload=None):
+            self.text = text
+            self.content = text.encode("utf-8")
+            self._payload = payload
+        def raise_for_status(self):
+            return None
+        def json(self):
+            return self._payload
+
+    _orig_snapshot_review = (fd.fund_list, fd.ttfund_get, fd._cache_read,
+                             fd._cache_write, fd._cbreak_success)
+    try:
+        fd.fund_list = lambda **k: [{"code": "161725", "name": "测试基金",
+                                     "type": "混合型", "pinyin": "cs"}]
+        _bad_tables = (
+            'var fS_name="测试基金";var fS_code="161725";var ishb=0;'
+            'var Data_netWorthTrend=[{"x":1767225600000,"y":1.0,"equityReturn":"0"}];'
+            'var Data_assetAllocation={"unexpected":true};'
+            'var Data_holderStructure=[["只有表头"]];'
+            'var Data_industryAllocation={"categories":[],"series":[{"data":"bad"}]};')
+        fd.ttfund_get = lambda *a, **k: _ReviewResp(_bad_tables)
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda *a, **k: None
+        fd._cbreak_success = lambda *a: None
+        _bad_snap = fd.fund_snapshot("161725")
+        check("L1", "审查修复-快照全部表格解析失败均入missing",
+              all(any(x.startswith(key) for x in _bad_snap["missing_datasets"])
+                  for key in ("Data_assetAllocation", "Data_holderStructure",
+                              "Data_industryAllocation")),
+              str(_bad_snap["missing_datasets"]))
+    finally:
+        (fd.fund_list, fd.ttfund_get, fd._cache_read,
+         fd._cache_write, fd._cbreak_success) = _orig_snapshot_review
+
+    _orig_e6_review = (fd.resolve_fund_code, fd.ttfund_get, fd._cbreak_success)
+    try:
+        fd.resolve_fund_code = lambda c: c
+        fd._cbreak_success = lambda *a: None
+        fd.ttfund_get = lambda *a, **k: _ReviewResp(payload={"Datas": [
+            {"FCODE": "000001", "NAV": "1.0"}]})
+        try:
+            _dedup = fd.fund_realtime_nav(["000001", "000001"])
+            _dedup_ok = len(_dedup) == 1 and _dedup[0]["code"] == "000001"
+        except RuntimeError:
+            _dedup_ok = False
+        check("L1", "审查修复-批量净值重复输入去重", _dedup_ok)
+        fd.ttfund_get = lambda *a, **k: _ReviewResp(payload={"Datas": [
+            {"FCODE": "110022", "NAV": "1.0"}]})
+        expect_raise("L1", "审查修复-批量净值拒绝意外代码",
+                     lambda: fd.fund_realtime_nav(["000001"]), "意外代码")
+        fd.ttfund_get = lambda *a, **k: _ReviewResp(payload={"Datas": [
+            {"FCODE": "000001", "NAV": "1.0"},
+            {"FCODE": "000001", "NAV": "1.0"}]})
+        expect_raise("L1", "审查修复-批量净值拒绝重复响应",
+                     lambda: fd.fund_realtime_nav(["000001"]), "重复代码")
+    finally:
+        fd.resolve_fund_code, fd.ttfund_get, fd._cbreak_success = _orig_e6_review
+
+    _orig_quarter_review = (fd._cninfo_post, fd._cache_read, fd._cache_write,
+                            fd._cbreak_success)
+    try:
+        _ttl_seen = []
+        fd._cache_read = lambda rel, max_age_hours=None: _ttl_seen.append(
+            (rel, max_age_hours)) and None
+        fd._cache_write = lambda *a, **k: None
+        fd._cbreak_success = lambda *a: None
+        fd._cninfo_post = lambda *a, **k: [
+            {"SECCODE": f"{i:06d}", "SECNAME": f"股票{i}", "F001N": 1,
+             "F002N": 1, "F003N": 1, "ENDDATE": "2026-09-30"} for i in range(100)]
+        _latest_rd = fd._latest_quarter_end().replace("-", "")
+        fd.fund_crowding(_latest_rd)
+        fd.fund_crowding("20200930")
+        check("L1", "审查修复-披露期短缓存稳定历史季末长缓存",
+              _ttl_seen[0][1] == 1 and _ttl_seen[1][1] == 90 * 24,
+              str(_ttl_seen))
+    finally:
+        (fd._cninfo_post, fd._cache_read, fd._cache_write,
+         fd._cbreak_success) = _orig_quarter_review
+
+    _orig_fee_review = (fd.ttfund_get, fd._cache_read, fd._cache_write,
+                        fd._cbreak_success)
+    try:
+        fd._cache_read = lambda *a, **k: None
+        _fee_writes = []
+        fd._cache_write = lambda rel, payload: _fee_writes.append(rel)
+        fd._cbreak_success = lambda *a: None
+        fd.ttfund_get = lambda *a, **k: _ReviewResp(
+            'var datas:[["000001","零费基金","公司","80000000","混合型",'
+            '"2026-01-01","0%",""]],record:1,pages:1,curpage:1')
+        _zero_fee = fd.fund_new_issues(force_refresh=True)
+        check("L1", "审查修复-新发零费率保留且缓存升级",
+              _zero_fee[0]["fee_pct"] == 0.0 and _fee_writes == ["new_issues_v2.json"],
+              f"fee={_zero_fee[0]['fee_pct']} cache={_fee_writes}")
+    finally:
+        (fd.ttfund_get, fd._cache_read, fd._cache_write,
+         fd._cbreak_success) = _orig_fee_review
+
+    _orig_dj_review = (fd.resolve_fund_code, fd.ttfund_get)
+    _old_cache_dir_review = fd.FUND_CACHE_DIR
+    try:
+        fd.resolve_fund_code = lambda c: c
+        fd.ttfund_get = lambda *a, **k: _ReviewResp(payload={"data": {
+            "fd_code": "000001", "fd_name": "样本基金"}})
+        with tempfile.TemporaryDirectory(prefix="fund-danjuan-review-") as _dj_tmp:
+            fd.FUND_CACHE_DIR = Path(_dj_tmp)
+            _dj_coord = fd._reset_request_coordination(policies=_ZERO_POLICY)
+            _dj_coord.signal_risk("danjuan", "review")
+            _dj_coord.signal_risk("eastmoney", "review")
+            fd.fund_detail_danjuan("000001")
+            check("L1", "审查修复-蛋卷成功仅清蛋卷风控",
+                  _dj_coord.snapshot("danjuan")["consecutive_risk"] == 0
+                  and _dj_coord.snapshot("eastmoney")["consecutive_risk"] == 1)
+        check("L1", "审查修复-蛋卷风控文案标签", fd._line_label("danjuan") == "蛋卷")
+    finally:
+        fd.resolve_fund_code, fd.ttfund_get = _orig_dj_review
+        fd.FUND_CACHE_DIR = _old_cache_dir_review
+        _fresh_coordination()
+
+    # ── V0.7.3 边界补测：分块、合法空值与半开状态隔离 ──
+    _orig_batch_edges = (fd.resolve_fund_code, fd.ttfund_get, fd._cbreak_success,
+                         fd.tencent_quote, fd.fund_realtime_nav)
+    try:
+        fd.resolve_fund_code = lambda c: c
+        fd._cbreak_success = lambda *a: None
+        _chunks = []
+        def _bulk_resp(url, params=None, **k):
+            codes = params["FCodes"].split(",")
+            _chunks.append(codes)
+            return _ReviewResp(payload={"Datas": [
+                {"FCODE": c, "NAV": "1.0"} for c in reversed(codes)]})
+        fd.ttfund_get = _bulk_resp
+        _bulk = fd.fund_realtime_nav([f"{i:06d}" for i in range(51)])
+        check("L1", "审查修复-批量净值51只分块且保持输入序",
+              len(_bulk) == 51 and [len(x) for x in _chunks] == [50, 1]
+              and [x["code"] for x in _bulk] == [f"{i:06d}" for i in range(51)])
+        _qdii_calls = []
+        fd.tencent_quote = lambda codes: _qdii_calls.append(("quote", codes)) or {
+            c: {"name": "纳指ETF", "price": 2.0} for c in codes}
+        fd.fund_realtime_nav = lambda codes: _qdii_calls.append(("nav", codes)) or [
+            {"code": c, "name": "纳指ETF", "nav": 1.0, "nav_date": "2026-01-01"}
+            for c in codes]
+        _qdii_dedup = fd.qdii_premium(["513100", "513100"])
+        check("L1", "审查修复-QDII重复输入去重",
+              len(_qdii_dedup) == 1 and _qdii_calls == [
+                  ("quote", ["513100"]), ("nav", ["513100"])])
+    finally:
+        (fd.resolve_fund_code, fd.ttfund_get, fd._cbreak_success,
+         fd.tencent_quote, fd.fund_realtime_nav) = _orig_batch_edges
+
+    _orig_empty_snap = (fd.fund_list, fd.ttfund_get, fd._cache_read,
+                        fd._cache_write, fd._cbreak_success)
+    try:
+        fd.fund_list = lambda **k: [{"code": "161725", "name": "测试基金",
+                                     "type": "混合型", "pinyin": "cs"}]
+        fd.ttfund_get = lambda *a, **k: _ReviewResp(
+            'var fS_name="测试基金";var ishb=0;'
+            'var Data_netWorthTrend=[{"x":1767225600000,"y":1.0}];'
+            'var Data_assetAllocation=[];var Data_holderStructure=[];'
+            'var Data_industryAllocation=[];')
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda *a, **k: None
+        fd._cbreak_success = lambda *a: None
+        _empty_snap = fd.fund_snapshot("161725")
+        check("L1", "审查修复-合法空表不误标解析失败",
+              not any(x.endswith("(present,unparsed)")
+                      for x in _empty_snap["missing_datasets"]))
+    finally:
+        (fd.fund_list, fd.ttfund_get, fd._cache_read,
+         fd._cache_write, fd._cbreak_success) = _orig_empty_snap
+
+    _orig_force_quarter = (fd._cninfo_post, fd._cache_read, fd._cache_write,
+                           fd._cbreak_success)
+    try:
+        _force_reads = []
+        fd._cache_read = lambda *a, **k: _force_reads.append(1)
+        fd._cache_write = lambda *a, **k: None
+        fd._cbreak_success = lambda *a: None
+        fd._cninfo_post = lambda *a, **k: [
+            {"SECCODE": f"{i:06d}", "SECNAME": f"股票{i}", "F001N": 1,
+             "F002N": 1, "F003N": 1, "ENDDATE": "2026-09-30"} for i in range(100)]
+        fd.fund_crowding(force_refresh=True)
+        check("L1", "审查修复-季度强制刷新绕缓存", not _force_reads)
+    finally:
+        (fd._cninfo_post, fd._cache_read, fd._cache_write,
+         fd._cbreak_success) = _orig_force_quarter
+
+    _orig_empty_fee = (fd.ttfund_get, fd._cache_read, fd._cache_write,
+                       fd._cbreak_success)
+    try:
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda *a, **k: None
+        fd._cbreak_success = lambda *a: None
+        fd.ttfund_get = lambda *a, **k: _ReviewResp(
+            'var datas:[["000001","空费基金","公司","80000000","混合型",'
+            '"2026-01-01","",""]],record:1,pages:1,curpage:1')
+        check("L1", "审查修复-新发空费率仍为None",
+              fd.fund_new_issues(force_refresh=True)[0]["fee_pct"] is None)
+    finally:
+        (fd.ttfund_get, fd._cache_read, fd._cache_write,
+         fd._cbreak_success) = _orig_empty_fee
+
+    _orig_base_edge = (fd.fund_snapshot, fd.fund_holdings, fd._tencent_kline)
+    try:
+        fd.fund_snapshot = lambda *a, **k: {
+            "_meta": {"code": "161725"}, "name": "缺基点样本", "nav_history": [
+                {"date": "2026-09-30", "nav": 1.0},
+                {"date": "2026-10-01", "nav": 1.1}]}
+        fd.fund_holdings = lambda *a, **k: [
+            {"period": "2026-09-30", "stock_code": "600519", "nav_pct": 100.0}]
+        fd._tencent_kline = lambda *a, **k: [
+            {"date": "2026-10-01", "close": 100.0},
+            {"date": "2026-10-02", "close": 110.0}]
+        expect_raise("L1", "审查修复-重仓探测缺共同基点拒绝计算",
+                     lambda: fd.nav_divergence("161725"), "无一可取")
+    finally:
+        fd.fund_snapshot, fd.fund_holdings, fd._tencent_kline = _orig_base_edge
+
+    class _ReviewClock:
+        def __init__(self):
+            self.now = 1_000_000.0
+        def time(self):
+            return self.now
+        def sleep(self, seconds):
+            self.now += seconds
+
+    _orig_half_dj = (fd.resolve_fund_code, fd.ttfund_get)
+    _old_half_dir = fd.FUND_CACHE_DIR
+    try:
+        fd.resolve_fund_code = lambda c: c
+        fd.ttfund_get = lambda *a, **k: _ReviewResp(payload={"data": {
+            "fd_code": "000001", "fd_name": "样本基金"}})
+        with tempfile.TemporaryDirectory(prefix="fund-half-open-review-") as _half_tmp:
+            fd.FUND_CACHE_DIR = Path(_half_tmp)
+            _half_clock = _ReviewClock()
+            _half_coord = fd._reset_request_coordination(
+                clock=_half_clock, policies=_ZERO_POLICY)
+            for _ in range(3):
+                _half_coord.signal_risk("eastmoney", "review")
+                _half_coord.signal_risk("danjuan", "review")
+            _half_clock.now += 601
+            check("L1", "审查修复-半开前置状态",
+                  _half_coord.snapshot("eastmoney")["circuit"] == "HALF_OPEN"
+                  and _half_coord.snapshot("danjuan")["circuit"] == "HALF_OPEN")
+            fd.fund_detail_danjuan("000001")
+            check("L1", "审查修复-蛋卷成功不关东财半开",
+                  _half_coord.snapshot("eastmoney")["circuit"] == "HALF_OPEN")
+            check("L1", "审查修复-蛋卷半开成功恢复自身",
+                  _half_coord.snapshot("danjuan")["circuit"] == "CLOSED")
+    finally:
+        fd.resolve_fund_code, fd.ttfund_get = _orig_half_dj
+        fd.FUND_CACHE_DIR = _old_half_dir
+        _fresh_coordination()
+
+    # ── 独立复审回归：终点、季度切换与 legacy provider ──
+    _orig_end_edge = (fd.fund_snapshot, fd.fund_holdings, fd._tencent_kline)
+    try:
+        fd.fund_snapshot = lambda *a, **k: {
+            "_meta": {"code": "161725"}, "name": "缺终点样本", "nav_history": [
+                {"date": "2026-09-30", "nav": 1.0, "daily_return": 0.0},
+                {"date": "2026-10-01", "nav": 1.1, "daily_return": 10.0},
+                {"date": "2026-10-02", "nav": 1.21, "daily_return": 10.0}]}
+        fd.fund_holdings = lambda *a, **k: [
+            {"period": "2026-09-30", "stock_code": "600519", "nav_pct": 100.0}]
+        fd._tencent_kline = lambda *a, **k: [
+            {"date": "2026-09-30", "close": 100.0},
+            {"date": "2026-10-01", "close": 110.0}]
+        expect_raise("L1", "复审-重仓探测缺共同终点拒绝计算",
+                     lambda: fd.nav_divergence("161725"), "无一可取")
+    finally:
+        fd.fund_snapshot, fd.fund_holdings, fd._tencent_kline = _orig_end_edge
+
+    try:
+        _transition_ttl = [fd._quarter_cache_ttl_hours(previous, today=today)
+                           for previous, today in (
+                               ("20251231", date(2026, 3, 31)),
+                               ("20260331", date(2026, 6, 30)),
+                               ("20260630", date(2026, 9, 30)),
+                               ("20260930", date(2026, 12, 31)))]
+    except TypeError:
+        _transition_ttl = []
+    check("L1", "复审-季度切换上一季仍短缓存", _transition_ttl == [1, 1, 1, 1],
+          str(_transition_ttl))
+    expect_raise("L1", "复审-未来季末拒绝",
+                 lambda: fd._quarter_cache_ttl_hours("20261231", today=date(2026, 1, 1)),
+                 "未来")
+    _orig_future_post = fd._cninfo_post
+    try:
+        _future_calls = []
+        fd._cninfo_post = lambda *a, **k: _future_calls.append(1) or []
+        _future_blocked = 0
+        for _public_fn in (fd.fund_crowding, fd.fund_industry_allocation):
+            try:
+                _public_fn("20991231", force_refresh=True)
+            except ValueError as exc:
+                _future_blocked += "未来" in str(exc)
+        check("L1", "复审-公开函数强制刷新未来季末零请求",
+              _future_blocked == 2 and not _future_calls,
+              f"blocked={_future_blocked} transport={len(_future_calls)}")
+    finally:
+        fd._cninfo_post = _orig_future_post
+
+    _orig_malformed_e6 = (fd.resolve_fund_code, fd.ttfund_get, fd._cbreak_success)
+    try:
+        fd.resolve_fund_code = lambda c: c
+        fd._cbreak_success = lambda *a: None
+        fd.ttfund_get = lambda *a, **k: _ReviewResp(payload={"Datas": [
+            {"FCODE": "000001", "NAV": "1.0"}, {"NAV": "9.9"}]})
+        expect_raise("L1", "复审-批量净值拒绝畸形记录",
+                     lambda: fd.fund_realtime_nav(["000001"]), "畸形记录")
+    finally:
+        fd.resolve_fund_code, fd.ttfund_get, fd._cbreak_success = _orig_malformed_e6
+
+    _orig_echarts_empty = (fd.fund_list, fd.ttfund_get, fd._cache_read,
+                           fd._cache_write, fd._cbreak_success)
+    try:
+        fd.fund_list = lambda **k: [{"code": "161725", "name": "测试基金",
+                                     "type": "混合型", "pinyin": "cs"}]
+        fd.ttfund_get = lambda *a, **k: _ReviewResp(
+            'var fS_name="测试基金";var ishb=0;'
+            'var Data_netWorthTrend=[{"x":1767225600000,"y":1.0}];'
+            'var Data_assetAllocation={"categories":[],"series":[]};'
+            'var Data_holderStructure={"categories":[],"series":[]};'
+            'var Data_industryAllocation={"categories":[],"series":[]};')
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda *a, **k: None
+        fd._cbreak_success = lambda *a: None
+        _echarts_snap = fd.fund_snapshot("161725")
+        check("L1", "复审-ECharts合法空结构不误标",
+              not any(x.endswith("(present,unparsed)")
+                      for x in _echarts_snap["missing_datasets"]))
+    finally:
+        (fd.fund_list, fd.ttfund_get, fd._cache_read,
+         fd._cache_write, fd._cbreak_success) = _orig_echarts_empty
+
+    _orig_hold_force = (fd.fund_list, fd.ttfund_get, fd._cache_read, fd._cache_write)
+    try:
+        fd.fund_list = lambda **k: [{"code": "161725", "name": "测试基金",
+                                     "type": "混合型", "pinyin": "cs"}]
+        fd._cache_read = lambda *a, **k: [{"period": "old", "stock_code": "cached"}]
+        fd._cache_write = lambda *a, **k: None
+        fd.ttfund_get = lambda *a, **k: _jjcc_resp(_th_std, _row_std)
+        _forced_hold = fd.fund_holdings("161725", force_refresh=True)
+        check("L1", "复审-持仓自身强制刷新绕缓存",
+              _forced_hold[0]["stock_code"] == "600519"
+              and _forced_hold[0]["period"] == "2026-09-30")
+    finally:
+        fd.fund_list, fd.ttfund_get, fd._cache_read, fd._cache_write = _orig_hold_force
+
+    _orig_legacy = (fd.TT_SESSION.get, fd.resolve_fund_code, fd._cross_proc_throttle)
+    _old_legacy_dir = fd.FUND_CACHE_DIR
+    try:
+        fd._cross_proc_throttle = lambda *a, **k: None
+        with tempfile.TemporaryDirectory(prefix="fund-legacy-danjuan-") as _legacy_tmp:
+            fd.FUND_CACHE_DIR = Path(_legacy_tmp)
+            fd._reset_request_coordination(policies=_ZERO_POLICY)
+            fd._teardown_request_coordination()
+            _legacy_calls = []
+            def _legacy_forbidden(*a, **k):
+                _legacy_calls.append(1)
+                response = _ReviewResp("forbidden")
+                response.status_code = 403
+                return response
+            fd.TT_SESSION.get = _legacy_forbidden
+            for _ in range(3):
+                try:
+                    _legacy_resp = fd.ttfund_get("https://danjuanfunds.com/djapi/fund/000001")
+                    fd.assert_not_risk_control(_legacy_resp, "danjuan", "legacy")
+                except fd.RiskControlError:
+                    pass
+            _legacy_resp = None
+            try:
+                _legacy_resp = fd.ttfund_get("https://danjuanfunds.com/djapi/fund/000001")
+                fd.assert_not_risk_control(_legacy_resp, "danjuan", "legacy")
+                _legacy_blocked = False
+            except fd.CircuitOpenError:
+                _legacy_blocked = True
+            except fd.RiskControlError:
+                _legacy_blocked = False
+            check("L1", "复审-legacy蛋卷第四次零transport",
+                  _legacy_blocked and len(_legacy_calls) == 3,
+                  f"transport={len(_legacy_calls)}")
+        with tempfile.TemporaryDirectory(prefix="fund-legacy-lines-") as _legacy_tmp2:
+            fd.FUND_CACHE_DIR = Path(_legacy_tmp2)
+            fd._reset_request_coordination(policies=_ZERO_POLICY)
+            fd._teardown_request_coordination()
+            fd.resolve_fund_code = lambda c: c
+            fd.TT_SESSION.get = lambda *a, **k: _ReviewResp(payload={"data": {
+                "fd_code": "000001", "fd_name": "样本基金"}})
+            fd._cbreak_signal("tt", "seed")
+            fd.fund_detail_danjuan("000001")
+            check("L1", "复审-legacy蛋卷成功不清东财", fd._cbreak_state["tt"][0] == 1)
+    finally:
+        fd.TT_SESSION.get, fd.resolve_fund_code, fd._cross_proc_throttle = _orig_legacy
+        fd.FUND_CACHE_DIR = _old_legacy_dir
+        _fresh_coordination()
 
 
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════

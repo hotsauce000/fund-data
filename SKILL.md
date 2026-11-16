@@ -9,10 +9,10 @@ description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集�
 description_en: The full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), plain-language holdings maps, 24,792-fund market rankings, manager profiles and crowding, 10-year index klines, 53-period scale history. Zero keys, zero login, layered assertions green. The ground every fund application builds on.
 author: hotsauce000
 origin: custom
-version: 0.7.2
+version: 0.7.3
 ---
 
-# fund-data 路由层 V0.7.2
+# fund-data 路由层 V0.7.3
 
 本文件是**路由层**（≈4K token，激活只加载本文件）。细节/坑区/内嵌代码在同目录 **reference.md（按需读取）**；运行代码 `fund_data.py`（import 用，勿通读）：
 
@@ -30,7 +30,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 2. **明令禁止** `for fund in all: fund_snapshot(fund)`（全量循环=封禁路径）；全市场排行已内置全量单请求
 3. **聚合优先**：先问 pingzhongdata（1 请求=90% 静态数据），再考虑窄端点
 4. **东财/天天/蛋卷请求必须走 `ttfund_get()`**（F1锁+F2熔断+F6分流+P12直连）；批量≥10只把 TT_MIN_INTERVAL 调 2~3s；巨潮走 _cninfo_post（1.5s节流）
-5. 缓存 TTL：fund_list 30天 / snapshot·持仓·宏观·排行·新发·规模·规模全史·K线 当日 / 公司·经理画像 24h / 抱团度·行业配置 90天/ lsjz 不缓存
+5. 缓存 TTL：fund_list 30天 / snapshot·持仓·宏观·排行·新发·规模·规模全史·K线 当日 / 公司·经理画像 24h / 抱团度·行业配置季末后120天内1h·其后90天 / lsjz 不缓存
 
 ## 场景路由（我想做 X → 调什么）
 
@@ -42,10 +42,10 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | 这基金买了什么 | `penetrate` → `plain_text_map`（白话地图） | 冷启≤13/重跑1 |
 | 名称/拼音找代码 | `norm_fund_code`（列候选不猜）/ `resolve_fund_code` | 0 |
 | 净值核对/每日申赎状态 | `fund_nav_history`（新→旧需反转） | 1~N页 |
-| 批量最新净值 | `fund_realtime_nav`（≤50/请求） | N/50 |
+| 批量最新净值 | `fund_realtime_nav`（输入去重，≤50/请求） | N/50 |
 | 新发/在发基金 | `fund_new_issues()`（全量+公司ID映射） | ~7（缓存0） |
 | 基金公司画像 | `fund_company(基金码或8位公司ID)` | 1（基金码+1） |
-| 抱团度/行业配置 | `fund_crowding()` / `fund_industry_allocation()`（季度巨潮） | 1/季（90天） |
+| 抱团度/行业配置 | `fund_crowding()` / `fund_industry_allocation()`（季度巨潮） | 季末后120天内1h/历史90天 |
 | 业绩持续性/固收+画像 | `rank_persistence()` / `bond_plus_profile(q)`（零请求） | 0 |
 | 规模·全史/费率/溢价/重仓探测 | `fund_scale`·`fund_scale_history`·`fund_fees`·`qdii_premium`·`nav_divergence` | 各1·2·冷启≤12 |
 | 经理画像/排行 | `fund_manager(基金码或经理ID)` · `manager_rank(pages)`（仅姓名序） | 0~1·50/页 |
@@ -76,7 +76,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | `resolve_fund_code(query)` | norm_fund_code 的便捷包装：唯一命中返回代码，多候选/ |
 | `fund_snapshot(query, force_refresh=False)` | 单基金一站式快照（E2 pingzhongdata，436KB →  |
 | `fund_nav_history(query, start='', end='', max_pages=80)` | 历史净值逐页（E3 lsjz）。定位为补充端点——E2 已含净值全史 |
-| `fund_holdings(query, year=None)` | 季度股票持仓前十大（E4a FundArchivesDatas ty |
+| `fund_holdings(query, year=None, force_refresh=False)` | 季度股票持仓前十大（E4a FundArchivesDatas ty |
 | `fund_detail_danjuan(query)` | 蛋卷基金详情（D1 djapi/fund/{code}）：总份额/经 |
 | `fund_realtime_nav(codes)` | 批量最新净值（E6 fundmobapi FCodes 逗号分隔）。 |
 | `adjusted_nav(nav_records)` | 净值序列 → 复权净值（分红再投口径，零网络） |

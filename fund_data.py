@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-fund-data V0.6.0 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层）
+fund-data V0.7.3 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤2 请求（1×pingzhongdata，0~1×lsjz）
@@ -59,7 +59,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.7.2"
+__version__ = "0.7.3"
 
 # ══════════════════════════════════════════════════════════════════
 # L1 前置层：限流入口 / 缓存目录 / 请求计数
@@ -90,14 +90,17 @@ TT_REQUEST_COUNT = [0, {}]       # [总请求数, {host: 次数}] — 预算审�
 
 _CBREAK_COOLDOWN = 600           # F2：熔断冷却 10 分钟
 _CBREAK_TRIP = 3                 # 连续 3 次风控信号触发熔断
-_cbreak_state = {"tt": [0, 0.0], "em": [0, 0.0], "cninfo": [0, 0.0]}   # [连击数, 上次信号时刻]；>5min 衰减归一
+_cbreak_state = {"tt": [0, 0.0], "em": [0, 0.0], "cninfo": [0, 0.0],
+                 "danjuan": [0, 0.0]}   # [连击数, 上次信号时刻]；>5min 衰减归一
 
 # Sprint 2/3：异常与缓存语义与 fund_data_core 统一（core 为硬依赖，与主模块同一套部署）。
 from fund_data_core import CachePolicy, CacheRepository, StaleDataError
-from fund_data_core.cache_policies import FUND_LIST_TTL_SECONDS
+from fund_data_core.cache_policies import (FUND_LIST_TTL_SECONDS,
+                                           PROVISIONAL_QUARTER_TTL_SECONDS)
 from fund_data_core.errors import (CircuitOpenError, LeaseError,
-                                   RiskControlError)
+                                   RiskControlError, UnknownHostError)
 from fund_data_core.locks import file_lock
+from fund_data_core.policies import provider_for_url
 
 FUND_LIST_TTL_DAYS = FUND_LIST_TTL_SECONDS // 86400   # 单一来源：core 常量派生（30 天）
 
@@ -273,8 +276,8 @@ def _cross_proc_throttle(line: str, min_interval: float):
 
 
 def _line_label(line: str) -> str:
-    """熔断文案的线上标签：cninfo 线显示「巨潮」，其余显示「东财」。"""
-    return "巨潮" if line == "cninfo" else "东财"
+    """熔断文案按实际 provider 标注，避免跨域备胎误报为东财。"""
+    return {"cninfo": "巨潮", "danjuan": "蛋卷"}.get(line, "东财")
 
 
 def _cbreak_check(line: str):
@@ -371,6 +374,15 @@ def _assert_not_risk_content(text: str, line: str, context: str):
             f"已计入熔断计数。本错误不触发降级。")
 
 
+def _legacy_line_for_url(url: str) -> str:
+    """teardown 路径同样按域名分线；未知 host 保持旧版 tt 行为。"""
+    try:
+        provider = provider_for_url(url)
+    except UnknownHostError:
+        return "tt"
+    return "danjuan" if provider == "danjuan" else "tt"
+
+
 def ttfund_get(url: str, params: Optional[dict] = None,
                headers: Optional[dict] = None, timeout: int = 20, **kwargs):
     """天天/东财/蛋卷统一请求入口：跨进程串行限流(F1) + 熔断(F2) + 强制 HTTPS（坑P1）
@@ -390,9 +402,10 @@ def ttfund_get(url: str, params: Optional[dict] = None,
             session=_SessionAdapter(TT_SESSION, _tt_hit), **kwargs)
         _release_pending(resp)
         return resp
+    line = _legacy_line_for_url(url)
     for attempt in (1, 2):
-        _cbreak_check("tt")                             # F2：冷却期内直接拒绝
-        _cross_proc_throttle("tt", TT_MIN_INTERVAL)     # F1：跨进程节流（锁内睡间隔）
+        _cbreak_check(line)                             # F2：按 URL 对应 provider 检查
+        _cross_proc_throttle(line, TT_MIN_INTERVAL)     # F1：同 provider 共用节流与闸门
         try:
             TT_REQUEST_COUNT[0] += 1
             host = re.sub(r"^https?://", "", url).split("/")[0]
@@ -803,22 +816,34 @@ def fund_snapshot(query: str, force_refresh: bool = False) -> dict:
             "daily_return": None if p.get("equityReturn") in (None, "") else float(p["equityReturn"]),
             "dividend": _div_from_unit_money(p.get("unitMoney"))}
            for p in (v.get("Data_netWorthTrend") or []) if isinstance(p, dict) and "x" in p]
+    ac_nav = [{"date": datetime.fromtimestamp(int(p["x"]) / 1000, _BJ_TZ).strftime("%Y-%m-%d"),
+               "ac_nav": float(p["y"])}
+              for p in (v.get("Data_ACWorthTrend") or []) if isinstance(p, dict) and "x" in p]
 
     mgr_raw = (v.get("Data_currentFundManager") or [None])[0] or {}
     scale_hist = _scale_history(v.get("Data_fluctuationScale"))
     position_hist = _xy_pairs_to_records(v.get("Data_fundSharesPositions"), "position_pct")
     peer_hist = _xy_pairs_to_records(v.get("Data_rateInSimilarPersent"), "percentile")
     bench_curves = _benchmark_curves(v.get("Data_grandTotal"))
+    holder_structure = _normalize_table(v.get("Data_holderStructure"))
+    asset_allocation = _normalize_table(v.get("Data_assetAllocation"))
+    industry_allocation = _normalize_table(v.get("Data_industryAllocation"))
     # P18 关联自洽：变量存在但形态解析失败 ≠「E2 没有」——P3 只查键缺失，
-    # 这类"present,unparsed"必须显式进 missing，消费者才能区分两种空
-    if v.get("Data_fluctuationScale") and not scale_hist:
-        missing.append("Data_fluctuationScale(present,unparsed)")
-    if v.get("Data_fundSharesPositions") and not position_hist:
-        missing.append("Data_fundSharesPositions(present,unparsed)")
-    if v.get("Data_rateInSimilarPersent") and not peer_hist:
-        missing.append("Data_rateInSimilarPersent(present,unparsed)")
-    if v.get("Data_grandTotal") and not bench_curves:
-        missing.append("Data_grandTotal(present,unparsed)")
+    # 所有经过结构转换的数据集统一标记，消费者才能区分"没有"与"解析失败"。
+    for name, parsed in (("Data_netWorthTrend", nav), ("Data_ACWorthTrend", ac_nav),
+                         ("Data_fluctuationScale", scale_hist),
+                         ("Data_fundSharesPositions", position_hist),
+                         ("Data_rateInSimilarPersent", peer_hist),
+                         ("Data_grandTotal", bench_curves),
+                         ("Data_holderStructure", holder_structure),
+                         ("Data_assetAllocation", asset_allocation),
+                         ("Data_industryAllocation", industry_allocation)):
+        raw = v.get(name)
+        empty_echarts = (isinstance(raw, dict)
+                         and ("categories" in raw or "series" in raw)
+                         and not raw.get("categories") and not raw.get("series"))
+        if raw and not parsed and not empty_echarts:
+            missing.append(f"{name}(present,unparsed)")
     snap = {
         "_meta": {"code": code, "version": __version__,
                   "fetched_at": datetime.now().isoformat(timespec="seconds"),
@@ -837,17 +862,14 @@ def fund_snapshot(query: str, force_refresh: bool = False) -> dict:
                     "return_chart": mgr_raw.get("profit"),           # 任期收益图表对象（三系列）
                     "star": mgr_raw.get("star")},
         "nav_history": nav,                            # 单位净值全史（含每日分红事件）
-        "ac_nav_history": [{"date": datetime.fromtimestamp(int(p["x"]) / 1000, _BJ_TZ).strftime("%Y-%m-%d"),
-                            "ac_nav": float(p["y"])}
-                           for p in (v.get("Data_ACWorthTrend") or [])
-                           if isinstance(p, dict) and "x" in p],
+        "ac_nav_history": ac_nav,
         "top_stocks": _codes_list(v.get("stockCodesNew") or v.get("stockCodes")),
         "top_bonds": _codes_list(v.get("zqCodesNew") or v.get("zqCodes")),
         "scale_history": scale_hist,
-        "holder_structure": _normalize_table(v.get("Data_holderStructure")),
-        "asset_allocation": _normalize_table(v.get("Data_assetAllocation")),
+        "holder_structure": holder_structure,
+        "asset_allocation": asset_allocation,
         "stock_position_history": position_hist,
-        "industry_allocation": _normalize_table(v.get("Data_industryAllocation")),
+        "industry_allocation": industry_allocation,
         "peer_rank_history": peer_hist,
         "benchmark_curves": bench_curves,
         "buy_redemption_status": v.get("Data_buySedemption"),
@@ -989,16 +1011,18 @@ def _html_table_rows(html: str) -> list[list[str]]:
     return rows
 
 
-def fund_holdings(query: str, year: Optional[int] = None) -> list[dict]:
+def fund_holdings(query: str, year: Optional[int] = None,
+                  force_refresh: bool = False) -> list[dict]:
     """季度股票持仓前十大（E4a FundArchivesDatas type=jjcc）。
 
     与 E2 的 stockCodes 互为校验；year 指定时返回该年各季报持仓（历史穿透）。
+    force_refresh=True 绕过当日缓存重新拉取。
     ⚠️ 口径：季度报告期前十大重仓（全部持仓明细在年报 PDF，属公告层，不在本 skill 范围）。
     列序（实测 2026-11）：0序号 1代码 2名称 3最新价 4涨跌幅 5资讯 6占净值% 7持股数(万股) 8市值(万元)
     """
     code = resolve_fund_code(query)
     rel = f"holdings/{code}_{year or 'latest'}.json"      # F4：季报数据当日缓存（原每次现查）
-    cached = _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
+    cached = None if force_refresh else _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
     if cached is not None:
         return cached
     params = {"type": "jjcc", "code": code, "topline": "10",
@@ -1077,7 +1101,7 @@ def fund_detail_danjuan(query: str) -> dict:
     code = resolve_fund_code(query)
     r = ttfund_get(f"https://danjuanfunds.com/djapi/fund/{code}",
                    headers={"Referer": "https://danjuanfunds.com/"})
-    assert_not_risk_control(r, "tt", "D1 蛋卷")
+    assert_not_risk_control(r, "danjuan", "D1 蛋卷")
     r.raise_for_status()
     d = (r.json() or {}).get("data") or {}
     if not d:
@@ -1091,7 +1115,7 @@ def fund_detail_danjuan(query: str) -> dict:
         "subscribe_status": d.get("subscribe_status"), "redeem_status": d.get("withdraw_status"),
         "source": "danjuan",
     }
-    _cbreak_success("tt")
+    _cbreak_success("danjuan")
     return out
 
 
@@ -1102,8 +1126,9 @@ def fund_detail_danjuan(query: str) -> dict:
 def fund_realtime_nav(codes: list[str]) -> list[dict]:
     """批量最新净值（E6 fundmobapi FCodes 逗号分隔）。轻量探测（1KB vs E2 的 436KB），
     批量循环场景的省流量通道。⚠️ GSZ 盘中估值字段已恒为 null（官方下线，坑P5 关联）。
-    超过 50 只自动分块（接口安全上限）。"""
-    cs = [resolve_fund_code(c) for c in codes]
+    输入按首次出现顺序去重，输出与去重后输入同序；超过 50 只自动分块。
+    响应逐一代码校验，缺失、意外或重复代码均拒绝静默返回。"""
+    cs = list(dict.fromkeys(resolve_fund_code(c) for c in codes))
     out = []
     for i in range(0, len(cs), 50):
         chunk = cs[i:i + 50]
@@ -1113,16 +1138,23 @@ def fund_realtime_nav(codes: list[str]) -> list[dict]:
         assert_not_risk_control(r, "tt", "E6 批量净值")
         r.raise_for_status()
         datas = (r.json() or {}).get("Datas") or []
-        got = [x.get("FCODE") for x in datas if x.get("FCODE")]
-        if len(got) != len(chunk):                     # 个别缺失必须显式报，不许静默漏
-            missing = [c for c in chunk if c not in got]
-            raise RuntimeError(f"E6 批量净值缺 {missing}（请求 {len(chunk)} 只实得 {len(got)} 只），"
-                               f"拒绝静默漏返回。")
-        out.extend({"code": x.get("FCODE"), "name": x.get("SHORTNAME"),
-                    "nav_date": x.get("PDATE"), "nav": _to_float(x.get("NAV")),
-                    "ac_nav": _to_float(x.get("ACCNAV")),
-                    "daily_return_pct": _to_float(x.get("NAVCHGRT"))}
-                   for x in datas if x.get("FCODE"))
+        if (not isinstance(datas, list) or any(
+                not isinstance(x, dict) or not isinstance(x.get("FCODE"), str)
+                or not re.fullmatch(r"\d{6}", x["FCODE"]) for x in datas)):
+            raise RuntimeError("E6 批量净值响应含畸形记录（非对象或缺有效 FCODE），拒绝静默返回。")
+        got = [x["FCODE"] for x in datas]
+        missing = [c for c in chunk if c not in got]
+        unexpected = [c for c in got if c not in chunk]
+        duplicates = sorted({c for c in got if got.count(c) > 1})
+        if missing or unexpected or duplicates:
+            raise RuntimeError(f"E6 批量净值响应代码校验失败：缺失={missing}，"
+                               f"意外代码={unexpected}，重复代码={duplicates}；拒绝静默返回。")
+        by_code = {x["FCODE"]: x for x in datas if x.get("FCODE")}
+        out.extend({"code": c, "name": by_code[c].get("SHORTNAME"),
+                    "nav_date": by_code[c].get("PDATE"), "nav": _to_float(by_code[c].get("NAV")),
+                    "ac_nav": _to_float(by_code[c].get("ACCNAV")),
+                    "daily_return_pct": _to_float(by_code[c].get("NAVCHGRT"))}
+                   for c in chunk)
     if cs:
         _cbreak_success("tt")
     return out
@@ -1381,7 +1413,8 @@ def relative_performance(snapshot: dict, benchmark: str = "沪深300",
     """基金 vs E2 内置基准曲线的区间相对表现（零网络，V0.4.0 B3）。
 
     基准来自 snapshot.benchmark_curves（Data_grandTotal，窗口约近半年）：值为窗口
-    起点以来累计收益%。基金侧用复权净值限制到基准窗口对齐后：
+    起点以来累计收益%。基金与基准按共同拥有的起止日期计算区间收益，基准侧
+    同样使用累计财富比值，避免新基金或净值缺失导致两边窗口不同：
     区间收益（基金/基准/相对差）+ 日频 β（基金日收益对基准日收益 OLS）+ 相关系数。
     benchmark 可传任意现存曲线名（"沪深300"/"同类平均"/基金简称）。
     """
@@ -1418,9 +1451,16 @@ def relative_performance(snapshot: dict, benchmark: str = "沪深300",
     beta = sxy / sxx if sxx > 1e-18 else None
     corr = sxy / math.sqrt(sxx * syy) if sxx > 1e-18 and syy > 1e-18 else None
     bench_flat, fund_flat = sxx <= 1e-18, syy <= 1e-18
-    win = [a for a in adj if dates[0] <= a["date"] <= dates[-1]]
-    fund_ret_pct = (win[-1]["adj_nav"] / win[0]["adj_nav"] - 1.0) * 100.0
-    bench_ret_pct = b_by_date[dates[-1]]
+    adj_by_date = {a["date"]: a["adj_nav"] for a in adj}
+    common_levels = sorted(set(b_by_date) & set(adj_by_date))
+    if len(common_levels) < 2:
+        raise ValueError(f"基金与基准曲线 {benchmark!r} 的共同净值日期不足 2 个，无法计算区间收益")
+    start_date, end_date = common_levels[0], common_levels[-1]
+    if b_by_date[start_date] <= -100.0 or b_by_date[end_date] <= -100.0:
+        raise ValueError(f"基准曲线 {benchmark!r} 在共同窗口端点累计值 ≤-100%，拒绝计算")
+    fund_ret_pct = (adj_by_date[end_date] / adj_by_date[start_date] - 1.0) * 100.0
+    bench_ret_pct = ((100.0 + b_by_date[end_date])
+                     / (100.0 + b_by_date[start_date]) - 1.0) * 100.0
     beta_note = None
     if bench_flat and fund_flat:
         beta_note = "基准与基金曲线窗口内均近乎横盘（方差≈0），β/相关性不可辨识——相对收益仍有效"
@@ -1429,7 +1469,7 @@ def relative_performance(snapshot: dict, benchmark: str = "沪深300",
     elif fund_flat:
         beta_note = "基金净值窗口内近乎横盘（方差≈0），相关性不可辨识，β 数值意义同样有限"
     return {"benchmark": benchmark,
-            "window": {"start": dates[0], "end": dates[-1], "days": n},
+            "window": {"start": start_date, "end": end_date, "days": n},
             "fund_return_pct": round(fund_ret_pct, 2),
             "benchmark_return_pct": round(bench_ret_pct, 2),
             "relative_return_pct": round(fund_ret_pct - bench_ret_pct, 2),
@@ -1606,12 +1646,16 @@ def _push2_get(url: str, params: Optional[dict] = None, context: str = "") -> di
     raise RuntimeError(f"push2 通道失败（{context}）: HTTP {r.status_code} {r.text[:60]!r}")
 
 
-def _tencent_prefix(code: str) -> str:
-    """6 位代码 → 腾讯行情前缀（sh/sz/bj）。
+def _tencent_prefix(code: str, kind: str = "stock") -> str:
+    """6 位代码 → 腾讯行情前缀（sh/sz/bj），kind=stock/index/auto。
 
-    ⚠️ 92 北交所号段必须先于 9x 判断（920982→bj 而非 sh），错路由=腾讯静默返空。
-    ⚠️ 204xxx 沪市质押式回购（GC001~GC182，repo_rate_gc 依赖）必须走 sh，误判深市=返空。
+    默认按股票路由：000016 等同码证券中，sz000016 是深股、sh000016 是沪指，
+    股票路径查询全局指数集合会静默返回错误证券。指数调用方须显式 kind="index"，
+    或直接传 sh/sz 前缀；kind="auto" 仅保留给确需旧式自动识别的调用方。
+    ⚠️ 92 北交所号段必须先于 9x 判断；204xxx 沪市质押式回购必须走 sh。
     """
+    if kind not in ("stock", "index", "auto"):
+        raise ValueError(f"kind 只支持 stock/index/auto，收到 {kind!r}")
     c = str(code).lower().strip()
     if c.startswith(("sh", "sz", "bj")):
         return c
@@ -1619,7 +1663,9 @@ def _tencent_prefix(code: str) -> str:
         return f"bj{c}"
     if c.startswith("204"):                            # 沪市回购 GC 族（204007=GC007）
         return f"sh{c}"
-    if c in _SH_INDEX_Q or c[:1] in ("5", "6", "9"):
+    if kind in ("index", "auto") and c in _SH_INDEX_Q:
+        return f"sh{c}"
+    if c[:1] in ("5", "6", "9"):
         return f"sh{c}"
     return f"sz{c}"
 
@@ -2272,7 +2318,7 @@ def cn_treasury_realtime() -> dict:
 #     标准库，同 P11 curl 先例零新依赖）；451 token 过期=钥匙时效问题非风控→刷新重试。
 #   · 预算契约：全市场排行 = 1 请求（pn=25000 实测 24792 行）+ 20h 缓存，类型/排序
 #     筛选全在缓存上本地做；新发全量 ≈7 页；抱团度/行业配置 = 1 请求/季度长效缓存
-#     （已发布季报数据不可变）。fund_rank 不暴露翻页参数——逐页爬 496 次的封禁路径
+#     （季末后120天内短缓存，其后长缓存）。fund_rank 不暴露翻页参数——逐页爬 496 次的封禁路径
 #     从函数签名上不存在。
 
 CNINFO_REQUEST_COUNT = [0]                     # 第四线账本（审计用）
@@ -2380,6 +2426,16 @@ def _latest_quarter_end(today: Optional[date] = None) -> str:
     cands = [date(d.year, m, dd) for m, dd in ((3, 31), (6, 30), (9, 30), (12, 31))]
     cands.append(date(d.year - 1, 12, 31))
     return max(c for c in cands if c <= d).isoformat()
+
+
+def _quarter_cache_ttl_hours(rd8: str, today: Optional[date] = None) -> int:
+    """季末后 120 天内使用短缓存，避免跨季末把未披露完的数据过早固化。"""
+    current = today or date.today()
+    report_date = datetime.strptime(rd8, "%Y%m%d").date()
+    if report_date > current:
+        raise ValueError(f"rdate 是未来季末（{rd8}，当前 {current.isoformat()}），拒绝查询")
+    age_days = (current - report_date).days
+    return (PROVISIONAL_QUARTER_TTL_SECONDS // 3600 if age_days <= 120 else 90 * 24)
 
 
 # ── ① 全市场排行 / 初筛底座 ──────────────────────────────────────
@@ -2522,7 +2578,7 @@ def fund_new_issues(force_refresh: bool = False) -> list[dict]:
     record 总数强校验（坑P2 同款防线，实测 record=332/pages=7）。
     顺带产出「公司名→公司ID」映射（fund_company 消歧用）。
     """
-    rel = "new_issues.json"
+    rel = "new_issues_v2.json"       # v2：保留合法零费率，避免旧缓存把 0.0 写成 None
     if not force_refresh:
         cached = _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
         if cached is not None:
@@ -2546,7 +2602,7 @@ def fund_new_issues(force_refresh: bool = False) -> list[dict]:
                 return a[i] if len(a) > i else ""
             out.append({"code": g(0), "name": g(1), "company": g(2), "company_id": g(3),
                         "fund_type": g(4), "issue_period": g(5),
-                        "fee_pct": _to_float((g(6) or "").replace("%", "")) or None,
+                        "fee_pct": _to_float((g(6) or "").replace("%", "")),
                         "manager": g(7) or None})
         mt = re.search(r"record:(\d+)", ntext)
         if not mt:                              # record 缺席=强校验失效，拒绝静默跳过
@@ -2666,16 +2722,16 @@ def fund_crowding(rdate: str = "", force_refresh: bool = False) -> list[dict]:
     rdate 报告期季末（"20260930"/"2026-09-30" 皆可，空=最近已发布季末）。
     返回 [{code,name,fund_count 被多少只基金持有,shares_wan 持股总数(万),
     market_value_wan 持股市值(万元),date}] 按 fund_count 降序——TOP50 排名与
-    TOP10 平均家数（市场抱团温度计）直接从这张表算。1 请求/季度，90 天缓存
-    （已发布季报数据不可变）。实测 2026Q3：3088 只重仓股，Top1 中际旭创 2424 家。
-    ⚠️ 披露窗口：季末后约 15 个工作日内各公司季报尚未披露完，最新一期聚合
-    会随披露进度逐渐变多——首次拉取即被缓存 90 天，刚过季末慎用（可显式传
-    上一季度 rdate 拿完整快照）。
+    TOP10 平均家数（市场抱团温度计）直接从这张表算。季末后 120 天内 1 小时
+    短缓存，其后 90 天长缓存。实测 2026Q3：3088 只重仓股，Top1 中际旭创 2424 家。
+    ⚠️ 披露/修正窗口按报告期天数判断，跨季末不会把上一季过早转成长缓存；
+    未来季末显式拒绝，force_refresh 可强制刷新。
     """
     rd8 = _norm_rdate(rdate)
     rel = f"crowding/{rd8}.json"
+    ttl_hours = _quarter_cache_ttl_hours(rd8)       # force_refresh 也必须先拒绝未来季末
     if not force_refresh:
-        cached = _cache_read(rel, max_age_hours=24 * 90)
+        cached = _cache_read(rel, max_age_hours=ttl_hours)
         if cached is not None:
             return cached
     recs = _cninfo_post("p_sysapi1112",
@@ -2708,8 +2764,9 @@ def fund_industry_allocation(rdate: str = "", force_refresh: bool = False) -> li
     """
     rd8 = _norm_rdate(rdate)
     rel = f"industry/{rd8}.json"
+    ttl_hours = _quarter_cache_ttl_hours(rd8)       # force_refresh 也必须先拒绝未来季末
     if not force_refresh:
-        cached = _cache_read(rel, max_age_hours=24 * 90)
+        cached = _cache_read(rel, max_age_hours=ttl_hours)
         if cached is not None:
             return cached
     recs = _cninfo_post("p_sysapi1113",
@@ -2903,8 +2960,8 @@ def qdii_premium(codes: list) -> list[dict]:
 
     ⚠️ 口径：E6 净值为 T-1/T-2（坑P16 日历差），行情剧烈时段溢价会被高估——
     结果必须连同 nav_date 一起解读。仅对场内可交易码有意义（5/16 开头）。
-    返回按溢价降序；净值缺失的只标注 error 不中断。"""
-    codes = [str(c).strip() for c in codes if str(c).strip()]
+    输入按首次出现顺序去重；返回按溢价降序，净值缺失的只标注 error 不中断。"""
+    codes = list(dict.fromkeys(str(c).strip() for c in codes if str(c).strip()))
     if not codes:
         raise ValueError("codes 不能为空")
     if len(codes) > 50:
@@ -2933,27 +2990,32 @@ def qdii_premium(codes: list) -> list[dict]:
 def nav_divergence(query: str, force_refresh: bool = False) -> dict:
     """重仓探测：净值收益 vs 上季重仓加权收益的背离度（疑似调仓信号）。
 
-    窗口 = 最新披露报告期末 → 最新净值日；重仓股走腾讯日K前复权（当日缓存）；
+    窗口 = 报告期当天或之前最后一个基金净值日 → 最新净值日；股票必须使用
+    同一基点日期，缺共同基点则跳过，避免首个交易日被单边漏算造成虚假背离。
+    重仓股走腾讯日K前复权；force_refresh 同时刷新快照、持仓和K线。
     权重 = 占净值比不归一（coverage_pct 如实报告前十覆盖度）。
     预算：冷启 ≤12 请求（快照1+持仓1+K线≤10）；当日重跑 0~2。
     |背离|≤5pp 持仓一致 / ≤10pp 轻微背离（关注）/ >10pp 疑似调仓或风格漂移。
     仅支持 6 位 A 股重仓码（港股 5 位码跳过并在 skipped 标注）。
     ⚠️ 披露滞后：季报持仓天然滞后，背离≠一定调仓（也可能是持仓内涨跌分化）。"""
-    snap = fund_snapshot(query)
+    snap = fund_snapshot(query, force_refresh=force_refresh)
     adj = adjusted_nav(snap["nav_history"])
-    hold = fund_holdings(query)
+    hold = fund_holdings(query, force_refresh=force_refresh)
     if not hold:
         raise RuntimeError(f"无股票持仓记录（{snap.get('name')}）——货币基金或上游空表，重仓探测不适用")
-    period = hold[0]["period"]
-    rows = [h for h in hold if h["period"] == period]
-    base = next((a for a in adj if a["date"] > period), None)
-    if base is None:
+    period = max((h.get("period") or "" for h in hold), default="")
+    if not period:
+        raise RuntimeError(f"持仓记录缺报告期（{snap.get('name')}），拒绝猜测重仓窗口")
+    rows = [h for h in hold if h.get("period") == period]
+    fund_base = next((a for a in reversed(adj) if a["date"] <= period), None)
+    if fund_base is None:
+        raise RuntimeError(f"报告期 {period} 当天或之前无净值基点（{snap.get('name')}）")
+    base_date = fund_base["date"]
+    end_date = adj[-1]["date"]
+    if end_date <= base_date:
         raise RuntimeError(f"报告期 {period} 之后无净值（{snap.get('name')}），无法算窗口收益")
-    base_idx = adj.index(base)
-    if base_idx == 0:
-        raise RuntimeError(f"报告期 {period} 前无净值基点（{snap.get('name')}）")
-    fund_ret = (adj[-1]["adj_nav"] / adj[base_idx - 1]["adj_nav"] - 1) * 100
-    days_span = (date.fromisoformat(adj[-1]["date"]) - date.fromisoformat(period)).days
+    fund_ret = (adj[-1]["adj_nav"] / fund_base["adj_nav"] - 1) * 100
+    days_span = (date.fromisoformat(end_date) - date.fromisoformat(base_date)).days
     bars = min(days_span + 20, 250)
     weighted, coverage, skipped, used = 0.0, 0.0, [], 0
     for h in rows:
@@ -2963,11 +3025,13 @@ def nav_divergence(query: str, force_refresh: bool = False) -> dict:
             skipped.append({"code": code6, "name": h.get("stock_name"), "reason": "非6位A股码"})
             continue
         k = _tencent_kline(code6, bars=bars, force_refresh=force_refresh)
-        seg = [x for x in k if period < x["date"] <= adj[-1]["date"]]   # 终点对齐净值日，防股票腿超前
-        if len(seg) < 2:
-            skipped.append({"code": code6, "name": h.get("stock_name"), "reason": "K线窗口不足"})
+        stock_base = next((x for x in k if x["date"] == base_date and x["close"] > 0), None)
+        seg = [x for x in k if base_date < x["date"] <= end_date]
+        if stock_base is None or not seg or seg[-1]["date"] != end_date:
+            skipped.append({"code": code6, "name": h.get("stock_name"),
+                            "reason": f"K线缺共同基点 {base_date} 或共同终点 {end_date}"})
             continue
-        r_i = (seg[-1]["close"] / seg[0]["close"] - 1) * 100
+        r_i = (seg[-1]["close"] / stock_base["close"] - 1) * 100
         weighted += w * r_i
         coverage += w
         used += 1
@@ -2977,7 +3041,7 @@ def nav_divergence(query: str, force_refresh: bool = False) -> dict:
     verdict = ("持仓一致" if abs(div) <= 5
                else "轻微背离（关注）" if abs(div) <= 10 else "疑似调仓/风格漂移")
     return {"code": snap["_meta"]["code"], "name": snap.get("name"),
-            "period": period, "window": {"start": period, "end": adj[-1]["date"],
+            "period": period, "window": {"start": base_date, "end": end_date,
                                          "days": days_span},
             "fund_return_pct": round(fund_ret, 2),
             "holdings_weighted_return_pct": round(weighted, 2),

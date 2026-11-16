@@ -56,7 +56,7 @@ def _sig_rows() -> list:
     return rows
 
 
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 DESCRIPTION = (
     "写代码实际获取基金领域底层数据时使用——零key零登录，八层能力："
     "【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:"
@@ -114,7 +114,7 @@ THIN.append("""## 防封铁律（先读，违反=封禁20+小时）
 2. **明令禁止** `for fund in all: fund_snapshot(fund)`（全量循环=封禁路径）；全市场排行已内置全量单请求
 3. **聚合优先**：先问 pingzhongdata（1 请求=90% 静态数据），再考虑窄端点
 4. **东财/天天/蛋卷请求必须走 `ttfund_get()`**（F1锁+F2熔断+F6分流+P12直连）；批量≥10只把 TT_MIN_INTERVAL 调 2~3s；巨潮走 _cninfo_post（1.5s节流）
-5. 缓存 TTL：fund_list 30天 / snapshot·持仓·宏观·排行·新发·规模·规模全史·K线 当日 / 公司·经理画像 24h / 抱团度·行业配置 90天/ lsjz 不缓存
+5. 缓存 TTL：fund_list 30天 / snapshot·持仓·宏观·排行·新发·规模·规模全史·K线 当日 / 公司·经理画像 24h / 抱团度·行业配置季末后120天内1h·其后90天 / lsjz 不缓存
 """)
 
 THIN.append("""## 场景路由（我想做 X → 调什么）
@@ -127,10 +127,10 @@ THIN.append("""## 场景路由（我想做 X → 调什么）
 | 这基金买了什么 | `penetrate` → `plain_text_map`（白话地图） | 冷启≤13/重跑1 |
 | 名称/拼音找代码 | `norm_fund_code`（列候选不猜）/ `resolve_fund_code` | 0 |
 | 净值核对/每日申赎状态 | `fund_nav_history`（新→旧需反转） | 1~N页 |
-| 批量最新净值 | `fund_realtime_nav`（≤50/请求） | N/50 |
+| 批量最新净值 | `fund_realtime_nav`（输入去重，≤50/请求） | N/50 |
 | 新发/在发基金 | `fund_new_issues()`（全量+公司ID映射） | ~7（缓存0） |
 | 基金公司画像 | `fund_company(基金码或8位公司ID)` | 1（基金码+1） |
-| 抱团度/行业配置 | `fund_crowding()` / `fund_industry_allocation()`（季度巨潮） | 1/季（90天） |
+| 抱团度/行业配置 | `fund_crowding()` / `fund_industry_allocation()`（季度巨潮） | 季末后120天内1h/历史90天 |
 | 业绩持续性/固收+画像 | `rank_persistence()` / `bond_plus_profile(q)`（零请求） | 0 |
 | 规模·全史/费率/溢价/重仓探测 | `fund_scale`·`fund_scale_history`·`fund_fees`·`qdii_premium`·`nav_divergence` | 各1·2·冷启≤12 |
 | 经理画像/排行 | `fund_manager(基金码或经理ID)` · `manager_rank(pages)`（仅姓名序） | 0~1·50/页 |
@@ -182,9 +182,15 @@ REF.append(f"""# fund-data 完整参考（reference.md · 按需读取层）V{VE
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 """)
 
-REF.append("""# fund-data 基金底层数据工具包 V0.7.2 模块全档
+REF.append(r"""# fund-data 基金底层数据工具包 V0.7.3 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入：234/234 离线断言通过**（L1 单元 198 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11 须显式 `--online`），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复：264/264 离线断言通过**（L1 单元 228 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11 须显式 `--online`），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.7.3 审查修复（证券身份、收益口径与缓存一致性）：**
+- 🔴 **同码股票/指数分流**：腾讯路由默认按股票，指数须显式上下文或前缀——修 000016 等深股被静默导到沪指的问题
+- 🔴 **收益窗口统一**：重仓探测基金/股票共用实际基点与共同终点；相对表现按共同起止日期计算，消除虚假背离与超额
+- 🟢 **provider 与缓存一致性**：蛋卷成功只清自身风控，teardown 也按 URL 分线；季末后120天内 1h、其后 90 天；批量净值输入去重并校验响应代码；快照全部表格解析失败显式入 missing，ECharts 合法空结构不误报
+- 🟢 **边界与工程质量**：重仓探测强制刷新贯通；新发零费率保留且升级缓存键；CI 三平台 × Python 3.10/3.12/3.13；主套件 264 条离线断言全绿
 
 **V0.7.2 三平台同等支持（锁抽象层）：**
 - 🟢 **`fund_data_core.locks` 锁抽象层**：跨进程文件锁按**能力检测**选机制（flock / 字节范围锁），机制命名、零平台分支（守卫测试强制）；进程内注册表按归一化路径互斥（剥 `\\\\?\\` 前缀+大小写归一），不可重入契约显式报错（宁可 loud 不死锁），有界后端外层重试补齐无限阻塞语义
@@ -292,11 +298,11 @@ REF.append("""## 第一章 防封铁律（请求预算契约）
 | fund_snapshot | 当日20h | pingzhongdata 每日更新一次 |
 | fund_rank 全量 / new_issues | 当日20h | rankhandler 每日更新一次；过滤排序全在缓存上 0 请求 |
 | fund_company | 24h | 公司页静态 |
-| fund_crowding / fund_industry_allocation | 90天 | 季报发布后不可变；1 请求/季 |
+| fund_crowding / fund_industry_allocation | 季末后120天内1h；其后90天 | 披露期防不完整数据固化；历史季度基本不可变 |
 | lsjz | 不缓存 | 补充端点，按区间现查 |
 """)
 
-REF.append("""## 端点路由速查（按需定位，不必通读）
+REF.append(r"""## 端点路由速查（按需定位，不必通读）
 
 | 编号 | 函数 | 拿什么 | 源 | 请求数 |
 |---|---|---|---|---|
@@ -304,13 +310,13 @@ REF.append("""## 端点路由速查（按需定位，不必通读）
 | 前置 | `norm_fund_code(q)` | 代码/名称/拼音→归一化；股票代码拦截；A/C消歧 | 本地(E1缓存) | 0 |
 | E2 ⭐ | `fund_snapshot(q)` | 一站式：净值全史/规模史/持有人/经理/重仓股+债/资产配置/仓位史/同类百分位史/**基准三曲线**/申赎/费率/ishb | fund.eastmoney.com | 1 |
 | E3 | `fund_nav_history(q,s,e)` | 区间净值+**每日申赎状态**（E2失败时的净值兜底） | api.fund.eastmoney.com | 1~N页 |
-| E4a | `fund_holdings(q,year)` | 季度前十大重仓（含历史各季报，与E2互证） | fundf10.eastmoney.com | 1 |
+| E4a | `fund_holdings(q,year,force_refresh)` | 季度前十大重仓（含历史各季报，与E2互证；可强制刷新） | fundf10.eastmoney.com | 1 |
 | D1 | `fund_detail_danjuan(q)` | 蛋卷档案：总份额/经理/托管/风险等级/申赎（跨域备胎） | danjuanfunds.com | 1 |
 | E6 | `fund_realtime_nav(codes)` | 批量最新净值（N只1请求，轻量探测） | fundmobapi.eastmoney.com | 1 |
 | N1 | `fund_rank(top,fund_type,sort,ascending)` | 全市场排行/初筛底座（ytd/1m~3y/since 收益率族；类型本地过滤；None 恒末尾） | fund.eastmoney.com/data/rankhandler | 全量1，筛选0 |
 | N2 | `fund_new_issues()` | 在发/新成立全量 + 公司名→ID 映射 | .../data/FundNewIssue.aspx | ~7页,缓存0 |
 | N3 | `fund_company(q)` | 公司画像：规模/基金数/经理数/旗下清单（q=8位ID/基金码/公司名） | .../company/{id}.html | 1（基金码+1） |
-| N4 | `fund_crowding(rdate)` / `fund_industry_allocation(rdate)` | 季度重仓股聚合（抱团度）/ 全市场19门类行业配置 | webapi.cninfo.com.cn（第四线） | 1/季,90天缓存 |
+| N4 | `fund_crowding(rdate)` / `fund_industry_allocation(rdate)` | 季度重仓股聚合（抱团度）/ 全市场19门类行业配置 | webapi.cninfo.com.cn（第四线） | 季末后120天内1h/历史90天 |
 | V6 | `rank_persistence(top,fund_type)` | 业绩持续性矩阵：各周期同类分位+评分+consistent（零请求长牛初筛） | 本地(fund_rank缓存) | 0 |
 | V6 | `fund_scale(q)` | 单基金最新规模（ENDNAV 元精确值）——重叠预警/榜单候选富集 | fundmobapi | 1 |
 | V6 | `bond_plus_profile(q)` | 固收+画像：权益仓位带/回撤带/利率敏感标注 | 本地(快照) | 0 |
@@ -448,7 +454,7 @@ fund_rank(top=20, fund_type="zs", sort="ytd")  # 服务端 Top20 单页
 fund_new_issues()                            # 在发/新成立全量 + 公司名→ID 映射
 fund_company("161725")                       # 基金码→公司画像（基金码路径 +1 请求）
 fund_company("80065113")                     # 8 位公司 ID 直取（1 请求）
-fund_crowding()[:10]                         # 抱团度 Top10（1 请求/季，90 天缓存）
+fund_crowding()[:10]                         # 季末后120天内1h短缓存；其后90天
 fund_industry_allocation()                   # 19 门类行业配置（巨潮官方口径）
 
 # V0.6 经理画像与专项组装层

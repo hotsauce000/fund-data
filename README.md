@@ -4,7 +4,7 @@
 >
 > A 股域有 [a-stock-data](https://github.com/simonlin1212/a-stock-data)，**基金域有 fund-data**——形态对标、纪律同源。
 
-基金领域底层数据工具包 V0.7.2（**基金数据底座 FundBase**）：零 key、零登录、零第三方封装，为基金诊断 / 评测 / 定投回测 / 持仓穿透 / 宏观利率 / 全市场初筛 / 经理画像提供底层数据原语。**Linux / macOS / Windows 三平台同等支持（V0.7.2 锁抽象层，能力检测无平台分支）；234/234 离线断言通过（Sprint 1 错误语义加固 + Sprint 2 跨进程协调 + Sprint 3 缓存核心接入；`fund_data_core` 独立测试 92 条含锁契约；在线全量须显式 `--online`）**，覆盖 22 个上游接口，48 个公开函数。
+基金领域底层数据工具包 V0.7.3（**基金数据底座 FundBase**）：零 key、零登录、零第三方封装，为基金诊断 / 评测 / 定投回测 / 持仓穿透 / 宏观利率 / 全市场初筛 / 经理画像提供底层数据原语。**Linux / macOS / Windows 三平台同等支持（V0.7.2 锁抽象层，能力检测无平台分支）；264/264 离线断言通过（Sprint 1 错误语义加固 + Sprint 2 跨进程协调 + Sprint 3 缓存核心接入 + V0.7.3 审查修复；`fund_data_core` 独立测试 92 条含锁契约；在线全量须显式 `--online`）**，覆盖 22 个上游接口，48 个公开函数。
 
 **核心立场：请求预算是稀缺资源**——所有端点内置跨进程限流、风控分流、熔断器三层防封结构；所有上游坑（26 个实测）内嵌防线；宁可显式报错，绝不静默空。
 
@@ -119,15 +119,15 @@
 |---|---|
 | 一站式快照 `fund_snapshot(q)` ⭐ | 1 请求（当日缓存 0）= 90% 静态数据：上表第 2 类全量；E2 网络失败/真正空体自动降级，风控页/结构异常显式上抛不降级；`missing_datasets` 显式列出缺失、`present,unparsed` 区分"没有"与"解析失败" |
 | 区间净值 `fund_nav_history(q,s,e)` | 逐日单位/累计净值、日收益率、分红、**每日申赎状态**；pageSize 服务端钳 20 已钉死、TotalCount 顶层读取 + 实收强校验（防上游静默截断）；原生新→旧，消费方注意反转 |
-| 批量净值 `fund_realtime_nav(codes)` | N 只 = 1 请求（≤50 自动分块）：最新净值/日期/日涨幅；缺一只显式报错不静默漏；轻量探测（1KB vs E2 的 436KB） |
+| 批量净值 `fund_realtime_nav(codes)` | N 只 = 1 请求（≤50 自动分块）：最新净值/日期/日涨幅；输入去重并保持输入序输出；缺失、意外、重复代码及畸形记录均显式报错；轻量探测（1KB vs E2 的 436KB） |
 | 复权净值 `adjusted_nav(recs)` | 分红再投口径；主链官方 equityReturn（上游已处理分红/拆分），单位净值+分红兜底；输出首点=首日单位净值 |
-| 蛋卷档案 `fund_detail_danjuan(q)` | 总份额/经理/托管/风险等级/申赎状态（跨域备胎，1 请求） |
+| 蛋卷档案 `fund_detail_danjuan(q)` | 总份额/经理/托管/风险等级/申赎状态（跨域备胎，1 请求；独立 provider 风控与熔断，teardown 同样按域名分线） |
 
 ### 持仓层
 
 | 端点 | 数据 |
 |---|---|
-| 季度前十大 `fund_holdings(q,year)` | 各季报前十大：代码/名称/占净值比/持股数/市值；`year` 指定拉历史各季；thead **动态列映射**（V0.4.1：上游改列序显式报错不静默错列）；当日缓存 |
+| 季度前十大 `fund_holdings(q,year,force_refresh)` | 各季报前十大：代码/名称/占净值比/持股数/市值；`year` 指定拉历史各季；thead **动态列映射**（V0.4.1：上游改列序显式报错不静默错列）；当日缓存，`force_refresh=True` 绕过缓存 |
 | 穿透桥 `holding_map(snap)` | 重仓股整理成纯 6 位代码清单 + a-stock-data 调用说明（零网络） |
 
 ### 评测计算层（零网络，全部可离线单测）
@@ -170,7 +170,7 @@
 | 全市场排行 `fund_rank(top,fund_type,sort,ascending)` ⭐ | 24792 只全量 **1 请求**（鉴权仅 Referer，无 cookie）；top=None 全量 20h 缓存 + fund_type（zs/gp/hh/zq/qdii/fof）/sort（ytd/1m~3y/since）/ascending 全部本地执行 = 组合筛选 **0 请求**；None 值恒排末尾；翻页参数从签名上不存在（496 页逐页爬的封禁路径消失）；top=1~100 走服务端单页 |
 | 新发基金 `fund_new_issues()` | 在发/新成立全量（record 总数强校验防截断）：代码/名称/公司+8位ID/类型/发行期/费率/经理；顺带产出公司名→ID 映射（company 消歧用） |
 | 公司画像 `fund_company(q)` | 三形态入参：8 位公司ID 直取 / 6 位基金码经 jbgk 直链转公司 / 公司名走新发缓存 best-effort；管理规模/基金数/经理数/旗下清单（服务端直出，24h 缓存） |
-| 抱团度 `fund_crowding(rdate)` | 季度基金重仓股聚合（巨潮官方专题 p_sysapi1112）：被多少只基金持有/持股数/市值，按家数降序——TOP50 与 TOP10 平均家数（抱团温度计）直接可算；1 请求/季，90 天缓存；实测 2026Q3：3088 只、Top1 中际旭创 2424 家。⚠️ 季末后约 15 个工作日披露窗口内最新季聚合不完整且首拉即缓存——刚过季末显式传上一季度 rdate |
+| 抱团度 `fund_crowding(rdate)` | 季度基金重仓股聚合（巨潮官方专题 p_sysapi1112）：被多少只基金持有/持股数/市值，按家数降序——TOP50 与 TOP10 平均家数（抱团温度计）直接可算；季末后120天内 1 小时短缓存、其后 90 天长缓存，避免披露期不完整数据被固化；实测 2026Q3：3088 只、Top1 中际旭创 2424 家 |
 | 行业配置 `fund_industry_allocation(rdate)` | 全市场季度行业配置 19 门类（门类码/名称/家数/市值/占比，p_sysapi1113）——E2 停供后的官方替补；实测制造业 4.6 万亿/11.94% 居首 |
 
 ### 经理画像、专项组装与基准指数层（V0.6~V0.6.2）
@@ -210,7 +210,7 @@
 | 批量实时净值 | N 只 = 1 请求（≤50，自动分块） |
 | 重仓穿透 | 冷启 ≤13；当日重跑 1 |
 | 全市场排行/初筛 | **全量 1 请求**（20h）；类型过滤/排序全在本地缓存 **0 请求** |
-| 抱团度/行业配置 | **1 请求/季**（90 天缓存，已发布季报不可变） |
+| 抱团度/行业配置 | 季末后120天内 1 小时短缓存；其后 90 天长缓存 |
 | 公司画像 / 新发基金 | 画像 1 请求（24h）；新发 ≈7 页（20h 缓存 0） |
 | 经理画像 / 经理排行 | 画像 1 请求（基金码路径快照缓存内 0）；排行 50 条/页（仅姓名序） |
 | 持续性矩阵 / 固收+画像 | **0 请求**（排行与快照缓存上本地组装） |
@@ -280,7 +280,7 @@ norm_fund_code("华夏成长")                     # matches: 000001/024808/... 
 from fund_data import fund_rank, fund_company, fund_crowding, fund_industry_allocation
 rk = fund_rank(fund_type="gp", sort="1y")      # 全市场 1 请求后，过滤排序全本地 0 请求
 fund_company("161725")                         # 基金码→公司画像（规模/基金数/经理/旗下）
-fund_crowding()[:10]                           # 抱团度 Top10（1 请求/季，90 天缓存）
+fund_crowding()[:10]                           # 季末后120天内1h短缓存；其后90天
 fund_industry_allocation()                     # 19 门类行业配置（巨潮官方口径）
 
 # ── 场景 7：经理画像 / 专项组装（V0.6）──
@@ -343,12 +343,13 @@ fund_scale_history("000312")                   # 规模全历史 53 期（含期
 ```bash
 python3 -m unittest test_locks test_no_platform_hardcoding \
   test_cache test_cache_policies test_coordinator test_gateway   # core 六套（含锁契约）
-python3 test_fund_data.py                  # 默认离线：234 条断言（L1 198 + S2 21 + S3 15），零网络，秒级
+python3 test_fund_data.py                  # 默认离线：264 条断言（L1 228 + S2 21 + S3 15），零网络，秒级
 python3 test_fund_data.py --offline-only   # 显式离线（同上）
-python3 test_fund_data.py --online         # 全链路 304 条（真数据，约 2 分钟）
+python3 test_fund_data.py --online         # 全链路 334 条（真数据，约 2 分钟）
 ```
 
-- **分层结构**：L1 单元 198 · S2 协调器集成 21 · S3 缓存集成 15 · core 包 92（锁契约 14 + 平台硬编码守卫 2 + cache 12 + 策略 10 + 协调器 33 + 网关 21）· L2 端点 smoke 45 · L3 三源交叉验证 5 · L4 请求预算审计 2 · L5 降级演练 7 · 防封专项 F×11
+- **分层结构**：L1 单元 228 · S2 协调器集成 21 · S3 缓存集成 15 · core 包 92（锁契约 14 + 平台硬编码守卫 2 + cache 12 + 策略 10 + 协调器 33 + 网关 21）· L2 端点 smoke 45 · L3 三源交叉验证 5 · L4 请求预算审计 2 · L5 降级演练 7 · 防封专项 F×11
+- **CI 矩阵**：Linux / macOS / Windows × Python 3.10 / 3.12 / 3.13，覆盖声明的最低版本与当前版本
 - **交叉验证**（L3）：E2↔E3↔E6 净值互证、E2↔E4a 持仓交集、本地复权收益 vs 官方 `syl_1n` 容差 0.6pct、中债↔东财↔push2 十年期国债三源（同口径近乎一致，断言容差 0.05/0.25pct）
 - **预算审计**（L4）：每次跑完打印四线请求账本（基金域东财含分 host 明细/股票域东财/腾讯/巨潮）
 - **独立审查**：每个版本经 code-reviewer 独立审查闭环（V0.4.1 经三轮：初审 APPROVE → 建议落地 → 双通道复核 APPROVE）
@@ -357,6 +358,7 @@ python3 test_fund_data.py --online         # 全链路 304 条（真数据，约
 
 ## 版本历史
 
+- **V0.7.3（2026-11-16）审查修复**：①腾讯路由默认按股票、指数显式分流，修 000016 等深股被静默导到沪指；②重仓探测基金/股票共用实际基点与共同终点，相对表现按共同起止日期算收益，消除虚假背离与超额；③蛋卷成功只清自身风控且互不关闭对方半开闸门，teardown 同样按 URL 分线；④季末后120天内 1h、其后 90 天，跨季末不会过早固化披露期数据，未来季末拒绝；⑤批量净值输入去重并校验缺失/意外/重复/畸形响应，QDII 同步去重；⑥快照全部表格 `present,unparsed` 入 missing，ECharts 合法空结构不误报；⑦重仓探测 `force_refresh` 贯通快照/持仓/K线，`fund_holdings` 新增可选刷新参数；⑧新发零费率保留并升级缓存键；⑨CI 三平台 × Python 3.10/3.12/3.13，主套件 264 条离线断言全绿
 - **V0.7.2（2026-11-14）三平台同等支持（锁抽象层）**：①新增 `fund_data_core.locks`——跨进程文件锁抽象（**能力检测**选 flock/字节范围锁机制，机制命名无平台分支；进程内注册表按归一化路径互斥、不可重入契约显式报错、有界后端外层重试补齐无限阻塞），state/cache/F1 节流三消费方统一接入；②**消灭 F1 静默降级**——原 fcntl 缺失时降级进程内节流，多进程并发限流失效且无告警，与「绝不静默」立场冲突，现全平台同一锁语义（锁文件与时间戳文件分离，旧时间戳文件无缝衔接）；③修 `safe_cache_path` 扩展前缀竞态——并发创建瞬间 `resolve(strict=False)` 可能返回 `\\?\` 形态而 root 为普通形态，containment 误报 "escapes cache root"（多进程冷启动 ~20% 偶发，插桩实锤）；双侧剥前缀 + resolve 瞬态与真逃逸分开上报；④测试平等化：锁契约套件 14 条（跨进程互斥/崩溃自释放/超时/重入守卫）、平台硬编码守卫（生产代码 os 分支清零）、symlink 能力探测跳过、spawn 多进程用例全平台启用；CI 三平台矩阵 + 在线 workflow_dispatch 手动触发（P26 教训：验证行为本身烧 IP 额度）；Windows 实机原生全绿：core 92 + 离线 234/234 + 在线 304/304，flaky 压测 10/10
 - **V0.7.1（2026-11-12）push2 防复发加固（IP 缓释桶定案）**：五发探针实证封锁=IP 级缓释桶（惩罚期 3 连发即放空、健康期容量大；12:16 三连过证伪「TLS 指纹永久黑名单」）——①`_push2_get` 单发即弃+0.5~3.0s 抖动+**连接级熔断**（2 连败停 1h 独立标记，停机期零网络直通降级链，每小时真实请求 ≤2 次）；②`cn_treasury_realtime` 300s 盘中短缓存+值域守卫 0<y<15；③`kline_daily` 指数行内 `source` 字段（push2his/tencent 诚实标注）；④`concept_blocks` 迁入 `_push2_get`（原 em_get 裸奔同域——上午全量测试崩溃的漏列暴露点）；⑤`_SH_INDEX_Q` 从 BENCH_SECID 派生（修 tencent_quote 裸码路由 000922→sz 深股静默错数据，5 码补齐）；ulist.np 批量实证否决（债券源全零+共享 IP 桶）；教训入册：诊断行为本身烧 IP 额度，排查先 ≤5 次小样本（232/232，L1 162）
 - **V0.7.0（2026-11-12）字段语义升级 + 费率全表（破坏性改名）**：源端点逐一实证后清偿四个名不副实字段——`mgmt_fee_pct`→`subscription_fee_pct`（实为现申购费）、manager 块 `tenure_start`→`total_tenure`/`fund_size_yi`→`current_scale_text`/`return_pct`→`return_chart`（旧键除名不双写）；新增 `fund_fees` F10 费率全表端点（运作费三率+三阶梯）；syl 四窗口与 fees 三标量源端点验证无误；P26 push2 系封锁应急（当时定性 TLS 指纹墙，V0.7.1 修正为 IP 缓释桶——kline 自动落腾讯备胎、国债实时中债收盘降级 as_of 标注）
@@ -391,7 +393,7 @@ python3 test_fund_data.py --online         # 全链路 304 条（真数据，约
 ```
 fund_data.py        # 核心模块（可直接 import；48 个公开函数）
 fund_data_core/     # 跨进程请求协调核心（Gateway/Coordinator/Cache/Policies；import 即默认激活）
-test_fund_data.py   # 304 条分层回归测试（默认 234 条离线；--online 跑全量）
+test_fund_data.py   # 334 条分层回归测试（默认 264 条离线；--online 跑全量）
 build_skill_md.py   # 从模块自动组装双层文档（内嵌代码与源码同源直拼）
 SKILL.md            # Agent skill 路由层（build 产物·瘦入口 ~12KB/≈4K token）：铁律/场景路由/失效路由/签名速查
 reference.md        # 全量参考（按需读取层）：完整内嵌代码/P1~P27 坑区/端点路由/使用示例/版本记录
