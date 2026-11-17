@@ -4,15 +4,15 @@ slug: fund-data
 displayName: 基金数据底座 FundBase
 display_name: 基金数据底座 FundBase
 display_name_en: FundBase · The Data Foundation for China Funds
-description: 写代码实际获取基金领域底层数据时使用——零key零登录，八层能力：【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:净值全史/规模史/持有人/经理/重仓股债/仓位史/基准三曲线/申赎/费率)、区间净值+申赎状态、批量实时净值、季度前十大、蛋卷备胎，快照挂自动降级；【本地计算】复权/回撤/波动/夏普/卡玛/费率标注、定投XIRR、仓位解读(加减仓)、同类百分位(一年前对照)、相对表现(vs沪深300/同类平均)；【持仓穿透】腾讯行情×板块归属→主题聚合→白酒约86%白话地图；【宏观利率】中债曲线族40+条、信用利差、国债/SHIBOR/基准利率史、GC007、国债盘中；【全市场】24792只排行底座(过滤排序全本地)、新发基金全量、公司画像、抱团度(巨潮)、19门类行业配置；【经理与专项】经理画像(在管清单/任期/回报)、排行、持续性矩阵、固收+画像、费率全表(管理/托管/赎回阶梯)、单基金规模(ENDNAV)、规模全历史(53期含申赎流量)、QDII溢价、重仓探测；【基准指数】指数与股票日线(沪深300等15指数,十年全史,1请求)。请求预算制防封(铁律见下)。仅在需要调用数据接口取数时使用：基金概念解释、投资观点讨论等无需取数的话题不要加载本skill。
+description: 写代码实际获取基金领域底层数据时使用——零key零登录，八层能力：【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:净值全史/规模史/持有人/经理/重仓股债/仓位史/基准三曲线/申赎/费率)、区间净值+申赎状态、批量实时净值、季度前十大、蛋卷备胎，快照挂自动降级；【本地计算】复权/回撤/波动/夏普/卡玛/费率标注、定投XIRR、仓位解读(加减仓)、同类百分位(一年前对照)、相对表现(vs沪深300/同类平均)；【持仓穿透】腾讯行情×板块归属→主题聚合→白酒约86%白话地图；【宏观利率】中债曲线族40+条、信用利差、国债/SHIBOR/基准利率史、GC007、国债盘中；【全市场】24792只排行底座(过滤排序全本地)、新发基金全量、公司画像、抱团度(巨潮)、19门类行业配置；【经理与专项】经理画像(在管清单/任期/回报)、排行、持续性矩阵、固收+画像、费率全表(管理/托管/赎回阶梯)、单基金规模(ENDNAV)、规模全历史(53期含申赎流量)、QDII溢价、重仓探测；【基准指数】指数/行业板块/股票日线(宽基+风格+东财行业板块共119指数,十年全史,1请求)。请求预算制防封(铁律见下)。仅在需要调用数据接口取数时使用：基金概念解释、投资观点讨论等无需取数的话题不要加载本skill。
 description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集、白话持仓穿透地图、24792 只全市场排行、经理画像与抱团度、十年指数日线与 53 期规模全史——零 key 零登录，请求预算制防封，分层断言全绿。为一切基金应用打地基。
 description_en: The full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), plain-language holdings maps, 24,792-fund market rankings, manager profiles and crowding, 10-year index klines, 53-period scale history. Zero keys, zero login, layered assertions green. The ground every fund application builds on.
 author: hotsauce000
 origin: custom
-version: 0.7.4
+version: 0.7.6
 ---
 
-# fund-data 路由层 V0.7.4
+# fund-data 路由层 V0.7.6
 
 本文件是**路由层**（≈4K token，激活只加载本文件）。细节/坑区/内嵌代码在同目录 **reference.md（按需读取）**；复制即用示例与 FAQ 在 **examples.md（按需读取）**；运行代码 `fund_data.py`（import 用，勿通读）：
 
@@ -49,7 +49,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | 业绩持续性/固收+画像 | `rank_persistence()` / `bond_plus_profile(q)`（零请求） | 0 |
 | 规模·全史/费率/溢价/重仓探测 | `fund_scale`·`fund_scale_history`·`fund_fees`·`qdii_premium`·`nav_divergence` | 各1·2·冷启≤12 |
 | 经理画像/排行 | `fund_manager(基金码或经理ID)` · `manager_rank(pages)`（仅姓名序） | 0~1·50/页 |
-| 指数日线 | `kline_daily("沪深300")`（指数名/股票码） | 1（缓存0） |
+| 指数日线 | `kline_daily("沪深300")`（指数名/行业板块名/股票码） | 1（缓存0） |
 | 债基利率敏感度 | `cb_yield_curve` + `credit_spread` / `treasury_yield_daily` | 1~2 |
 | 重仓股深度（龙虎榜/估值史） | `holding_map` → **a-stock-data skill** | 0 |
 
@@ -59,13 +59,13 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 |---|---|---|
 | E2 网络失败/真正空体 | **自动降级** E3+E4a+蛋卷（source=degraded），不污染缓存 | 窗口默认 1 年；风控页/结构异常显式上抛，不降级 |
 | 历史净值兜底 | E3 lsjz 逐页（TotalCount 强校验） | **跨域无备胎（P17 三候选全死）** |
-| 个股行情 | 腾讯通道（不封 IP） | — |
+| 个股行情 | 腾讯通道（不封 IP；挂→`sina_quote` 互备，sh/sz 前缀必带） | — |
 | 利率曲线 | 中债 curl 通道（TLS 指纹墙 P11） | 东财 datacenter 互证 |
 | rankhandler 被拦 | 200+「无访问权限」（**无 403**）→ `RiskControlError`+熔断（P19） | 查 Referer 头 |
 | cninfo 451/token null | enckey 时效**非风控**，刷新重试一次（P20） | 仍拒=时钟漂移 |
 | 403/429 | `RiskControlError` 上抛+熔断10min（不触发降级） | 冷却期零网络，等勿重试 |
 
-## 函数速查（48 个，构建时自动生成勿手改）
+## 函数速查（49 个，构建时自动生成勿手改）
 
 | 函数 | 说明 |
 |---|---|
@@ -88,6 +88,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | `holding_map(snapshot, topn=10)` | 持仓穿透桥（零网络）：把重仓股代码整理成可直接喂 a-stock-d |
 | `em_get(url, params=None, headers=None, timeout=15, **kwargs)` | 股票域东财统一入口（push2 系）：跨进程串行限流(F1) + 熔 |
 | `tencent_quote(codes)` | 腾讯批量实时行情（通道内嵌自 a-stock-data §1.2）： |
+| `sina_quote(codes)` | 新浪批量实时行情（V0.7.5 备胎通道，定位=腾讯互备低频使用） |
 | `em_market_code(code)` | 东财 secid 市场号：沪=1，深/北=0（规则照抄 a-stoc |
 | `concept_blocks(stock_code, use_cache=True)` | 个股板块标签（通道内嵌自 a-stock-data §3.3 东财  |
 | `penetrate(query, topn=10)` | 重仓穿透主入口（R9 场景 04）：基金 → 重仓股权重 → 股票域 |
@@ -125,6 +126,6 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 ## 深读与边界（按需）
 
 - 复制即用示例（12 场景菜谱）+ 按现象查 FAQ → 同目录 `examples.md`（写调用代码/排错前读）
-- 实现细节/坑区 P1~P27/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
+- 实现细节/坑区 P1~P30/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
 - 不覆盖：账户持仓/交易下单（ttskill）、盘中实时估值、货基万份收益、单基金行业史（E2停供）、语义选基、FOF底层明细与经理姓名索引（P23/P24）
 - 个股深度 → a-stock-data；holding_map() 是官方桥

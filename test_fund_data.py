@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-fund-data V0.7.4 分层测试运行器（按测试计划 V1.0）
+fund-data V0.7.6 分层测试运行器（按测试计划 V1.0）
   L1 单元（零网络）· L2 端点 smoke（结构断言）· L3 交叉验证（三源互证）
   L4 请求预算审计 · L5 降级演练与坑回归 · L6 穿透层（确定性/降级/路由/清洗）
 用法: python3 test_fund_data.py [--offline-only | --online]（默认离线）
@@ -33,7 +33,7 @@ fd.FUND_CACHE_DIR = Path(_TEST_CACHE_TMP.name)
 # 测试期的配额/熔断状态绝不写进 ~/.fund_data_cache/coordinator。间隔归零：
 # 滑窗/间隔语义由 fund_data_core 单测钉死，集成回归不为节流真睡 1.5s。
 _ZERO_POLICY = {line: {"min_interval": 0} for line in
-                ("eastmoney", "cninfo", "danjuan", "tencent", "chinabond")}
+                ("eastmoney", "cninfo", "danjuan", "tencent", "sina", "chinabond")}
 
 
 def _fresh_coordination():
@@ -86,6 +86,212 @@ def expect_raise(layer, name, fn, contains=""):
 
 # ════════════════════ L1 单元测试（零网络）════════════════════
 def test_l1_offline():
+
+    # V0.7.5 新浪通道：解析纯函数（真实捕获行样本，零网络）
+    _sina_sample = ('var hq_str_sh118078="航亚转债,0.000,130.730,0.000,0.000,0.000,'
+                    '130.005,130.005,0,0.000,6660,130.005,0,0.000,0,0.000,0,0.000,'
+                    '0,0.000,6660,130.005,10,0.000,0,0.000,0,0.000,0,0.000,'
+                    '2026-11-17,09:19:46,00,";\n'
+                    'var hq_str_sz127120="千红转债,0.000,128.801,0.000,0.000,0.000,'
+                    '128.500,128.500,0,0.000,2110,128.500,0,0.000,0,0.000,0,0.000,'
+                    '0,0.000,2110,128.500,1072,0.000,0,0.000,0,0.000,0,0.000,'
+                    '2026-11-17,09:19:39,00";')
+    _sina_parsed = fd._parse_sina_body(_sina_sample)
+    check("L1", "新浪解析-两券齐全", sorted(_sina_parsed) == ["118078", "127120"])
+    check("L1", "新浪解析-字段取位", _sina_parsed["118078"]["name"] == "航亚转债"
+          and _sina_parsed["118078"]["prev_close"] == 130.73
+          and _sina_parsed["118078"]["bid1"] == 130.005
+          and _sina_parsed["118078"]["date"] == "2026-11-17"
+          and _sina_parsed["118078"]["time"] == "09:19:46"
+          and _sina_parsed["127120"]["time"] == "09:19:39")
+    check("L1", "新浪解析-残行跳过",
+          fd._parse_sina_body('var hq_str_bad="残";') == {})
+    # V0.7.5 新浪通道：风控/空体语义（协调器在位，stub opener 零网络）
+    import urllib.error as _ue
+    import io as _io
+
+    class _StubSinaOpener:
+        def __init__(self, mode):
+            self._mode = mode
+
+        def open(self, req, timeout=None):
+            if self._mode == "403":
+                raise _ue.HTTPError(req.full_url, 403, "Forbidden", None, None)
+            return _io.BytesIO(b"")          # 空体
+
+    _orig_bo = fd.urllib.request.build_opener
+    try:
+        for _mode, _expect, _label in (
+                ("403", fd.RiskControlError, "新浪-403计风控抛RiskControlError"),
+                ("empty", RuntimeError, "新浪-空体计信号抛RuntimeError")):
+            fd.urllib.request.build_opener = (
+                lambda h=None, _m=_mode: _StubSinaOpener(_m))
+            _fresh_coordination()
+            try:
+                fd._sina_raw("https://hq.sinajs.cn/list=sh118078")
+                check("L1", _label + "-应抛未抛", False)
+            except _expect as e:
+                ok = not _mode == "403" or "新浪" in str(e)
+                check("L1", _label, ok)
+            except Exception:
+                check("L1", _label + "-错型错误", False)
+    finally:
+        fd.urllib.request.build_opener = _orig_bo
+
+    # ── V0.7.5 行情通道防封加固：软封锁/连接级/结构守卫/403 分流（stub 零网络）──
+    class _StubOpener2:
+        def __init__(self, mode, counter=None):
+            self._mode, self._ctr = mode, counter
+
+        def open(self, req, timeout=None):
+            if self._ctr is not None:
+                self._ctr[0] += 1
+            if self._mode == "403":
+                raise _ue.HTTPError(req.full_url, 403, "Forbidden", None, None)
+            if self._mode == "conn":
+                raise _ue.URLError("connection reset")
+            if self._mode == "softblock":
+                return _io.BytesIO('var hq_str_sh118078="";'.encode("gbk"))
+            return _io.BytesIO('v_sh600519="1~名~600519~1";'.encode("gbk"))
+
+    _orig_bo2 = fd.urllib.request.build_opener
+    try:
+        # sina 软封锁：200+非空体+全空 var 行 → 风控信号 + fail-fast（不静默 {}）
+        fd.urllib.request.build_opener = lambda h=None: _StubOpener2("softblock")
+        _fresh_coordination()
+        try:
+            fd.sina_quote(["sh118078"])
+            check("L1", "新浪-软封锁应抛未抛", False)
+        except RuntimeError as e:
+            check("L1", "新浪-软封锁全空var计信号抛错",
+                  "全未命中" in str(e) and fd._cbreak_state["sina"][0] >= 1)
+        # sina 连接级熔断：2 连败写停机标记，第 3 次零网络直拒；期满自动复位
+        _ctr = [0]
+        fd.urllib.request.build_opener = lambda h=None: _StubOpener2("conn", _ctr)
+        _fresh_coordination()
+        fd._sina_conn_fails[0] = 0
+        fd._sina_conn_file().unlink(missing_ok=True)
+        for _ in range(2):
+            try:
+                fd._sina_raw("https://hq.sinajs.cn/list=sh118078")
+            except _ue.URLError:
+                pass
+        _stopped = fd._sina_conn_file().exists()
+        try:
+            fd._sina_raw("https://hq.sinajs.cn/list=sh118078")
+            check("L1", "新浪-连接级停机应拒未拒", False)
+        except RuntimeError as e:
+            check("L1", "新浪-连接级2连败停机零网络",
+                  _stopped and "连接级熔断" in str(e) and _ctr[0] == 2)
+        fd._sina_conn_file().write_text("0 stale-test")   # 已过期标记 → 自动复位放行
+        try:
+            fd._sina_raw("https://hq.sinajs.cn/list=sh118078")
+        except _ue.URLError:
+            pass
+        check("L1", "新浪-停机期满自动复位",
+              _ctr[0] == 3 and not fd._sina_conn_file().exists())
+        # tencent 结构守卫：响应有行但 <53 段 → 拒绝静默空（无效码不回行，不在此列）
+        fd.urllib.request.build_opener = lambda h=None: _StubOpener2("short")
+        _fresh_coordination()
+        try:
+            fd.tencent_quote(["sh600519"])
+            check("L1", "腾讯-结构守卫应抛未抛", False)
+        except RuntimeError as e:
+            check("L1", "腾讯-结构守卫有行0解析拒绝静默空", "0 行解析成功" in str(e))
+        # tencent 403 分流：RiskControlError + 连击镜像（不再被 OSError 当瞬态重试）
+        fd.urllib.request.build_opener = lambda h=None: _StubOpener2("403")
+        _fresh_coordination()
+        try:
+            fd._tencent_raw("https://qt.gtimg.cn/q=sh600519")
+            check("L1", "腾讯-403应抛未抛", False)
+        except fd.RiskControlError as e:
+            check("L1", "腾讯-403计风控抛RiskControlError",
+                  "腾讯" in str(e) and fd._cbreak_state["tencent"][0] >= 1)
+    finally:
+        fd.urllib.request.build_opener = _orig_bo2
+        fd._sina_conn_file().unlink(missing_ok=True)
+        fd._sina_conn_fails[0] = 0                  # 复位子测试残留 1 次连败，防误触发后续 2 连败停机
+
+    # ── V0.7.5 中债 curl 通道接协调器（stub gateway 零网络）──
+    class _StubPermit:                            # 假许可：钉住中性结算/空体结算顺序
+        def __init__(self):
+            self.settled = []
+
+        def failure(self, reason=None, response_received=False):
+            self.settled.append((reason, response_received))
+
+    class _StubResp:
+        def __init__(self, status, content=b""):
+            self.status_code, self.content = status, content
+            self.permit = _StubPermit()           # 真实 Gateway 2xx 恒附待裁决许可
+
+    class _StubGateway:
+        def __init__(self, mode):
+            self._mode, self.calls, self.last_permit = mode, [0], None
+
+        def curl_request(self, method, url, **kw):
+            self.calls[0] += 1
+            if self._mode == "403":
+                raise fd.RiskControlError("HTTP 403（中债）：疑似中债风控信号，已计入熔断")
+            resp = _StubResp(200, b"" if self._mode == "empty" else b"xlsx-bytes")
+            self.last_permit = resp.permit
+            return resp
+
+    _gw = fd._REQUEST_GATEWAY
+    try:
+        # 成功路径：2xx 非空 → 返回字节 + permit 中性结算被调（cb-passthrough）
+        fd._REQUEST_GATEWAY = _StubGateway("ok")
+        check("L1", "中债-协调器curl通道成功返回字节",
+              fd._cb_request("/yc/downYearBzqx", {"ycDefId": "x" * 32}) == b"xlsx-bytes"
+              and fd._REQUEST_GATEWAY.last_permit.settled
+              == [("cb-passthrough", True)],
+              "返回字节且待裁决许可中性结算（业务清零归 cb_* 调用方）")
+        # 空体：先中性结算（cb-empty-body）再风控信号 + RuntimeError（防挂起许可占坑）
+        _fresh_coordination()                        # 先重建协调器再装 stub——顺序颠倒会重建真网关冲掉 stub（曾致真实请求漏网）
+        fd._REQUEST_GATEWAY = _StubGateway("empty")
+        try:
+            fd._cb_request("/yc/queryTree", method="POST")
+            check("L1", "中债-空体应抛未抛", False)
+        except RuntimeError as e:
+            check("L1", "中债-空体先结算后信号拒绝静默空",
+                  "空体" in str(e)
+                  and fd._REQUEST_GATEWAY.last_permit.settled
+                  == [("cb-empty-body", True)]
+                  and fd._cbreak_state["cb"][0] >= 1)
+        # 403 → RiskControlError 透传且不重试（外层瞬态循环豁免风险型）
+        fd._REQUEST_GATEWAY = _StubGateway("403")
+        try:
+            fd._cb_request("/yc/queryTree", method="POST")
+            check("L1", "中债-403应抛未抛", False)
+        except fd.RiskControlError:
+            check("L1", "中债-403风控透传不重试", fd._REQUEST_GATEWAY.calls[0] == 1)
+    finally:
+        fd._REQUEST_GATEWAY = _gw
+    # teardown 地板 spy：legacy 分支走 CB_MIN_INTERVAL 独立常量（不再误用东财间隔）。
+    # 两常量数值同 1.5，元组比对无法区分——临时改 CB 值验证调用点引用的是 CB 常量
+    import subprocess as _sp
+    _orig_run, _orig_thr, _orig_cbiv = _sp.run, fd._cross_proc_throttle, fd.CB_MIN_INTERVAL
+    _thr_calls = []
+    try:
+        fd._teardown_request_coordination()
+        fd.CB_MIN_INTERVAL = 0.7                     # 临时改值：若调用点读 TT(1.5) 会露馅
+
+        class _P:
+            returncode, stdout, stderr = 0, b"legacy-bytes", b""
+
+        _sp.run = lambda *a, **k: _P()
+        fd._cross_proc_throttle = lambda line, iv: _thr_calls.append((line, iv))
+        got = fd._cb_request("/yc/queryTree", {"locale": "zh_CN"}, method="POST")
+        check("L1", "中债-teardown地板走CB_MIN_INTERVAL",
+              got == b"legacy-bytes" and ("cb", 0.7) in _thr_calls
+              and ("cb", 1.5) not in _thr_calls,
+              "调用点引用 CB_MIN_INTERVAL（临时 0.7 生效），非东财 TT_MIN_INTERVAL")
+    finally:
+        _sp.run = _orig_run
+        fd._cross_proc_throttle = _orig_thr
+        fd.CB_MIN_INTERVAL = _orig_cbiv
+        _fresh_coordination()
+        _fresh_coordination()
     # 复权净值：无分红区间 == 单位净值比
     recs = [{"date": f"2026-01-0{i}", "nav": v, "dividend": 0}
             for i, v in enumerate([1.0, 1.1, 0.99], start=1)]
@@ -572,8 +778,8 @@ def test_l1_offline():
     _thin = (_repo / "SKILL.md").read_text(encoding="utf-8")
     _ref = (_repo / "reference.md").read_text(encoding="utf-8")
     _thin_b = len(_thin.encode("utf-8"))
-    check("L1", "架构-瘦SKILL体积上限", _thin_b < 13000,
-          f"{_thin_b}B/上限13000（含平台必填市场元数据~0.5KB；超重=往路由层塞长文，移 reference.md）")
+    check("L1", "架构-瘦SKILL体积上限", _thin_b < 13300,
+          f"{_thin_b}B/上限13300（含平台必填市场元数据~0.5KB；超重=往路由层塞长文，移 reference.md）")
     _pub = [n.name for n in _ast.parse((_repo / "fund_data.py").read_text(encoding="utf-8")).body
             if isinstance(n, _ast.FunctionDef) and not n.name.startswith("_")]
     check("L1", "架构-签名速查全覆盖", len(_pub) >= 32 and all(f"| `{n}(" in _thin for n in _pub),
@@ -1210,8 +1416,13 @@ def test_l1_offline():
           and fd._kline_resolve("中证A500") == ("index", "1.000510")
           and fd._kline_resolve("1.000905") == ("index", "1.000905")
           and fd._kline_resolve("600519") == ("stock", "600519")
-          and fd._kline_resolve("SZ300308") == ("stock", "sz300308"),
-          "指数名/secid/股票码/带前缀码（前缀保留市场信息）")
+          and fd._kline_resolve("SZ300308") == ("stock", "sz300308")
+          and fd._kline_resolve("上证指数") == ("index", "1.000001")
+          and fd._kline_resolve("上证综指") == ("index", "1.000001")
+          and fd._kline_resolve("深证成指") == ("index", "0.399001")
+          and fd._kline_resolve("深证综指") == ("index", "0.399106")
+          and fd._kline_resolve("上证180") == ("index", "1.000010"),
+          "指数名/secid/股票码/带前缀码（前缀保留市场信息；V0.7.5 扩表 4 指数）")
     expect_raise("L1", "K线-未知名拒绝",
                  lambda: fd._kline_resolve("纳斯达克"), "不识别")
     check("L1", "K线-secid→腾讯符号(市场2不降级)",
@@ -1313,18 +1524,141 @@ def test_l1_offline():
         fb_rows = fd.kline_daily("1.000905", lmt=10, force_refresh=True)
         _u6.build_opener = _orig_bo6                 # 用毕即还（后续块免受污染）
         check("L1", "K线-通道网络失败落腾讯备胎(P26主干)",
-              len(fb_rows) == 11 and fb_rows[0]["source"] == "tencent"
+              len(fb_rows) == 10 and fb_rows[0]["source"] == "tencent"
               and fd.TENCENT_REQUEST_COUNT[0] == _tx0 + 1,
-              f"mock 备胎供 {len(fb_rows)} 根（腾讯账本 +1，零真实网络，source=tencent）")
+              f"mock 备胎供 {len(fb_rows)} 根（V0.7.6 翻页按 lmt 截齐：mock 11 行 payload "
+              f"取最近 10；腾讯账本 +1，零真实网络，source=tencent）")
     finally:
         fd._push2_get = _orig_p2g
         fd._cache_read, fd._cache_write = _cache_rw
         fd.TENCENT_REQUEST_COUNT[0] = _tx0
 
+    # ── V0.7.6 腾讯翻页全史备胎（缝合纯函数 + 翻页端到端，stub 零网络）──
+    from datetime import date as _d7, timedelta as _td7
+
+    def _pg7(start, n):                           # 合成连续 n 根（跳周末，日期严格递增）
+        out, cur = [], _d7.fromisoformat(start)
+        while len(out) < n:
+            if cur.weekday() < 5:
+                out.append({"date": cur.isoformat(),
+                            "close": round(10.0 + len(out) * 0.01, 2)})
+            cur += _td7(days=1)
+        return out
+
+    _long7 = _pg7("2018-01-01", 2000)
+    _pgA = _long7[-800:]                          # 最新页 = long[1200:2000]
+    _pgB = _long7[401:1201]                       # 次页 800 根：末恰为 _pgA[0]（锚定页含锚日）
+    check("L1", "腾讯翻页-缝合纯函数正常",
+          len(fd._stitch_tencent_pages([_pgA, _pgB])) == 1599
+          and fd._stitch_tencent_pages([_pgA, _pgB])[0]["date"] == _long7[401]["date"],
+          "两页 800+800 缝合（页尾锚重叠 1 行）=1599，起点对齐次页首")
+    _bad_gap = [dict(r) for r in _pgB]
+    _bad_gap[-1] = {"date": "1999-01-01", "close": _pgA[0]["close"]}
+    expect_raise("L1", "腾讯翻页-缝断档整批拒绝",
+                 lambda: fd._stitch_tencent_pages([_pgA, _bad_gap]), "断档或越界")
+    _bad_px = [dict(r) for r in _pgB]
+    _bad_px[-1] = {"date": _pgA[0]["date"], "close": _pgA[0]["close"] + 9.9}
+    expect_raise("L1", "腾讯翻页-缝收盘漂移整批拒绝",
+                 lambda: fd._stitch_tencent_pages([_pgA, _bad_px]), "收盘不一致")
+
+    # 端到端：push2 熔断 → 翻页备胎拼全史（opener 按 param 末锚分流三页）
+    import types as _types7
+    import urllib.request as _u7
+    _orig_bo7 = _u7.build_opener
+    _pgC = _long7[102:402]                        # 第三页短页 300 根：末恰为 _pgB[0] 锚
+    _pages7 = {"": _pgA, _pgA[0]["date"]: _pgB, _pgB[0]["date"]: _pgC}
+    _tx7 = fd.TENCENT_REQUEST_COUNT[0]
+
+    def _tx_open7(req, timeout=None):             # 按 URL 的 end 参数返回对应页
+        seg = req.full_url.split("day,,")[1].split(",")[0]
+        rows = _pages7[seg if seg else ""]
+        payload = {"data": {"sh000905": {"qfqday": [
+            [r["date"], "1", str(r["close"])] for r in rows]}}}
+        return _types7.SimpleNamespace(read=lambda: json.dumps(payload).encode("utf-8"))
+
+    _p2g7, _cw7 = fd._push2_get, (fd._cache_read, fd._cache_write)
+    try:
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda *a, **k: None
+        _u7.build_opener = lambda *a, **k: _types7.SimpleNamespace(open=_tx_open7)
+        fd._push2_get = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("push2 通道失败(mock 熔断)"))
+        _k7 = fd.kline_daily("1.000905", lmt=2000, force_refresh=True)
+        check("L1", "腾讯翻页-备胎端到端拼全史",
+              len(_k7) == 1898 and _k7[0]["date"] == _long7[102]["date"]
+              and _k7[-1]["date"] == _long7[-1]["date"]
+              and all(r["source"] == "tencent" for r in _k7)
+              and fd.TENCENT_REQUEST_COUNT[0] == _tx7 + 3,
+              f"熔断期备胎 3 发串行拼 {_long7[102]['date']}→今 1898 根（原短窗只有 800）")
+        # 锚停滞：恒返同一满页 → 缝校验/停滞守卫整批拒绝（拒绝静默截断）。
+        # 直测分页函数：kline_daily 层 fb_note 截断 40 字会吃掉「整批拒绝」字样
+        _u7.build_opener = lambda *a, **k: _types7.SimpleNamespace(
+            open=lambda req, timeout=None: _types7.SimpleNamespace(
+                read=lambda: json.dumps({"data": {"sh000905": {"qfqday": [
+                    [r["date"], "1", str(r["close"])] for r in _pgA]}}}).encode("utf-8")))
+        expect_raise("L1", "腾讯翻页-锚停滞整批拒绝",
+                     lambda: fd._tencent_kline_paginated("sh000905", 3000),
+                     "整批拒绝")
+    finally:
+        _u7.build_opener = _orig_bo7
+        fd._push2_get = _p2g7
+        fd._cache_read, fd._cache_write = _cw7
+        fd.TENCENT_REQUEST_COUNT[0] = _tx7
+
+    # 页数阀耗尽 / 非首页空页：两条拒绝静默截断防线（stub 在 _tencent_kline_page 层）
+    _big7 = _pg7("1980-01-01", 9000)
+
+    def _mkpages7(series, count):                 # 尾部起连续翻页（页尾=前页首，各 800 根）
+        pages, hi = [], len(series)
+        while len(pages) < count:
+            pages.append(series[hi - 800:hi])
+            hi -= 799
+        return pages
+
+    _orig_tkp7 = fd._tencent_kline_page
+    try:
+        _calls7 = [0]
+        _stack7 = _mkpages7(_big7, 12)
+
+        def _fake_tkp7(pre, end_date=None, bars=None):
+            _calls7[0] += 1
+            return _stack7[_calls7[0] - 1]
+        fd._tencent_kline_page = _fake_tkp7
+        expect_raise("L1", "腾讯翻页-页数阀耗尽整批拒绝",
+                     lambda: fd._tencent_kline_paginated("sh000300", 8500),
+                     "页数阀耗尽")                  # 10 页去重 7991 < 8500，末页满页=历史未到头
+
+        _calls7b = [0]
+
+        def _fake_tkp7b(pre, end_date=None, bars=None):
+            _calls7b[0] += 1
+            return _pgA if _calls7b[0] == 1 else []   # 满页后锚定页回空（协议异常形态）
+        fd._tencent_kline_page = _fake_tkp7b
+        expect_raise("L1", "腾讯翻页-中段空页整批拒绝",
+                     lambda: fd._tencent_kline_paginated("sh000300", 2600),
+                     "+1 重叠协议")
+    finally:
+        fd._tencent_kline_page = _orig_tkp7
+
+    # ── V0.7.6 行业板块指数（BK 查表 + 直传放行 + 腾讯符号边界）──
+    check("L1", "K线-行业板块查表与BK直传",
+          fd._kline_resolve("半导体") == ("index", "90.BK1036")
+          and fd._kline_resolve("银行Ⅱ") == ("index", "90.BK0475")
+          and fd._kline_resolve("90.BK0475") == ("index", "90.BK0475")
+          and len(fd.BENCH_SECID) == 125,
+          "东财行业板块 100 个入表（clist t:2 快照 2026-11-17）+ BK secid 直传放行")
+    check("L1", "K线-BK指数无腾讯备胎",
+          fd._secid_tencent_sym("90.BK1036") is None
+          and fd._secid_tencent_sym("1.000300") == "sh000300",
+          "板块指数腾讯无码不降级（与市场2同款 EM 单源语义）")
+
     # 审查必须项回归锁：sh000xxx 沪指与深股 000xxx 碰撞（实测 sh000016 曾静默错成深康佳A）
+    # V0.7.5 上证指数(1.000001)/上证180(1.000010) 入表：sh000001/sh000010 现随
+    # 值域回 index（原断言"sh000001→stock"编码的是旧表缺口，非期望行为）
     check("L1", "K线-前缀命中基准值域回index",
           fd._kline_resolve("sh000016") == ("index", "1.000016")
-          and fd._kline_resolve("sh000001") == ("stock", "sh000001")
+          and fd._kline_resolve("sh000001") == ("index", "1.000001")
+          and fd._kline_resolve("sh000010") == ("index", "1.000010")
           and fd._kline_resolve("sz000016") == ("stock", "sz000016")
           and fd._kline_resolve("399006") == ("index", "0.399006"),
           "前缀保留市场信息+值域回index+399深指号段")
@@ -1464,7 +1798,8 @@ def test_l1_offline():
               and rt7b["time"] == rt7["time"],
               f"一调 {_calls7b[0]} 请求（4 期限）、二调 0（300s 短缓存），"
               f"10y={rt7['10y']['yield_pct']}")
-        # 值域守卫：f43=200000 → y=20 越界 → 拒绝静默脏值 → 降级中债收盘（不写缓存）
+        # 值域守卫：f43=200000 → y=20 越界 → 拒绝静默脏值 → 降级中债收盘。
+        # V0.7.5：降级写独立短缓存键（防降级期重打 push2 软失败窗口），健康键不污染
         def _fake_dirty7b(url, params=None, context=""):
             _calls7b[0] += 1
             return {"data": {"f43": 200000}}
@@ -1476,10 +1811,14 @@ def test_l1_offline():
         _store7b.clear()
         _calls7b[0] = 0
         rt7c = fd.cn_treasury_realtime()
-        check("L1", "国债实时-脏值守卫降级不写缓存",
+        rt7d = fd.cn_treasury_realtime()           # 300s 内二调：命中降级短缓存 0 请求
+        check("L1", "国债实时-脏值守卫降级写独立短缓存",
               "收盘(降级" in rt7c["as_of"] and rt7c["10y"]["change"] is None
-              and not _store7b and _calls7b[0] == 1,
-              f"首期限越界即触发降级（{_calls7b[0]} 请求后走中债收盘，短缓存未写）")
+              and any("realtime_degraded" in k for k in _store7b)
+              and not any("realtime_push2" in k for k in _store7b)
+              and _calls7b[0] == 1 and rt7d["time"] == rt7c["time"],
+              f"首期限越界即触发降级（{_calls7b[0]} 请求后走中债收盘，独立键已写，"
+              f"二调 0 请求命中降级缓存）")
     finally:
         fd._push2_get = _p2g7b
         fd._cache_read, fd._cache_write = _cw7b

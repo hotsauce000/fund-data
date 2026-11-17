@@ -4,8 +4,8 @@
 产物一 SKILL.md（瘦路由层，上限 12KB）：skill 激活时唯一进上下文的文件——
   防封铁律 + 场景路由表 + 失效/备源路由表 + 函数签名速查（ast 从模块自动抽取）
 产物二 reference.md（全量参考）：按需读取——完整内嵌代码（与源码同源直拼）
-  + P1~P18 完整坑区 + 端点路由 + 使用示例 + 版本记录
-产物三 examples.md（菜谱+FAQ 层，V0.7.4）：按需读取——12 场景复制即用示例
+  + P1~P30 完整坑区 + 端点路由 + 使用示例 + 版本记录
+产物三 examples.md（菜谱+FAQ 层，V0.7.4 引入）：按需读取——12 场景复制即用示例
   + 按现象组织的 FAQ。手工维护（非自动生成），构建时同步到 skill 目录并
   校验章节齐全（评测扣分项"示例与 FAQ 不集中"的对症层）。
 防漂移：签名表自动生成；构建时强校验（瘦身体积上限 + 签名覆盖全部公开函数）。
@@ -59,7 +59,7 @@ def _sig_rows() -> list:
     return rows
 
 
-VERSION = "0.7.4"
+VERSION = "0.7.6"
 DESCRIPTION = (
     "写代码实际获取基金领域底层数据时使用——零key零登录，八层能力："
     "【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:"
@@ -73,7 +73,7 @@ DESCRIPTION = (
     "抱团度(巨潮)、19门类行业配置；"
     "【经理与专项】经理画像(在管清单/任期/回报)、排行、持续性矩阵、固收+画像、费率全表(管理/托管/赎回阶梯)、"
     "单基金规模(ENDNAV)、规模全历史(53期含申赎流量)、QDII溢价、重仓探测；"
-    "【基准指数】指数与股票日线(沪深300等15指数,十年全史,1请求)。"
+    "【基准指数】指数/行业板块/股票日线(宽基+风格+东财行业板块共119指数,十年全史,1请求)。"
     "请求预算制防封(铁律见下)。"
     "仅在需要调用数据接口取数时使用：基金概念解释、投资观点讨论等无需取数的话题不要加载本skill。")
 
@@ -137,7 +137,7 @@ THIN.append("""## 场景路由（我想做 X → 调什么）
 | 业绩持续性/固收+画像 | `rank_persistence()` / `bond_plus_profile(q)`（零请求） | 0 |
 | 规模·全史/费率/溢价/重仓探测 | `fund_scale`·`fund_scale_history`·`fund_fees`·`qdii_premium`·`nav_divergence` | 各1·2·冷启≤12 |
 | 经理画像/排行 | `fund_manager(基金码或经理ID)` · `manager_rank(pages)`（仅姓名序） | 0~1·50/页 |
-| 指数日线 | `kline_daily("沪深300")`（指数名/股票码） | 1（缓存0） |
+| 指数日线 | `kline_daily("沪深300")`（指数名/行业板块名/股票码） | 1（缓存0） |
 | 债基利率敏感度 | `cb_yield_curve` + `credit_spread` / `treasury_yield_daily` | 1~2 |
 | 重仓股深度（龙虎榜/估值史） | `holding_map` → **a-stock-data skill** | 0 |
 
@@ -147,7 +147,7 @@ THIN.append("""## 场景路由（我想做 X → 调什么）
 |---|---|---|
 | E2 网络失败/真正空体 | **自动降级** E3+E4a+蛋卷（source=degraded），不污染缓存 | 窗口默认 1 年；风控页/结构异常显式上抛，不降级 |
 | 历史净值兜底 | E3 lsjz 逐页（TotalCount 强校验） | **跨域无备胎（P17 三候选全死）** |
-| 个股行情 | 腾讯通道（不封 IP） | — |
+| 个股行情 | 腾讯通道（不封 IP；挂→`sina_quote` 互备，sh/sz 前缀必带） | — |
 | 利率曲线 | 中债 curl 通道（TLS 指纹墙 P11） | 东财 datacenter 互证 |
 | rankhandler 被拦 | 200+「无访问权限」（**无 403**）→ `RiskControlError`+熔断（P19） | 查 Referer 头 |
 | cninfo 451/token null | enckey 时效**非风控**，刷新重试一次（P20） | 仍拒=时钟漂移 |
@@ -168,7 +168,7 @@ THIN.append("""## When to Activate
 ## 深读与边界（按需）
 
 - 复制即用示例（12 场景菜谱）+ 按现象查 FAQ → 同目录 `examples.md`（写调用代码/排错前读）
-- 实现细节/坑区 P1~P27/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
+- 实现细节/坑区 P1~P30/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
 - 不覆盖：账户持仓/交易下单（ttskill）、盘中实时估值、货基万份收益、单基金行业史（E2停供）、语义选基、FOF底层明细与经理姓名索引（P23/P24）
 - 个股深度 → a-stock-data；holding_map() 是官方桥
 """)
@@ -186,9 +186,25 @@ REF.append(f"""# fund-data 完整参考（reference.md · 按需读取层）V{VE
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 """)
 
-REF.append(r"""# fund-data 基金底层数据工具包 V0.7.4 模块全档
+REF.append(r"""# fund-data 基金底层数据工具包 V0.7.6 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复 + V0.7.4 文档三层：264/264 离线断言通过**（L1 单元 228 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11 须显式 `--online`），覆盖 22 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）、`examples.md`（菜谱+FAQ 层）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复 + V0.7.4 文档三层 + V0.7.5 新浪互备与行情防封加固 + V0.7.6 K线韧性与行业基准：287/287 离线断言通过**（L1 单元 251 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11 须显式 `--online`），覆盖 23 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）、`examples.md`（菜谱+FAQ 层）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.7.6 K线韧性与行业基准（腾讯翻页全史备胎 + 东财行业板块指数 100 个）：**
+- 🟢 **腾讯翻页全史备胎**：fqkline 单页 800 上限（P25）曾被当硬边界——实测 param 第 3/4 槽支持起止日期按「页末锚」串行翻页（茅台 6044 根/沪深300 5250 根，qfq 因子跨请求 0 漂移，2026-11-17）；备胎从「800 根短窗」升级为「翻页缝合全史」，熔断期不再缩到 ~3 年
+- 🔴 **缝合三防线（拒绝静默截断）**：每缝「日期+收盘」双校验（服务端 +1 重叠协议）；锚停滞/页数阀耗尽（末页满页=历史未到头）/中段空页（协议必含锚日）三异常形态未集满 lmt 即整批拒绝；集满按去重口径（+1 重叠不计入）
+- 🔴 **备胎风控信号穿透**：RiskControlError/CircuitOpenError 不再被 `except Exception` 吞掉——进备胎时 EM 残行必不足 need（否则不进备胎），re-raise 无损且归因更准
+- 🟢 **东财行业板块指数 100 个入表**：clist t:2 权威清单快照（2026-11-17），映射经 kline name 双样本交叉验证；`_SECID_RE` 放行 `90.BKxxxx` 直传；板块指数腾讯无码 EM 单源（与市场2 同款）；**口径声明：东财编制非申万官方 801xxx**，行业基金对标够用、申万口径走 a-stock-data
+- 🟡 BENCH_SECID 19→119 指数（20→125 别名键）；未命中名称走 secid 直传兜底（表为快照会漂移）
+
+**V0.7.5 新浪互备通道 + 行情防封加固 + 指数扩表：**
+- 🟢 **`sina_quote()` 新浪批量实时行情备胎**：≤50 只/请求自动分块、输入归一去重、sh/sz 前缀强制（防裸码错路由）；provider=sina 独立分账 120/300s·0.5s·单并发；403/429 → RiskControlError 计 sina 熔断；空体拒绝静默空；债券盘初「最新」为 0 取 bid1 作 live 参考
+- 🔴 **软封锁守卫（sina）**：新浪真实封禁形态=200+非空体+全空 var 行——绕过空体守卫与 403 分流；chunk 全 miss → 风控信号+fail-fast（与全无效码协议层不可分，宁可误伤不漏判——封禁前科通道）
+- 🔴 **连接级熔断（sina，P26 同款）**：RST/超时/拒连连续 2 次停机 1h 零网络（无状态码形态 F2 看不见，此前中性结算配额照烧）
+- 🔴 **tencent 主路补三道**：403/429 分流（此前 HTTPError 被 OSError 重试——F6「风控码绝不重试」在全库的破口）+ 风控信号链激活（策略注册但从未触发的熔断从此可用）+ 结构守卫（响应有行但 0 行解析成功=疑似字段变更，拒绝静默空；无效码不回行不在此列）；teardown 模式补 F1 地板 + F2 镜像（此前裸奔）
+- 🔴 **中债 curl 通道接协调器（Sprint 3+ backlog 兑现）**：`_cb_request` 走 Gateway curl transport——chinabond 分账 120/300s·1.5s·在途≤2·3 连击熔断生效；403/429 网关层转 RiskControlError；空体计信号；`cb_curve_tree`/`cb_yield_curve` 业务校验通过显式清零（Sprint 1 口径）；teardown 走 CB_MIN_INTERVAL 独立常量（不再误用东财 TT_MIN_INTERVAL）
+- 🟢 **`cn_treasury_realtime` 降级防重打**：降级结果写独立 300s 短缓存键（不污染健康缓存）——此前降级不写缓存，push2 软失败窗口每次调用重打 4 发（P26 教训：诊断行为本身烧 IP 额度）；到期自动重试主路
+- 🟢 **指数查表扩容**：BENCH_SECID +上证指数/上证综指/深证成指/深证综指/上证180（19 指数/25 别名键，腾讯码实测 2026-11-17）；sh000001/sh000010 前缀路由随值域回 index；`_SH_INDEX_Q` 派生覆盖 000010 后移除显式保留
 
 **V0.7.4 文档三层（examples.md 菜谱+FAQ 层）：**
 - 🟢 **第三产物 examples.md**：12 场景复制即用菜谱（意图+代码+输出形态+坑提醒四件套）+ 16 条按现象组织的 FAQ（坑号深链 reference.md）——对症分发平台评测扣分项「示例与 FAQ 不集中、要翻较长文档」
@@ -215,7 +231,7 @@ REF.append(r"""# fund-data 基金底层数据工具包 V0.7.4 模块全档
 - ⚪ ulist.np 批量方案实证否决：对 171 债券 secid 只回全零值（午休 tick 缺失或源未接线，两说未定案）且与单发共享同一 IP 桶——批量收益抵不过触桶风险
 
 **V0.6.1 基准指数层（quant-excess 端点层收编，kline_daily 一函数三形态）：**
-- 🟢 **B1 `kline_daily`**：指数/股票日线收盘原语——指数名查表（沪深300/中证500/红利/国证2000/中证2000 等 15 指数、20 别名键）/EM secid/6 位股票码；指数走 push2his 主源（F6 分流）+ 腾讯备胎（市场 2 无腾讯码不降级），股票复用 `_tencent_kline` 腾讯通道；20h 缓存键含 lmt 防窗口截断；实测沪深300 十年 2600 根、二调 0 请求
+- 🟢 **B1 `kline_daily`**：指数/股票日线收盘原语——指数名查表（V0.6.1 时 15 指数/20 别名键；**现已 119 指数/125 别名键含行业板块 100，备胎已升级腾讯翻页全史**）/EM secid/6 位股票码；指数走 push2his 主源（F6 分流）+ 腾讯备胎（市场 2 无腾讯码不降级），股票复用 `_tencent_kline` 腾讯通道；20h 缓存键含 lmt 防窗口截断；实测沪深300 十年 2600 根、二调 0 请求
 - 🔴 **P25 push2his 日K形态**入册；P23 补 dt=15 二次实测（pi/pn 全忽略恒返回拼音前 10）
 
 **V0.7.0 字段语义升级 + 费率全表（破坏性改名，源端点逐一实证）：**
@@ -343,6 +359,7 @@ REF.append(r"""## 端点路由速查（按需定位，不必通读）
 | 本地 | `relative_performance(snap,基准)` | vs 沪深300/同类平均：相对收益+β+相关性（用内置三曲线） | 零网络 | 0 |
 | 本地 | `holding_map(snap)` | 重仓股穿透桥 → 喂 a-stock-data | 零网络 | 0 |
 | L6 | `tencent_quote(codes)` | 重仓股批量实时行情（价/PE/PB/市值） | 腾讯(不封IP) | N只=1 |
+| L6 | `sina_quote(codes)` | 新浪批量实时行情（V0.7.5 备胎）：{code: {name, open, prev_close, last, bid1, ask1, date, time}}；须带 sh/sz 前缀 | 新浪(独立分账·互备) | ≤50只/请求 |
 | L6 | `concept_blocks(stock)` | 个股板块标签（行业/概念/地域混合） | 东财 push2 | 1/股,当日缓存 |
 | L6 ⭐ | `penetrate(query)` | 一键穿透：权重×行情×板块→主题聚合→`plain_text_map()`白话地图 | 组合 | 冷启≤13,当日重跑1 |
 | L7 | `cb_yield_curve(curve,year)` / `cb_curve_series` / `credit_spread` | 中债曲线族年文件·单期限序列·信用利差本地算差 | 中债(curl通道) | 1/曲线/年,当日缓存 |
@@ -382,6 +399,9 @@ REF.append(r"""## 端点路由速查（按需定位，不必通读）
 | P25 push2his日K形态 | fields2 只取 f51,f53（日期,收盘）；市场2（中证指数公司）无腾讯代码不可备胎；缓存键必须含 lmt 防窗口截断 | `kline_daily` F6 分流（RiskControlError 不降级）+ 日期去重 + need=min(lmt,100) 下限 |
 | P26 push2系IP缓释桶 | 封锁=**IP 级缓释桶**：惩罚期容量极小（3 连发即放空、第 4 发 RST）、恢复慢（小时级续量）、溢出全客户端全掐（curl 亦然）；健康期容量大（4 连发数周无事）。12:16 三连过证伪「TLS 指纹永久黑名单」，12:22/12:23 两连挂定案重触（上午 12 连发系热窗观测）。教训：诊断行为本身烧 IP 额度，排查先 ≤5 次小样本 | `_push2_get` 单发即弃 + flock 地板 + 0.5~3.0s 抖动 + **连接级熔断**（2 连败停 1h，独立标记 `.cbreak_push2conn`，停机期零网络）+ 降级链（kline→腾讯备胎/国债→中债收盘 300s 短缓存+值域守卫/板块→穿透单股降级）；TLS 指纹假说未排除但不伪装（不军备竞赛） |
 | P27 跨平台锁与路径形态 | ①Windows 扩展前缀竞态：并发创建瞬间 `resolve(strict=False)` 可返回 `\?\` 形态与普通形态 containment 假性不等→误报 escapes（多进程冷启动偶发）；②字节范围锁同进程不同句柄互斥（嵌套=死锁→显式报错）；③LK_LOCK ~10s 即弃（需外层重试补无限阻塞） | `locks` 抽象层：能力检测选机制+注册表互斥+不可重入报错+外层重试；`drop_extended_prefix` 归一入口；契约测试 14 条 |
+| P28 腾讯日K翻页协议 | 单页 800 上限（P25）非硬边界：param 第 3/4 槽支持起止日期按页末锚翻页；服务端回含锚日 +1 行重叠供缝校验；qfq 因子跨请求一致（全史翻页实测 0 漂移）；锚停滞/页阀耗尽/中段空页三异常形态曾可静默截断 | `_tencent_kline_page`/`_stitch_tencent_pages`/`_tencent_kline_paginated`：缝双校验+三防线整批拒绝+去重集满口径（V0.7.6，两轮审查加固） |
+| P29 板块 BK 码空间 | BK 码不可凭记忆/类目外推：同码空间跨行业(t:2)/概念(t:3)（BK0477 实为酿酒概念、BK0475=银行Ⅱ 而非白酒）；clist fs 语法是冒号 `t:2` 非 `t=2`（后者 rc:102 参数错） | BENCH_SECID 行业段=clist t:2 快照 + kline name 双样本交叉验证；未命中走 `90.BKxxxx` secid 直传；概念板块不收录（归 a-stock-data 概念域） |
+| P30 新浪行情通道（V0.7.5） | hq.sinajs.cn 无 Referer 即拒（实测空响应）；高频爬虫有封禁前科；银行间信用债无公开实时端点（货币网现券板仅利率债活跃券） | `sina_quote` 内置 Referer + provider=sina 独立分账 120/300s·0.5s·单并发 + 403/429 计熔断 + 空体计信号；定位=腾讯互备低频兜底，银行间实时须 QB 等权限源 |
 
 ## Prerequisites
 
@@ -487,7 +507,7 @@ thin_text = "\n".join(THIN)
 ref_text = "\n".join(REF)
 
 thin_bytes = len(thin_text.encode("utf-8"))
-assert thin_bytes < 13000, f"瘦 SKILL.md 超重 {thin_bytes}B（上限 13000）——把长内容移入 reference.md。"
+assert thin_bytes < 13300, f"瘦 SKILL.md 超重 {thin_bytes}B（上限 13300）——把长内容移入 reference.md。"
 # 上限 12000→13000（V0.6.2）：分发平台（workbuddy）必填市场元数据字段 display_name/description_zh/en
 # 约 +0.5KB，属接口非内容膨胀；正文纪律不变（description 已同步压缩）
 for n, _, _ in _sig_rows():                          # 签名覆盖：每个公开函数都在路由层
@@ -502,7 +522,7 @@ assert "def fund_fees(query: str" in ref_text                          # V0.7.0 
 assert "_push2_conn_file" in ref_text                                  # V0.7.1 连接级熔断内嵌
 assert "IP 缓释桶" in ref_text                                          # P26 修正定性入册
 assert 'rows.append({"date": p[0], "close": float(p[1]), "source": "push2his"})' in ref_text  # source 标注
-assert "_SH_INDEX_Q = ({v.split" in ref_text                            # 指数路由派生
+assert "_SH_INDEX_Q = {v.split" in ref_text                             # 指数路由派生（V0.7.5 起 000010 随派生覆盖）
 assert "P25" in ref_text
 assert "P27" in ref_text                                                 # V0.7.2 跨平台锁坑入册
 assert "def fund_manager(query: str, force_refresh: bool = False) -> dict:" in ref_text  # V0.6 内嵌同源

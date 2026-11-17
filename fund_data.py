@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-fund-data V0.7.4 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层）
+fund-data V0.7.6 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤2 请求（1×pingzhongdata，0~1×lsjz）
@@ -59,7 +59,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.7.4"
+__version__ = "0.7.6"
 
 # ══════════════════════════════════════════════════════════════════
 # L1 前置层：限流入口 / 缓存目录 / 请求计数
@@ -91,7 +91,8 @@ TT_REQUEST_COUNT = [0, {}]       # [总请求数, {host: 次数}] — 预算审�
 _CBREAK_COOLDOWN = 600           # F2：熔断冷却 10 分钟
 _CBREAK_TRIP = 3                 # 连续 3 次风控信号触发熔断
 _cbreak_state = {"tt": [0, 0.0], "em": [0, 0.0], "cninfo": [0, 0.0],
-                 "danjuan": [0, 0.0]}   # [连击数, 上次信号时刻]；>5min 衰减归一
+                 "danjuan": [0, 0.0], "sina": [0, 0.0], "tencent": [0, 0.0],
+                 "cb": [0, 0.0]}   # [连击数, 上次信号时刻]；>5min 衰减归一（V0.7.5 腾讯/中债补镜像键）
 
 # Sprint 2/3：异常与缓存语义与 fund_data_core 统一（core 为硬依赖，与主模块同一套部署）。
 from fund_data_core import CachePolicy, CacheRepository, StaleDataError
@@ -116,7 +117,7 @@ _COORDINATOR = None
 _REQUEST_GATEWAY = None
 _CACHE_REPO = None     # Sprint 3：CacheRepository（FUND_CACHE_DIR 即缓存根，键=legacy 相对路径）
 _CORE_LINE_PROVIDER = {"tt": "eastmoney", "em": "eastmoney", "cninfo": "cninfo",
-                       "danjuan": "danjuan", "tencent": "tencent",
+                       "danjuan": "danjuan", "tencent": "tencent", "sina": "sina",
                        "chinabond": "chinabond", "cb": "chinabond"}
 
 
@@ -150,8 +151,14 @@ def _reset_request_coordination(clock=None, sleeper=None, policies=None):
             max_requests=300, window_seconds=300, min_interval=0.2, max_in_flight=4,
             lease_seconds=30, circuit_threshold=_CBREAK_TRIP,
             open_seconds=_CBREAK_COOLDOWN),
-        # 预留：中债 curl 通道（_cb_request）Sprint 3 接入 Gateway curl transport，
-        # 当前该线未走协调器——策略先行注册保证接入时预算即生效。
+        # 新浪（V0.7.5 备胎通道，定位=腾讯互备低频使用）：hq.sinajs.cn 无 Referer
+        # 即拒（实测），高频爬虫有封禁前科——配额取腾讯的 40% 且单并发保守起量
+        "sina": ProviderPolicy(
+            max_requests=120, window_seconds=300, min_interval=0.5, max_in_flight=1,
+            lease_seconds=30, circuit_threshold=_CBREAK_TRIP,
+            open_seconds=_CBREAK_COOLDOWN),
+        # 中债 curl 通道：V0.7.5 已由 _cb_request 的 Gateway curl transport 分支
+        # 消费（分账/间隔/在途/熔断生效）；teardown 模式走 legacy F1 地板 + F2 镜像。
         "chinabond": ProviderPolicy(
             max_requests=120, window_seconds=300, min_interval=1.5, max_in_flight=2,
             lease_seconds=30, circuit_threshold=_CBREAK_TRIP,
@@ -277,7 +284,8 @@ def _cross_proc_throttle(line: str, min_interval: float):
 
 def _line_label(line: str) -> str:
     """熔断文案按实际 provider 标注，避免跨域备胎误报为东财。"""
-    return {"cninfo": "巨潮", "danjuan": "蛋卷"}.get(line, "东财")
+    return {"cninfo": "巨潮", "danjuan": "蛋卷", "sina": "新浪",
+            "tencent": "腾讯", "chinabond": "中债", "cb": "中债"}.get(line, "东财")
 
 
 def _cbreak_check(line: str):
@@ -1511,6 +1519,12 @@ EM_SESSION.trust_env = False                          # 直连：绕过系统代
 EM_SESSION.headers.update({"User-Agent": UA})
 EM_REQUEST_COUNT = [0]                              # 股票域东财请求计数（审计用）
 TENCENT_REQUEST_COUNT = [0]                         # 腾讯行情请求计数（审计用；腾讯不封不设限流）
+SINA_REQUEST_COUNT = [0]                            # 新浪行情请求计数（V0.7.5 备胎通道，审计用）
+SINA_MIN_INTERVAL = 0.5                             # legacy/teardown 模式的 F1 地板（与 provider 分账同值）
+TENCENT_MIN_INTERVAL = 0.2                          # teardown 地板（与 provider 分账同值；V0.7.5 前腾讯线 teardown 裸奔）
+CB_MIN_INTERVAL = 1.5                               # 中债 teardown 地板（V0.7.5 起独立常量，不再误用东财 TT_MIN_INTERVAL）
+_SINACONN_COOLDOWN = 3600                           # sina 连接级熔断停机 1h（P26 同款：RST/超时无状态码，F2 看不见）
+_sina_conn_fails = [0]
 
 
 def em_get(url: str, params: Optional[dict] = None,
@@ -1678,17 +1692,37 @@ def _tencent_raw(url: str, headers: Optional[dict] = None, timeout: int = 10) ->
     调用方）；acquire 同时提供跨进程 0.2s 地板（此前腾讯线无跨进程节流）。
     TENCENT_REQUEST_COUNT 计真实网络命中：在许可取得之后自增（acquire 被拒
     的尝试不进账本，与「账本=真实上游命中」口径一致）。
-    """
+    V0.7.5 补两道防线：①403/429 计 tencent 风控信号并抛 RiskControlError——
+    此前 HTTPError 是 OSError 子类，被 tencent_quote 当瞬态重试（F6「风控码
+    绝不重试」在全库的破口）；②teardown 模式补 F1 地板 + F2 熔断镜像
+    （此前裸奔，与 sina/东财线双标）。连接级失败保持中性结算不设独立熔断：
+    腾讯定位"不封 IP"，主路挂时由 sina 备胎互备接管（设计分工非缺口）。"""
     req = urllib.request.Request(url, headers=headers or {"User-Agent": "Mozilla/5.0"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     if _COORDINATOR is None:
+        _cbreak_check("tencent")
+        _cross_proc_throttle("tencent", TENCENT_MIN_INTERVAL)
         TENCENT_REQUEST_COUNT[0] += 1
-        return opener.open(req, timeout=timeout).read()
+        try:
+            return opener.open(req, timeout=timeout).read()
+        except urllib.error.HTTPError as e:
+            if e.code in (403, 429):
+                _cbreak_signal("tencent", f"HTTP {e.code} tencent")
+                raise RiskControlError(
+                    f"HTTP {e.code}（腾讯）：疑似{_line_label('tencent')}风控信号，已计入熔断")
+            raise
     permit = _COORDINATOR.acquire(url)
     _COORDINATOR.mark_network_started(permit)
     TENCENT_REQUEST_COUNT[0] += 1
     try:
         raw = opener.open(req, timeout=timeout).read()
+    except urllib.error.HTTPError as e:
+        permit.failure(reason=f"tencent-http-{e.code}", response_received=True)
+        if e.code in (403, 429):
+            _cbreak_signal("tencent", f"HTTP {e.code} tencent")
+            raise RiskControlError(
+                f"HTTP {e.code}（腾讯）：疑似{_line_label('tencent')}风控信号，已计入熔断")
+        raise
     except BaseException:
         permit.failure(reason="tencent-transport")
         raise
@@ -1710,15 +1744,21 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
         try:
             data = _tencent_raw(url, headers={"User-Agent": "Mozilla/5.0"}).decode("gbk")
             break
-        except OSError:                            # 含 URLError（其子类）
+        except urllib.error.HTTPError:
+            raise                                     # 有状态码的失败不属瞬态重试（403/429 已在 _tencent_raw 转 RiskControlError）
+        except OSError:                            # 含 URLError（其子类，HTTPError 已上移排除）
             if attempt == 2:
                 raise
             time.sleep(2.0)                        # 退避加长：SSL EOF 瞬态窗口常 >1s，1s 内
                                                   # 二次重试大概率同窗双败（冷跑实测教训）
     result = {}
+    _var_lines = 0
     for line in data.strip().split(";"):
         if "=" not in line or '"' not in line:
             continue
+        if "_pv_none" in line:                       # 全无效批次的占位行：不计结构守卫，保 miss→{} 契约
+            continue
+        _var_lines += 1
         key = line.split("=")[0].split("_")[-1]
         v = line.split('"')[1].split("~")
         if len(v) < 53:
@@ -1732,6 +1772,194 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
             "turnover_pct": f(38), "pe_ttm": f(39),
             "float_mcap_yi": f(44), "mcap_yi": f(45), "pb": f(46),
         }
+    if _var_lines and not result:
+        # 结构守卫（V0.7.5）：响应有行但 0 行解析成功 = 疑似上游字段结构变更
+        # （当前要求 ≥53 段）——拒绝静默空。注意与无效码语义分界：腾讯对无效码
+        # 不回行（2026-11-17 实测），全空响应属无效码 → 静默 {} 是 qdii_premium
+        # 「miss 标 None」契约的一部分，不在此守卫范围。
+        raise RuntimeError(
+            f"腾讯行情响应含 {_var_lines} 行但 0 行解析成功——疑似字段结构变更"
+            f"（解析要求 ≥53 段），拒绝静默空；请核对 qt.gtimg.cn 返回格式")
+    return result
+
+
+def _sina_conn_file() -> Path:
+    return FUND_CACHE_DIR / ".cbreak_sinaconn"
+
+
+def _sina_conn_check():
+    """新浪连接级熔断检查：停机期内零网络直接 RuntimeError（P26 同款防线）。
+
+    新浪封禁的另一形态是连接层 RST/超时（无状态码）——F2 看不见、空体守卫
+    也到不了；连续 2 次即停机 1h，防止中性结算下配额照烧、IP 持续挨打。"""
+    f = _sina_conn_file()
+    if f.exists():
+        try:
+            until = float((f.read_text().split() or ["0"])[0])
+        except (ValueError, OSError):                # 与写侧对称：IO 故障视为无标记
+            until = 0.0
+        if until > time.time():
+            remain = int(until - time.time())
+            raise RuntimeError(
+                f"新浪通道连接级熔断中（疑似 IP 级封锁/RST，已自动停机保护），剩 {remain}s。"
+                "停机期零网络——腾讯通道（tencent_quote）是互备对象；继续请求只会延长封锁。")
+        f.unlink(missing_ok=True)                    # 期满自动复位
+        _sina_conn_fails[0] = 0
+
+
+def _sina_conn_fail(why: str):
+    """记录一次连接级失败；连续 2 次写停机标记（本次调用照常抛错，下次起零网络）。"""
+    _sina_conn_fails[0] += 1
+    if _sina_conn_fails[0] >= 2:
+        try:
+            _sina_conn_file().parent.mkdir(parents=True, exist_ok=True)
+            # 标记内容「到期时间戳 + 触发原因」——运维 cat 即知何时为何停机
+            _sina_conn_file().write_text(f"{time.time() + _SINACONN_COOLDOWN:.0f} {why}")
+        except OSError:
+            pass
+        _sina_conn_fails[0] = 0
+
+
+def _sina_raw(url: str, timeout: int = 10) -> bytes:
+    """新浪通道统一取原始字节（P12 直连 opener；hq.sinajs.cn 必须带 Referer，
+    无 Referer 实测空响应/拒绝——故 Referer 为通道内置头，不留给调用方忘带）。
+
+    Sprint 2 同款许可生命周期（provider=sina）：acquire 提供 0.5s 跨进程地板 +
+    120/300s 配额；HTTP 403/429 → 计风控信号并抛 RiskControlError（F2/F6 契约，
+    不降级不重试）；空体 → RuntimeError（疑似限流，拒绝静默空）。
+    V0.7.5 补连接级熔断：RST/超时/拒连连续 2 次 → 停机 1h 零网络（P26 同款，
+    新浪封禁形态常无状态码，F2 与空体守卫均不可见）。"""
+    _sina_conn_check()
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://finance.sina.com.cn",
+    })
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    if _COORDINATOR is None:
+        # legacy/teardown：F1 地板 + F2 磁盘熔断（对照 _push2_get legacy 分支）——
+        # teardown 是文档明示的生产模式，全库唯一有封禁前科的通道不允许零防线
+        _cbreak_check("sina")
+        _cross_proc_throttle("sina", SINA_MIN_INTERVAL)
+        SINA_REQUEST_COUNT[0] += 1
+        try:
+            raw = opener.open(req, timeout=timeout).read()
+        except urllib.error.HTTPError as e:
+            if e.code in (403, 429):
+                _cbreak_signal("sina", f"HTTP {e.code} sina")
+                raise RiskControlError(
+                    f"HTTP {e.code}（新浪）：疑似{_line_label('sina')}风控信号，已计入熔断")
+            raise
+        except (urllib.error.URLError, OSError):     # 连接层（拒连/RST/超时），无状态码
+            _sina_conn_fail(f"sina-conn-transport")
+            raise
+        if not raw:
+            _cbreak_signal("sina", "sina-empty-body")
+            raise RuntimeError("新浪行情返回空体（疑似限流/封禁），拒绝静默空")
+        _sina_conn_fails[0] = 0                      # 成功复位连接级计数
+        return raw
+    permit = _COORDINATOR.acquire(url)
+    _COORDINATOR.mark_network_started(permit)
+    SINA_REQUEST_COUNT[0] += 1
+    try:
+        raw = opener.open(req, timeout=timeout).read()
+    except urllib.error.HTTPError as e:
+        permit.failure(reason=f"sina-http-{e.code}", response_received=True)
+        if e.code in (403, 429):
+            _cbreak_signal("sina", f"HTTP {e.code} sina")   # 镜像+协调器信号（触闸自带抛错）
+            raise RiskControlError(
+                f"HTTP {e.code}（新浪）：疑似{_line_label('sina')}风控信号，已计入熔断")
+        raise
+    except (urllib.error.URLError, OSError) as e:    # 连接层：RST/超时/拒连——F2 看不见（P26 同款）
+        permit.failure(reason=f"sina-transport-{type(e).__name__}")
+        _sina_conn_fail(f"sina-conn-{type(e).__name__}")
+        raise
+    except BaseException:
+        permit.failure(reason="sina-transport")
+        raise
+    permit.failure(reason="sina-passthrough", response_received=True)
+    if not raw:
+        _cbreak_signal("sina", "sina-empty-body")   # 连续空体同样会触闸（镜像+协调器）
+        raise RuntimeError("新浪行情返回空体（疑似限流/封禁），拒绝静默空")
+    _sina_conn_fails[0] = 0                          # 成功复位连接级计数
+    return raw
+
+
+def _parse_sina_body(text: str) -> dict[str, dict]:
+    """解析新浪行情响应体（纯函数，零网络）。
+
+    新浪债券/股票行格式（GBK）：var hq_str_shXXXX="名称,今开,昨收,最新,最高,最低,
+    买一价,卖一价,...,日期,时间,00(,空段)"; ——债券盘初未成交时「最新」为 0，
+    live 参考取买一价（bid1）。返回 {6位代码: {name, open, prev_close, last,
+    bid1, ask1, date, time}}；残行（字段不足 32 或空名）静默跳过。
+    ⚠️ 沪深行尾结构不一致（实测沪 34 段带空尾段、深 33 段）——日期/时间按值
+    定位（尾部唯一 YYYY-MM-DD 段及其后一段），不用固定尾索引。"""
+    result = {}
+    for line in text.strip().splitlines():
+        if "=" not in line or '"' not in line:
+            continue
+        key = line.split("=")[0].split("_")[-1]
+        v = line.split('"')[1].split(",")
+        if len(v) < 32 or not v[0]:
+            continue
+
+        def f(i):
+            try:
+                return float(v[i]) if v[i] else None
+            except ValueError:
+                return None
+
+        date = time = None
+        for idx in range(len(v) - 1, max(len(v) - 8, -1), -1):
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v[idx] or ""):
+                date = v[idx]
+                time = v[idx + 1] if idx + 1 < len(v) else None
+                break
+        result[key[2:]] = {
+            "name": v[0], "open": f(1), "prev_close": f(2), "last": f(3),
+            "bid1": f(6), "ask1": f(7), "date": date, "time": time,
+        }
+    return result
+
+
+def sina_quote(codes: list[str]) -> dict[str, dict]:
+    """新浪批量实时行情（V0.7.5 备胎通道，定位=腾讯互备低频使用）。
+
+    ⚠️ 防封纪律（provider=sina 独立分账）：120 请求/300s、间隔 0.5s、单并发
+    ——hq.sinajs.cn 对高频爬虫有封禁前科，此配额只为「腾讯挂时兜底」设计，
+    不要当主通道高频轮询。批量 ≤50 只/请求（URL 长度安全线），输入去重。
+    债券盘初「最新」可能为 0（未成交），取 bid1 作 live 参考价。
+    ⚠️ 代码必须带 sh/sz 前缀（如 sh118078）——裸 6 位码无法可靠路由市场
+    （沪转债 11x vs 深公司债 112 同头，V0.7.3 裸码路由同类坑），显式报错。
+    超过 50 只自动按 50 分块串行请求（分块间隔由 provider 配额节流，不静默丢码）。"""
+    if not codes:
+        return {}
+    codes = [c[:2].lower() + c[2:] if (len(c) == 8 and c[:2].lower() in ("sh", "sz"))
+             else str(c).strip()
+             for c in codes]                          # 先归一前缀大小写
+    codes = list(dict.fromkeys(codes))                # 归一后去重（SH/sh 不双发）
+    bad = [c for c in codes if not (len(c) == 8 and c[:2] in ("sh", "sz"))]
+    if bad:
+        raise ValueError(
+            f"sina_quote 代码须带 sh/sz 前缀（如 sh118078，大小写均可），收到非法: {bad[:3]}——"
+            "裸 6 位码路由易错市场（V0.7.3 坑），不猜")
+    result: dict[str, dict] = {}
+    for i in range(0, len(codes), 50):
+        chunk = codes[i:i + 50]
+        url = "https://hq.sinajs.cn/list=" + ",".join(chunk)
+        parsed = _parse_sina_body(_sina_raw(url).decode("gbk", errors="replace"))
+        if not parsed:
+            # 软封锁守卫（V0.7.5）：新浪真实封禁形态 = HTTP 200 + 非空体 + 全空
+            # var 行（hq_str_xx="";）——绕过空体守卫与 403 分流，漏判即烧 IP。
+            # 与「chunk 内代码全无效」协议层不可分：宁可误伤（信号 5min 衰减、
+            # 连续 3 次才熔断，单次笔误不致停摆）不漏判——封禁前科通道的取舍。
+            _cbreak_signal("sina", "sina-all-miss-chunk")
+            raise RuntimeError(
+                f"新浪行情 chunk 全未命中（{len(chunk)} 码 0 行）——软封锁嫌疑或代码"
+                "无效，已计入 sina 熔断（连续 3 次冷却 10 分钟）；腾讯通道是主源互备对象")
+        result.update(parsed)
+        # 结构性成功即清零 sina 连击（parsed 非空由上方守卫保证；sina 只回请求码的行，
+        # 不存在"非空但全非本批码"形态——原 any() 条件恒真，按审查意见改为无条件）
+        _cbreak_success("sina")
     return result
 
 
@@ -1917,18 +2145,53 @@ CB_REFERER = "https://yield.chinabond.com.cn/cbweb-mn/yield_main?locale=zh_CN"
 
 def _cb_request(path: str, params: Optional[dict] = None, method: str = "GET",
                 timeout: int = 30) -> bytes:
-    """中债专用通道：subprocess curl（坑P11：中债 TLS 指纹墙——requests/urllib 稳定
-    SSL EOF，curl 稳定 200，A/B 实测 2026-11-06）。仍计入 ttfund 限流与审计账本。
+    """中债专用通道：curl（坑P11：中债 TLS 指纹墙——requests/urllib 稳定
+    SSL EOF，curl 稳定 200，A/B 实测 2026-11-06）。
 
-    参数拼接后整串进 curl（list 参数无 shell 注入面；ycDefId 入 URL 前过白名单校验）。
-    """
+    V0.7.5 接协调器 curl transport（Sprint 3+ backlog 兑现）：chinabond 分账
+    （120/300s·1.5s·在途≤2·3 连击熔断 10min）由 Gateway 统一执行；HTTP
+    403/429 在网关层转 RiskControlError（不重试不降级，F6）；curl 进程失败/
+    超时 → OSError 传输失败入账（外层瞬态重试一次，风控码除外）；空体 →
+    风控信号 + RuntimeError（疑似限流，拒绝静默空）。2xx 附带之待裁决
+    permit 由本层中性结算——业务清零走 cb_curve_tree/cb_yield_curve 解析
+    成功后的 _cbreak_success("cb")（Sprint 1 口径，与 sina/tencent 同款）。
+    teardown 模式：legacy curl + F1 地板（CB_MIN_INTERVAL 独立常量，V0.7.5
+    前误用东财 TT_MIN_INTERVAL）+ F2 熔断镜像 + 空体信号。ycDefId 入 URL
+    前过白名单校验（上游不变）；list 参数无 shell 注入面。"""
     from urllib.parse import urlencode
     url = f"{CB_BASE}{path}"
     if params:
         url += "?" + urlencode(params)
+    if _REQUEST_GATEWAY is not None:
+        for attempt in (1, 2):                          # curl 瞬态重试一次（每次独立配额；风控码绝不重试）
+            try:
+                resp = _REQUEST_GATEWAY.curl_request(
+                    method, url, timeout=timeout,
+                    headers={"User-Agent": "Mozilla/5.0", "Referer": CB_REFERER,
+                             "Accept": "*/*"})
+            except (RiskControlError, CircuitOpenError):
+                raise                                  # 风险型/熔断期：不重试不降级
+            except OSError as e:
+                if attempt == 2:
+                    raise RuntimeError(f"中债 curl 传输失败: {e}") from e
+                time.sleep(1.5)
+                continue
+            permit = getattr(resp, "permit", None)
+            if resp.status_code >= 400:                 # 非风控终态（403/429 已在网关层转 RiskControlError 上抛）
+                raise RuntimeError(f"中债 HTTP {resp.status_code}: {url[:90]}")
+            if not resp.content:
+                if permit is not None:                  # 先中性结算再信号（与 _sina_raw 同序，防挂起许可占坑至租约到期）
+                    permit.failure(reason="cb-empty-body", response_received=True)
+                _cbreak_signal("cb", "cb-empty-body")
+                raise RuntimeError("中债响应空体（疑似限流），拒绝静默空")
+            if permit is not None:                      # 中性结算：业务裁决归 cb_* 调用方
+                permit.failure(reason="cb-passthrough", response_received=True)
+            return resp.content
+        raise RuntimeError("unreachable")
     import subprocess
     for attempt in (1, 2):                              # curl 也有瞬态，重试一次
-        _cross_proc_throttle("cb", TT_MIN_INTERVAL)    # F1：中债独立节流线（非东财域，不熔断）
+        _cbreak_check("cb")
+        _cross_proc_throttle("cb", CB_MIN_INTERVAL)    # F1：独立常量（V0.7.5 前误用东财 TT_MIN_INTERVAL）
         TT_REQUEST_COUNT[0] += 1
         TT_REQUEST_COUNT[1]["yield.chinabond.com.cn"] = \
             TT_REQUEST_COUNT[1].get("yield.chinabond.com.cn", 0) + 1
@@ -1947,6 +2210,9 @@ def _cb_request(path: str, params: Optional[dict] = None, method: str = "GET",
             continue
         if proc.returncode == 0 and proc.stdout:
             return proc.stdout
+        if proc.returncode == 0 and not proc.stdout:
+            _cbreak_signal("cb", "cb-empty-body")      # rc=0 空体：疑似限流，拒绝静默空
+            raise RuntimeError("中债 curl 返回空体（疑似限流），拒绝静默空")
         if attempt == 2:
             raise RuntimeError(
                 f"中债 curl 通道失败（rc={proc.returncode}，{len(proc.stdout)}B）: "
@@ -2049,7 +2315,8 @@ def cb_curve_tree(force_refresh: bool = False) -> dict[str, str]:
 
     walk(root)
     if len(out) < 10:                                      # 正常 40+，骤降=结构变更
-        raise RuntimeError(f"中债曲线树仅 {len(out)} 条叶子，疑似结构变更，拒绝缓存")
+        raise RuntimeError(f"中债曲线树仅 {len(out)} 条叶子，疑似结构变更，拒绝缓存脏数据")
+    _cbreak_success("cb")                       # V0.7.5：业务校验通过 → 清零 chinabond 连击（Sprint 1 口径）
     _cache_write("cb_curve_tree.json", out)
     return out
 
@@ -2077,6 +2344,7 @@ def cb_yield_curve(curve: str = "treasury", year: Optional[int] = None,
     if not pts:
         raise RuntimeError(f"中债 {name} {year} 年文件解析出 0 个数据点"
                            f"（{len(content)} 字节）——参数或上游结构变更，拒绝静默空")
+    _cbreak_success("cb")                       # V0.7.5：业务校验通过 → 清零 chinabond 连击（Sprint 1 口径）
     snap = {"curve": name, "year": year, "points": pts,
             "fetched_at": datetime.now().isoformat(timespec="seconds"),
             "source": "chinabond/downYearBzqx"}
@@ -2259,11 +2527,18 @@ def cn_treasury_realtime() -> dict:
     push2 系为 IP 缓释桶限流（坑P26：惩罚期 3 连发即放空）——健康形态写 **300s
     短缓存**（5 分钟内重复调用 0 请求，不让同型四连发放空桶）；失败自动降级
     【中债最新收盘】（cb_yield_curve 既有 curl 通道+当日缓存，不轰炸重试），
-    as_of 标注 "盘中(push2)" / "中债最新收盘(降级)"，降级不写缓存。
+    as_of 标注 "盘中(push2)" / "中债最新收盘(降级)"。V0.7.5：降级结果写**独立
+    短缓存键**（不污染健康缓存）——此前降级不写缓存，push2 处于"软失败未触发
+    连接级熔断"窗口时每次调用重打 4 发（P26 教训：诊断行为本身烧 IP 额度）；
+    独立键 300s 到期自动重试主路，保持"尽快恢复主路"契约。
     值域守卫：任一期限收益率 ∉(0,15) → RuntimeError 拒绝静默脏值
     （缩放错位/上游喂零一并兜住，ulist 式全零源即死于此）。"""
     rel = "treasury/realtime_push2.json"
+    degraded_rel = "treasury/realtime_degraded.json"   # V0.7.5：降级独立短缓存键
     cached = _cache_read(rel, max_age_hours=300 / 3600)
+    if cached is not None:
+        return cached
+    cached = _cache_read(degraded_rel, max_age_hours=300 / 3600)
     if cached is not None:
         return cached
     out = {}
@@ -2302,7 +2577,9 @@ def cn_treasury_realtime() -> dict:
     out["time"] = datetime.now(_BJ_TZ).isoformat(timespec="seconds")
     if not degraded:
         _cbreak_success("em")
-        _cache_write(rel, out)                         # 仅健康形态写 300s 短缓存
+    # 健康写主键；降级写独立键（同 300s）——掐掉降级期重打 push2 的窗口，
+    # 到期自动重试主路（V0.7.5，原"降级不写缓存"契约升级）
+    _cache_write(rel if not degraded else degraded_rel, out)
     return out
 
 
@@ -2801,20 +3078,19 @@ def fund_industry_allocation(rdate: str = "", force_refresh: bool = False) -> li
 #   · FOF 底层基金明细五源实测无结构化接口（坑P24）——只有季报 PDF 有，诚实边界
 
 
-def _tencent_kline(stock_code: str, bars: int = 90,
-                   force_refresh: bool = False) -> list[dict]:
-    """腾讯日K前复权收盘序列 [{date, close}]（nav_divergence 重仓股区间收益用）。
+def _tencent_kline_page(pre: str, end_date: Optional[str] = None,
+                        bars: Optional[int] = None) -> list[dict]:
+    """腾讯 fqkline 单页拉取（V0.7.6 抽取为翻页协议原子操作）。
 
-    腾讯线（不封 IP）+ P12 直连 opener 同款 + TENCENT_REQUEST_COUNT 审计入账；
-    仅支持 6 位 A 股码（港股 5 位码由调用方过滤）；当日缓存。"""
-    pre = _tencent_prefix(stock_code)
-    rel = f"kline/{pre}_{int(bars)}.json"   # bars 入键：窗口根数随基金/日期漂移，防跨窗口串缓存
-    if not force_refresh:
-        cached = _cache_read(rel, max_age_hours=20)
-        if cached is not None:
-            return cached
+    param 第 3/4 槽为起止日期：end_date 空=最新页；给定=以该日为页末锚
+    （服务端回含锚日的行，与上一页最早行重叠 +1，供缝合校验）。
+    页内升序 [{date, close}]；仅支持带 sh/sz 前缀的 6 位码。
+    bars 缺省 _TENCENT_KLINE_CAP（体内解析——常量定义在本函数之后，默认参数
+    def 时求值会 NameError）。"""
+    if bars is None:
+        bars = _TENCENT_KLINE_CAP
     url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
-           f"param={pre},day,,,{int(bars)},qfq")
+           f"param={pre},day,,{end_date if end_date else ''},{int(bars)},qfq")
     raw = None
     for attempt in (1, 2):                        # 瞬态重试1次（对齐 tencent_quote 同通道）
         try:
@@ -2830,9 +3106,99 @@ def _tencent_kline(stock_code: str, bars: int = 90,
         raise RuntimeError(f"腾讯日K非JSON({pre}): {raw[:80]!r}") from e
     node = (d.get("data") or {}).get(pre) or {}
     rows = node.get("qfqday") or node.get("day") or []
-    out = [{"date": x[0], "close": float(x[2])} for x in rows if len(x) >= 3]
+    return [{"date": x[0], "close": float(x[2])} for x in rows if len(x) >= 3]
+
+
+def _stitch_tencent_pages(pages: list[list[dict]]) -> list[dict]:
+    """翻页缝合（纯函数，零网络）：页序=新→旧，页内升序。
+
+    每道页缝「日期+收盘」双校验：下一页页尾必须恰为当前最早行（服务端 +1
+    重叠协议，2026-11-17 全史翻页实测逐缝吻合）——断档/越界/收盘漂移任一
+    即整批拒绝（拒绝静默错数据）；最终重复日期防御性复核。"""
+    if not pages or not pages[0]:
+        raise RuntimeError("腾讯翻页缝合失败：首页为空，拒绝拼接")
+    merged = list(pages[0])
+    for i, seg in enumerate(pages[1:], start=2):
+        if not seg:
+            break                                    # 防御分支：翻页层已拦截中段空页并
+                                                     # 整批拒绝（+1 协议下空页必为异常）；
+                                                     # 独立调用本函数时按历史到头截断
+        tail = seg[-1]
+        anchor = merged[0]
+        if tail["date"] != anchor["date"]:
+            raise RuntimeError(
+                f"腾讯翻页缝合失败：第{i}页页尾 {tail['date']} ≠ 锚 {anchor['date']}"
+                "（断档或越界），整批拒绝")
+        if abs(tail["close"] - anchor["close"]) > 1e-9:
+            raise RuntimeError(
+                f"腾讯翻页缝合失败：{anchor['date']} 缝收盘不一致"
+                f"（{anchor['close']} vs {tail['close']}），整批拒绝")
+        merged = [r for r in seg if r["date"] < anchor["date"]] + merged
+    if len(merged) != len({r["date"] for r in merged}):
+        raise RuntimeError("腾讯翻页缝合失败：合并后存在重复日期，整批拒绝")
+    return merged
+
+
+def _tencent_kline_paginated(sym: str, lmt: int = 2600) -> list[dict]:
+    """腾讯日K翻页全史（V0.7.6）：fqkline 单页 800 上限（P25）按「页末锚」
+    向历史翻页缝合——7~8 发串行拼 20+ 年全史（实测：茅台 6044 根/沪深300
+    5250 根，qfq 因子跨请求 0 漂移，2026-11-17）。
+
+    停止条件：短页（<800=历史到头）/ 集满 lmt / 页数安全阀 _TENCENT_PAGE_CAP /
+    锚不前进（疑似上游异常）。锚停滞且未集满 lmt → 拒绝静默截断报错。
+    串行翻页（协调器 0.2s 地板自持）；TENCENT_REQUEST_COUNT 随 _tencent_raw
+    逐页入账；缓存归调用方（kline_daily 层），本函数不落盘。
+    拒绝静默截断三防线（V0.7.6 审查加固）：锚停滞 / 页数阀耗尽（末页满页
+    即历史未到头）/ 非首页空页（+1 重叠协议下锚定页必含锚日 ≥1 行，空页
+    必为异常）——三者未集满 lmt 即整批拒绝。集满口径按去重计（每页 +1
+    重叠行不计入）。"""
+    pages: list[list[dict]] = []
+    end: Optional[str] = None
+    stalled = False
+    for _ in range(_TENCENT_PAGE_CAP):
+        seg = _tencent_kline_page(sym, end)
+        if not seg:
+            if pages and sum(len(p) for p in pages) - (len(pages) - 1) < lmt:
+                raise RuntimeError(               # 首页空→缝合层拒；中段空页=协议异常
+                    f"腾讯翻页异常（{sym} 锚定页返回 0 行，违反 +1 重叠协议），整批拒绝")
+            break
+        pages.append(seg)
+        if len(seg) < _TENCENT_KLINE_CAP:
+            break                                    # 短页=历史到头
+        collected = sum(len(p) for p in pages) - (len(pages) - 1)   # 去重口径
+        if collected >= lmt:
+            break                                    # 集满即停（重叠行由缝合去重）
+        new_end = seg[0]["date"]
+        if end is not None and new_end >= end:
+            stalled = True                           # 锚不前进：同一页反复回（上游异常形态）
+            break
+        end = new_end
+    rows = _stitch_tencent_pages(pages)
+    # 页数阀耗尽：末页仍是满页=历史未到头且未集满——静默截断零信号不可接受
+    exhausted = len(pages) >= _TENCENT_PAGE_CAP and len(pages[-1]) >= _TENCENT_KLINE_CAP
+    if len(rows) < lmt and (stalled or exhausted):
+        raise RuntimeError(
+            f"腾讯翻页{'锚停滞' if stalled else '页数阀耗尽'}（{sym} 已集 {len(rows)}/{lmt} 根）"
+            "——疑似上游异常或超出安全阀容量，拒绝静默截断")
+    return rows[-lmt:]
+
+
+def _tencent_kline(stock_code: str, bars: int = 90,
+                   force_refresh: bool = False) -> list[dict]:
+    """腾讯日K前复权收盘序列 [{date, close}]（nav_divergence 重仓股区间收益用）。
+
+    腾讯线（不封 IP）+ P12 直连 opener 同款 + TENCENT_REQUEST_COUNT 审计入账；
+    仅支持 6 位 A 股码（港股 5 位码由调用方过滤）；当日缓存。
+    V0.7.6：单页拉取抽取为 _tencent_kline_page（翻页协议共用）。"""
+    pre = _tencent_prefix(stock_code)
+    rel = f"kline/{pre}_{int(bars)}.json"   # bars 入键：窗口根数随基金/日期漂移，防跨窗口串缓存
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=20)
+        if cached is not None:
+            return cached
+    out = _tencent_kline_page(pre, bars=bars)
     if len(out) < 2:
-        raise RuntimeError(f"腾讯日K空返回({pre}): {str(d)[:100]}")
+        raise RuntimeError(f"腾讯日K空返回({pre})")
     _cache_write(rel, out)
     return out
 
@@ -3190,18 +3556,126 @@ BENCH_SECID = {
     "中证A500": "1.000510",                       # 2024-09 新发宽基（实测 K线可达）
     "创业板指": "0.399006", "创业板指数": "0.399006",
     "深证100": "0.399330", "中证全指": "1.000985", "国证2000": "0.399303",
+    # V0.7.5 扩表（腾讯通道实测 2026-11-17）：市场基准锚点与大综指补齐
+    "上证指数": "1.000001", "上证综指": "1.000001",
+    "深证成指": "0.399001", "深证综指": "0.399106", "上证180": "1.000010",
     "中证2000": "2.932000",
+    # ── 东财行业板块指数 100 个（V0.7.6，clist t:2 快照 2026-11-17；secid 形态
+    # 90.BKxxxx，腾讯无对应码 → EM 单源无备胎。板块指数为东财编制口径，非申万
+    # 官方 801xxx——行业基金对标够用，申万口径走 a-stock-data。快照会随上游
+    # 增改漂移：未命中名称时用 secid 直传形态（如 "90.BK1036"）。映射经 kline
+    # name 双样本交叉验证（BK0475=银行Ⅱ/BK1036=半导体，2026-11-17）。──
+    "一般零售": "90.BK0482",
+    "专业服务": "90.BK1043",
+    "专用设备": "90.BK0910",
+    "中药Ⅱ": "90.BK1040",
+    "交通运输": "90.BK1210",
+    "仪器仪表": "90.BK0458",
+    "传媒": "90.BK0486",
+    "保险Ⅱ": "90.BK0474",
+    "元件": "90.BK0459",
+    "光伏设备": "90.BK1031",
+    "光学光电子": "90.BK1038",
+    "公用事业": "90.BK0427",
+    "其他电子Ⅱ": "90.BK1223",
+    "其他电源设备Ⅱ": "90.BK1034",
+    "农化制品": "90.BK0731",
+    "农林牧渔": "90.BK0433",
+    "出版": "90.BK1218",
+    "化学制品": "90.BK0538",
+    "化学制药": "90.BK0465",
+    "化学原料": "90.BK1019",
+    "化学纤维": "90.BK0471",
+    "医疗器械": "90.BK1041",
+    "医疗服务": "90.BK0727",
+    "医药商业": "90.BK1042",
+    "医药生物": "90.BK1216",
+    "半导体": "90.BK1036",
+    "商贸零售": "90.BK1213",
+    "国防军工": "90.BK1204",
+    "基础化工": "90.BK1206",
+    "塑料": "90.BK0454",
+    "多元金融": "90.BK0738",
+    "家居用品": "90.BK0440",
+    "家用电器": "90.BK0456",
+    "小金属": "90.BK1027",
+    "工程咨询服务Ⅱ": "90.BK0726",
+    "工程机械": "90.BK0739",
+    "广告营销": "90.BK1220",
+    "建筑材料": "90.BK1208",
+    "建筑装饰": "90.BK1209",
+    "影视院线": "90.BK1222",
+    "房地产": "90.BK1202",
+    "房地产开发": "90.BK0451",
+    "房地产服务": "90.BK1045",
+    "教育": "90.BK0740",
+    "数字媒体": "90.BK1221",
+    "有色金属": "90.BK0478",
+    "服装家纺": "90.BK1225",
+    "机械设备": "90.BK1205",
+    "橡胶": "90.BK1018",
+    "水泥": "90.BK0424",
+    "汽车": "90.BK1211",
+    "汽车服务": "90.BK1016",
+    "汽车零部件": "90.BK0481",
+    "消费电子": "90.BK1037",
+    "游戏Ⅱ": "90.BK1046",
+    "煤炭": "90.BK0437",
+    "燃气Ⅱ": "90.BK1028",
+    "物流": "90.BK0422",
+    "环保": "90.BK0728",
+    "玻璃玻纤": "90.BK0546",
+    "生物制品": "90.BK1044",
+    "电力": "90.BK0428",
+    "电力设备": "90.BK1200",
+    "电子": "90.BK1201",
+    "电子化学品Ⅱ": "90.BK1039",
+    "电机Ⅱ": "90.BK1030",
+    "电池": "90.BK1033",
+    "电网设备": "90.BK0457",
+    "电视广播Ⅱ": "90.BK1219",
+    "石油石化": "90.BK0464",
+    "社会服务": "90.BK1214",
+    "纺织制造": "90.BK1224",
+    "纺织服饰": "90.BK0436",
+    "综合": "90.BK1217",
+    "综合Ⅱ": "90.BK0539",
+    "美容护理": "90.BK1035",
+    "能源金属": "90.BK1015",
+    "航空机场": "90.BK0420",
+    "航运港口": "90.BK0450",
+    "装修建材": "90.BK0476",
+    "装修装饰Ⅱ": "90.BK0725",
+    "计算机": "90.BK1207",
+    "计算机设备": "90.BK0735",
+    "证券Ⅱ": "90.BK0473",
+    "贵金属": "90.BK0732",
+    "贸易Ⅱ": "90.BK0484",
+    "软件开发": "90.BK0737",
+    "轻工制造": "90.BK1212",
+    "通信": "90.BK1215",
+    "通信服务": "90.BK0736",
+    "通信设备": "90.BK0448",
+    "通用设备": "90.BK0545",
+    "钢铁": "90.BK0479",
+    "铁路公路": "90.BK0421",
+    "银行Ⅱ": "90.BK0475",
+    "非金属材料Ⅱ": "90.BK1020",
+    "非银金融": "90.BK1203",
+    "风电设备": "90.BK1032",
+    "食品饮料": "90.BK0438",
+    "饰品": "90.BK0734",
 }
 # 沪市指数码集合（_tencent_prefix 路由用，V0.7.1）：从 BENCH_SECID 市场 1 值域
 # 自动派生（单一事实源——此前手工维护漏了 000922/000906 等，裸 6 位中证沪指码
-# 曾被误路由 sz000922 深股=静默错数据，sh000016 同族）；000010 等非 BENCH_SECID
-# 历史成员显式保留。
-_SH_INDEX_Q = ({v.split(".")[1] for v in BENCH_SECID.values() if v.startswith("1.")}
-               | {"000010"})
-_SECID_RE = re.compile(r"[012]\.\d{6}")
+# 曾被误路由 sz000922 深股=静默错数据，sh000016 同族）。V0.7.5 上证180 入表后
+# 000010 已随派生覆盖，原显式保留移除。
+_SH_INDEX_Q = {v.split(".")[1] for v in BENCH_SECID.values() if v.startswith("1.")}
+_SECID_RE = re.compile(r"([012]\.\d{6}|90\.BK\d{4})")   # V0.7.6 放行东财板块指数 90.BKxxxx
 _TENCENT_KLINE_CAP = 800                       # 腾讯 fqkline 实测：≤800 全量返回（param=800 实返
                                                # 801 根，服务端+1 无害）；1000~2000 静默截断~641；
                                                # ≥2100 param error（sh600519 扫描，P25）
+_TENCENT_PAGE_CAP = 10                         # 翻页安全阀：10 页 × 800 = 8000 根 ≈ 32 年（V0.7.6）
 
 
 def _kline_resolve(query: str) -> tuple:
@@ -3226,7 +3700,9 @@ def _kline_resolve(query: str) -> tuple:
         if secid in set(BENCH_SECID.values()):
             return "index", secid
         return "stock", f"{pref}{code}"
-    supported = "、".join(sorted(set(k for k in BENCH_SECID if "指数" not in k)))
+    _names = sorted(set(k for k in BENCH_SECID if "指数" not in k))
+    supported = ("、".join(_names[:20]) + f" 等 {len(_names)} 个指数/板块名（完整清单见 BENCH_SECID）"
+                 if len(_names) > 20 else "、".join(_names))
     raise ValueError(
         f"kline_daily 不识别 {query!r}——支持：指数名（{supported}…）、secid（如 1.000300）、"
         f"6位股票代码或 sh/sz/bj 前缀形式")
@@ -3249,8 +3725,9 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
     query 三形态：指数名（BENCH_SECID，如 "沪深300"/"中证红利"/"国证2000"）/
     EM secid（如 "1.000300"）/ 6 位股票代码（复用 _tencent_kline 腾讯通道）。
     指数 = EM push2his 主源（_push2_get 线 + F6 分流）+ 腾讯备胎（市场2无腾讯代码
-    不降级；腾讯 fqkline 实测上限 800 根，超过会静默截断/param error，备胎窗口自动
-    钳制，P25）；指数路径行内带 **source** 字段（"push2his"|"tencent"——诚实标注
+    不降级；V0.7.6 备胎升级为**翻页全史缝合**——原单页 800 上限只能兜 ~3 年短窗，
+    现按页末锚串行翻页拼 20+ 年全史，每缝日期+收盘双校验，P25/P28）；
+    指数路径行内带 **source** 字段（"push2his"|"tencent"——诚实标注
     当前来自哪条通道，主源健康但历史短的指数如中证A500 不能按长度推断来源）；
     股票 = 腾讯 fqkline（不封 IP，lmt>800 显式报错引导指数形态，单一来源不带
     source）。20h 缓存、键含 lmt（≤20h 旧缓存行可能无 source 键，消费方用 .get）；
@@ -3308,22 +3785,20 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
     if em_rows < need and use_tencent_fallback:
         sym = _secid_tencent_sym(ident)
         if sym is None:
-            fb_note = "备胎不可用（市场2中证指数无腾讯代码）"
+            fb_note = "备胎不可用（该指数无腾讯代码：市场2中证公司发布/东财板块指数）"
         else:
             fb_note = "备胎失败"
-            eff = min(lmt, _TENCENT_KLINE_CAP)         # 腾讯 fqkline 上限（P25）：超限恒返空
             kept = rows
             rows = []                                  # 重置防两源日期/复权基线混拼
             try:
-                url = (f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
-                       f"param={sym},day,,,{eff},qfq")
-                d = json.loads(_tencent_raw(
-                    url, headers={"Referer": "https://gu.qq.com/"}).decode("utf-8"))
-                node = (d.get("data") or {}).get(sym) or {}
-                for arr in node.get("qfqday") or node.get("day") or []:
-                    if len(arr) >= 3:
-                        rows.append({"date": arr[0], "close": float(arr[2]),
-                                     "source": "tencent"})
+                # V0.7.6：翻页全史缝合（原 800 根短窗钳制——熔断期只能兜 ~3 年）
+                paged = _tencent_kline_paginated(sym, lmt)
+                rows = [{"date": r["date"], "close": r["close"],
+                         "source": "tencent"} for r in paged]
+            except (RiskControlError, CircuitOpenError):
+                raise          # 风险型信号绝不吞（V0.7.6 审查加固）——进备胎时 EM 残行
+                               # 必不足 need（否则不进备胎），回用 kept 必然最终报错，
+                               # re-raise 无损且错误归因更准
             except Exception as e:
                 fb_note = f"备胎失败（{str(e)[:40]}）"
             if len(rows) < need:                       # 备胎也不够 → 回用 EM 有效行（诚实留痕）

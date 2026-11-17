@@ -1,4 +1,4 @@
-# fund-data 复制即用示例（examples.md · 按需读取层）V0.7.4
+# fund-data 复制即用示例（examples.md · 按需读取层）V0.7.6
 
 本文件解决两个问题：**「具体怎么调用」**（12 个高频场景菜谱，复制即跑）与
 **「出问题了怎么办」**（FAQ 按现象直达解法）。每条菜谱 = 意图 + 完整代码 +
@@ -142,6 +142,10 @@ print(fund_data.treasury_yield_daily(5))        # {date, cn_2y..30y, us_*, cn_10
 print(fund_data.shibor_history("3月(3M)", 5))   # {date, period, rate_pct}
 print(fund_data.repo_rate_gc())                 # GC007（DR007 交易所代理）
 print(fund_data.cn_treasury_realtime())         # {2y/5y/10y/30y: {yield_pct}, as_of}
+
+# 交易所债券实时快照（V0.7.5 新浪备胎：腾讯行情挂时的互备；须 sh/sz 前缀）
+q = fund_data.sina_quote(["sh118078", "sz127120"])   # 返回键为 6 位裸码（如 "118078"）：
+                                                      # {name, last, prev_close, bid1, date, time}
 ```
 
 输出形态：曲线点 `{date, term, term_years, yield_pct}`；全曲线族走
@@ -187,13 +191,14 @@ for r in fund_data.qdii_premium(["513100", "513500"]):
 ## 场景 12 · 指数/股票日线（1 请求，当日缓存）
 
 ```python
-k = fund_data.kline_daily("沪深300")            # 指数名或股票代码；也可 "中证500" "600519"
+k = fund_data.kline_daily("沪深300")            # 指数名/行业板块名/股票代码；也可 "上证指数" "半导体" "600519"
 print(k[0]["date"], "→", k[-1]["date"], f"共 {len(k)} 根")
 ```
 
 输出形态：`[{date, close, source?}]` 升序；默认 `lmt=2600`（约十年）。
-坑提醒：跟踪指数名/股票码都可，前缀形态 `sh000016` 会保市场信息防错路由；
-缓存键含 `lmt`——窗口拉大不会吃到旧短缓存。
+坑提醒：指数名查表 119 个（宽基/风格/东财行业板块 100，板块为东财口径非申万）；
+行业板块指数无腾讯备胎（EM 单源）；跟踪指数名/股票码都可，前缀形态 `sh000016`
+会保市场信息防错路由；缓存键含 `lmt`——窗口拉大不会吃到旧短缓存。
 
 ---
 

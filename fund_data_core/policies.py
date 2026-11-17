@@ -40,6 +40,9 @@ DEFAULT_POLICIES = {
     "chinabond": ProviderPolicy(max_requests=120, min_interval=1.5, max_in_flight=2),
     "danjuan": ProviderPolicy(max_requests=120, min_interval=1.5, max_in_flight=2),
     "tencent": ProviderPolicy(max_requests=300, min_interval=0.2, max_in_flight=4),
+    # 新浪（V0.7.5 备胎通道）：hq.sinajs.cn 对高频爬虫有封禁前科——核心基线
+    # 保守 120/300s·0.5s·单并发，主模块在其上 replace 覆盖为同值（单一来源两处一致）
+    "sina": ProviderPolicy(max_requests=120, min_interval=0.5, max_in_flight=1),
 }
 
 _PROVIDER_ALIASES = {
@@ -47,6 +50,7 @@ _PROVIDER_ALIASES = {
     "ttfund": "eastmoney", "push2": "eastmoney", "push2his": "eastmoney",
     "cninfo": "cninfo", "chinabond": "chinabond", "cb": "chinabond",
     "danjuan": "danjuan", "dj": "danjuan", "tencent": "tencent", "tx": "tencent",
+    "sina": "sina", "sinahq": "sina",
 }
 
 _HOST_PROVIDERS = {
@@ -57,6 +61,8 @@ _HOST_PROVIDERS = {
     "danjuanapp.com": "danjuan",
     "gtimg.cn": "tencent",
     "gu.qq.com": "tencent",
+    "sinajs.cn": "sina",
+    "sina.com.cn": "sina",
 }
 
 
