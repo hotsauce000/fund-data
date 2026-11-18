@@ -138,6 +138,170 @@ def test_l1_offline():
     finally:
         fd.urllib.request.build_opener = _orig_bo
 
+    # ── V0.7.7 申购限额：解析纯函数 + 嵌套 span + 采集 + 快照集成（stub 零网络）──
+    _pl = fd.parse_purchase_limit
+    _w = _pl("限大额（单日累计购买上限1,000.00万元）")
+    check("L1", "限额-万元千分位", _w["kind"] == "limited" and _w["limit_cny"] == 1e7
+          and _w["currency"] == "万元", str(_w))
+    check("L1", "限额-元", _pl("限大额(单日累计购买上限1000.00元)")["limit_cny"] == 1000.0)
+    check("L1", "限额-外币近似折算",
+          _pl("单日累计购买上限1,000美元")["limit_cny"] == 7200.0
+          and _pl("单日累计购买上限100港币")["limit_cny"] == 92.0
+          and _pl("单日累计购买上限100欧元")["limit_cny"] == 780.0
+          and _pl("单日累计购买上限100英镑")["limit_cny"] == 920.0
+          and _pl("单日累计购买上限1000日元")["limit_cny"] == 50.0)
+    check("L1", "限额-fx参数覆盖", _pl("单日累计购买上限100美元",
+          fx={"美元": 7.0})["limit_cny"] == 700.0)
+    check("L1", "限额-金额前空格容忍", _pl("限大额（单日累计购买上限 1000.00元）")
+          ["limit_cny"] == 1000.0)
+    check("L1", "限额-万元无小数", _pl("单日累计购买上限100万元")
+          ["limit_cny"] == 1e6)
+    _s = _pl("暂停申购")
+    check("L1", "限额-暂停申购", _s["kind"] == "suspended" and _s["limit_cny"] == 0.0)
+    check("L1", "限额-暂停附带金额优先", _pl("暂停申购（单日累计购买上限100元）")["kind"] == "limited")
+    _x = _pl("限大额")
+    check("L1", "限额-限大额无金额诚实None", _x["kind"] == "limited"
+          and _x["limit_cny"] is None, str(_x))
+    check("L1", "限额-开放申购", _pl("开放申购")["kind"] == "unlimited")
+    check("L1", "限额-未覆盖形态unknown", _pl("封闭期")["kind"] == "unknown"
+          and _pl("")["kind"] == "unknown" and _pl(None)["kind"] == "unknown")
+    # 嵌套 span 解析器（真实形态：金额在子 span——简单 regex 必截断，000369 实测）
+    _sp = fd._StaticCellParser()
+    _sp.feed('<span class="staticCell">限大额 (<span>单日累计购买上限1000.00元</span>)</span>'
+             '<span class="staticCell">开放赎回</span>')
+    check("L1", "限额-嵌套span全文拼接",
+          _sp.cells == ["限大额 (单日累计购买上限1000.00元)", "开放赎回"], str(_sp.cells))
+    _sp2 = fd._StaticCellParser()               # class 多 token（"staticCell xx"）不丢 cell
+    _sp2.feed('<span class="staticCell xx"><span>开放申购</span></span>')
+    check("L1", "限额-class多token容忍", _sp2.cells == ["开放申购"], str(_sp2.cells))
+
+    class _PLResp:
+        status_code = 200
+
+        def __init__(self, text):
+            self.content = text.encode("utf-8")
+            self.text = text
+
+        def raise_for_status(self):
+            return None
+
+    _PL_HTML = ('<title>广发全球医疗保健指数(QDII)A(000369)-天天基金网</title>'
+                '<div class="tradeStatus"><span class="itemTit">交易状态：</span>'
+                '<span class="staticCell">限大额 (<span>单日累计购买上限1000.00元</span>)'
+                '</span><span class="staticCell">开放赎回</span></div>')
+    _pz7 = ('var fS_name="测试基金";var fS_code="000369";var ishb="0";'
+            'var Data_netWorthTrend=[{"x":1767225600000,"y":1.0,"equityReturn":"0"}];'
+            'var Data_ACWorthTrend=[];var Data_grandTotal=[];'
+            'var Data_rateInSimilarPersent=[];var Data_fundSharesPositions=[];'
+            'var Data_fluctuationScale={"categories":[],"series":[]};')
+    _orig_tt7, _orig_cr7, _orig_cw7 = fd.ttfund_get, fd._cache_read, fd._cache_write
+    _orig_fl7 = fd.fund_list
+    _store7, _hits7 = {}, [0]
+    try:
+        fd.fund_list = lambda **k: _SEED_LIST + [
+            {"code": "000369", "pinyin": "gfqqyl", "name": "广发全球医疗保健指数A",
+             "type": "指数型-海外股票"}]
+        fd._cache_read = lambda rel, max_age_hours=None: None
+        fd._cache_write = lambda rel, payload: _store7.update({rel: payload})
+        fd.ttfund_get = lambda url, **k: _PLResp(_PL_HTML)
+        _r7 = fd.fund_purchase_limit("000369")
+        check("L1", "限额-采集结构化", _r7["kind"] == "limited"
+              and _r7["limit_cny"] == 1000.0
+              and _r7["status_text"] == "限大额 (单日累计购买上限1000.00元)；开放赎回"
+              and _r7["not_for_sale"] is False
+              and _r7["name"] == "广发全球医疗保健指数" and _r7["code"] == "000369",
+              str(_r7)[:120])
+        check("L1", "限额-缓存键独立", "purchase_limits/000369.json" in _store7)
+        # 申购/赎回 cell 分离：赎回 cell 的「限大额」词样不得污染申购判定（审查修复）
+        _PL_HTML2 = ('<title>某基金(000312)-天天基金网</title>'
+                     '<div class="tradeStatus"><span class="itemTit">交易状态：</span>'
+                     '<span class="staticCell">开放申购</span>'
+                     '<span class="staticCell">限大额赎回</span></div>')
+        fd.ttfund_get = lambda url, **k: _PLResp(_PL_HTML2)
+        _r7c = fd.fund_purchase_limit("000312")
+        check("L1", "限额-kind只看申购cell",
+              _r7c["kind"] == "unlimited"
+              and _r7c["status_text"] == "开放申购；限大额赎回", str(_r7c)[:120])
+        fd.ttfund_get = lambda url, **k: _PLResp(
+            '<title>某基金(000001)</title>该基金暂不开放购买')
+        _r7b = fd.fund_purchase_limit("000001")
+        check("L1", "限额-不代销+无状态栏容错", _r7b["not_for_sale"] is True
+              and _r7b["kind"] == "unknown" and _r7b["status_text"] == "未找到交易状态栏")
+        fd._cache_read = lambda rel, max_age_hours=None: (
+            _hits7.__setitem__(0, _hits7[0] + 1), {"cached": 1})[1]
+        fd.fund_purchase_limit("000369")
+        check("L1", "限额-当日缓存命中0请求", _hits7[0] == 1)
+
+        # 畸形 HTML 容错（审查遗留的 cells[0] 边角：空 cell 不得占位）
+        fd._cache_read = lambda rel, max_age_hours=None: None   # 前测试哨兵复位
+        _PL_HTML3 = ('<title>某基金(000312)</title>'
+                     '<div class="tradeStatus"><span class="itemTit">交易状态：</span>'
+                     '<span class="staticCell"> </span>'
+                     '<span class="staticCell">开放申购</span></div>')
+        fd.ttfund_get = lambda url, **k: _PLResp(_PL_HTML3)
+        _r7d = fd.fund_purchase_limit("000312")
+        check("L1", "限额-空cell滤除不占cells[0]",
+              _r7d["kind"] == "unlimited" and _r7d["status_text"] == "开放申购")
+        _sp3 = fd._StaticCellParser()
+        _sp3.feed('<span class="staticCell">限大额')       # 未闭合 span（畸形）
+        check("L1", "限额-未闭合span不崩", _sp3.cells == [], str(_sp3.cells))
+        _sp4 = fd._StaticCellParser()
+        _sp4.feed('<span class="staticCell">开放<b>申购</b></span>')   # 非 span 嵌套
+        check("L1", "限额-嵌套非span标签不扰depth", _sp4.cells == ["开放申购"],
+              str(_sp4.cells))
+        # force_refresh 绕缓存（不走 _cache_read）
+        _cr_hits = [0]
+
+        def _cr_count(rel, max_age_hours=None):
+            _cr_hits[0] += 1
+            return None
+
+        fd._cache_read = _cr_count
+        fd.ttfund_get = lambda url, **k: _PLResp(_PL_HTML)
+        fd.fund_purchase_limit("000369", force_refresh=True)
+        check("L1", "限额-force_refresh绕缓存", _cr_hits[0] == 0)
+        # 快照 force_refresh 只重拉 E2——限额页独立当日缓存不连坐
+        _pz_hits = [0]
+
+        def _tt_split(url, **k):
+            if "pingzhongdata" in url:
+                _pz_hits[0] += 1
+                return _PLResp(_pz7)
+            raise AssertionError("限额页不应重拉（force_refresh 只作用于 E2）")
+
+        fd._cache_read = lambda rel, max_age_hours=None: (
+            {"cached": 1} if rel.startswith("purchase_limits/") else None)
+        fd.ttfund_get = _tt_split
+        _snap7c = fd.fund_snapshot("000369", force_refresh=True)
+        check("L1", "限额-快照force_refresh不连坐限额缓存",
+              _pz_hits[0] == 1 and _snap7c["purchase_limit"] == {"cached": 1},
+              f"E2实发{_pz_hits[0]}次")
+        # 快照集成：E2 与主页面按 url 分流——purchase_limit 挂进快照
+        def _tt_router(pl_html=None, pl_exc=None):
+            def _get(url, **k):
+                if "pingzhongdata" in url:
+                    return _PLResp(_pz7)
+                if pl_exc is not None:
+                    raise pl_exc
+                return _PLResp(pl_html)
+            return _get
+
+        fd._cache_read = lambda rel, max_age_hours=None: None
+        fd.ttfund_get = _tt_router(pl_html=_PL_HTML)
+        _snap7 = fd.fund_snapshot("000369")
+        check("L1", "限额-快照集成数据集", _snap7["purchase_limit"]["limit_cny"] == 1000.0
+              and _snap7["purchase_limit"]["status_text"].startswith("限大额"))
+        fd.ttfund_get = _tt_router(pl_exc=fd.RiskControlError("模拟风控"))
+        _snap7b = fd.fund_snapshot("000369")
+        check("L1", "限额-主页面失败不炸快照",
+              _snap7b["purchase_limit"] is None
+              and "purchase_limit(fetch-failed)" in _snap7b["missing_datasets"]
+              and len(_snap7b["nav_history"]) == 1,  # E2 成果不陪葬
+              str(_snap7b["missing_datasets"]))
+    finally:
+        fd.ttfund_get, fd._cache_read, fd._cache_write = _orig_tt7, _orig_cr7, _orig_cw7
+        fd.fund_list = _orig_fl7
+
     # ── V0.7.5 行情通道防封加固：软封锁/连接级/结构守卫/403 分流（stub 零网络）──
     class _StubOpener2:
         def __init__(self, mode, counter=None):
@@ -2600,6 +2764,19 @@ def test_l2_smoke():
           and len(snap["peer_rank_history"]) > 100,
           f"仓位{len(snap['stock_position_history'])}期 "
           f"同类{len(snap['peer_rank_history'])}点")
+    pl = snap.get("purchase_limit")
+    check("L2", "PL 限额-快照数据集在位(V0.7.7)",
+          (pl is None and any("purchase_limit" in m for m in snap["missing_datasets"]))
+          or (isinstance(pl, dict)
+              and pl["kind"] in ("limited", "suspended", "unlimited", "unknown")
+              and isinstance(pl["status_text"], str) and pl["status_text"]),
+          f"kind={pl['kind'] if pl else None} "
+          f"状态={(pl['status_text'][:30] if pl else 'N/A')}")
+    pl2 = fd.fund_purchase_limit("000369")   # 真实限大额 QDII 样本（首查 1 请求，同日重查 0）
+    check("L2", "PL 限额-真实解析/缓存往返(V0.7.7)",
+          pl2["code"] == "000369" and pl2["kind"] in ("limited", "unknown")
+          and pl2["name"] and ("限大额" in pl2["status_text"] or pl2["kind"] == "unknown"),
+          f"{pl2['status_text'][:36]} kind={pl2['kind']}")
     check("L2", "E2 快照-规模史修复(V0.4)",
           snap["scale_history"]
           and isinstance(snap["scale_history"][-1]["scale_yi"], float),
@@ -2908,7 +3085,9 @@ def test_l4_budget():
     fd.TT_REQUEST_COUNT[1].clear()
     fd.fund_snapshot("161725", force_refresh=True)
     n1, hosts = fd.TT_REQUEST_COUNT[0], dict(fd.TT_REQUEST_COUNT[1])
-    check("L4", "流A-首次诊断≤2请求", n1 <= 2 and hosts.get("fund.eastmoney.com") == 1,
+    # V0.7.7：快照 = E2 + 主页面限额页（同域）。force_refresh 只重拉 E2；限额页独立
+    # 当日缓存键——真冷 2 发，限额已被 L2 预热则 1 发，两种顺序形态都合法。
+    check("L4", "流A-首次诊断≤3请求", n1 <= 3 and hosts.get("fund.eastmoney.com") in (1, 2),
           f"共{n1}次 {hosts}")
 
     fd.TT_REQUEST_COUNT[0] = 0
@@ -2953,6 +3132,10 @@ def test_l5_degrade():
         check("L5", "降级-净值已反转为升序(坑P7/窗口1年)",
               nav[0]["date"] < nav[-1]["date"],
               f"{nav[0]['date']} → {nav[-1]['date']}")
+        # V0.7.7 一致性：降级快照不拉主页面，purchase_limit 显式缺失（键存在+missing 标注）
+        check("L5", "降级-purchase_limit显式缺失",
+              deg.get("purchase_limit") is None
+              and "purchase_limit(degraded-skip)" in deg["missing_datasets"])
         dm = fd.fund_metrics(deg)
         check("L5", "降级-指标方向自洽",
               dm["window"]["days"] > 200 and dm["window"]["days"] < 420 and abs(dm["total_return_pct"]) < 500,

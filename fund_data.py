@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-fund-data V0.7.6 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层）
+fund-data V0.7.7 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
-  1. 单基金深度诊断 ≤2 请求（1×pingzhongdata，0~1×lsjz）
+  1. 单基金深度诊断 ≤3 请求（1×pingzhongdata + 0~1×lsjz + 0~1×主页面限额，V0.7.7 起快照含 purchase_limit）
   2. 全市场筛选走 rankhandler 全量单请求或 TopN 单页，禁止 for fund in all: snapshot(fund)
   3. 同一基金当日快照磁盘缓存命中 = 0 请求
   4. 所有东财/天天请求走 ttfund_get()：串行 + 1.5s 最小间隔 + 会话复用 + 强制 HTTPS
@@ -43,6 +43,7 @@ import math
 import os
 import re
 import time
+from html.parser import HTMLParser
 import random
 import urllib.error
 import urllib.request
@@ -59,7 +60,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.7.6"
+__version__ = "0.7.7"
 
 # ══════════════════════════════════════════════════════════════════
 # L1 前置层：限流入口 / 缓存目录 / 请求计数
@@ -574,6 +575,130 @@ def resolve_fund_code(query: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
+# V0.7.7 申购限额：基金主页面交易状态栏（E2/E3/E6 实测均无此信息，坑P31）
+# ══════════════════════════════════════════════════════════════════
+
+class _StaticCellParser(HTMLParser):
+    """交易状态栏 staticCell span 文本提取（嵌套感知）。
+
+    金额与「限大额」分属不同层级 text node（实测 000369：外层 span 只收到
+    「限大额 (」，「单日累计购买上限N元」在嵌套子 span）——depth 计数期间
+    持续收集 handle_data，单个 cell 输出拼接全文（简单 regex 必截断）。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._depth = 0
+        self._buf = ""
+        self.cells: list = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "span":
+            return
+        if self._depth == 0 and "staticCell" in (dict(attrs).get("class") or "").split():
+            self._depth, self._buf = 1, ""
+        elif self._depth:
+            self._depth += 1
+
+    def handle_endtag(self, tag):
+        if tag == "span" and self._depth:
+            self._depth -= 1
+            if not self._depth:
+                self.cells.append(" ".join(self._buf.split()))
+
+    def handle_data(self, data):
+        if self._depth:
+            self._buf += data
+
+
+# 近似折算汇率（静态快照口径，非实时牌价）——外币份额限额折 CNY 仅供比较/排序
+_LIMIT_FX_DEFAULT = {"万元": 1e4, "元": 1.0, "美元": 7.2, "港币": 0.92,
+                     "欧元": 7.8, "英镑": 9.2, "日元": 0.05}
+_LIMIT_AMOUNT_RE = re.compile(
+    r"单日累计购买上限\s*([0-9][0-9,.]*)\s*(万元|元|美元|港币|欧元|英镑|日元)")
+
+
+def parse_purchase_limit(status_text: str, fx: Optional[dict] = None) -> dict:
+    """交易状态文本 → 结构化限额（纯函数，零网络）。
+
+    kind 四态：limited / suspended（暂停申购，limit_cny=0——一分买不了）/
+    unlimited（开放申购无限额）/ unknown（封闭期、募集期等未覆盖形态——
+    limit_cny=None 诚实留空，绝不冒充无限额）。
+    金额优先于状态词：暂停申购文本若附带金额仍提取（kind=limited）。
+    「限大额」但金额形态未识别 → limited + limit_cny=None（上游改版预警，
+    不学早期脚本硬给 0 虚报不可买）。外币按近似汇率折 CNY（fx 可覆盖），
+    精确额度以 limit_raw 原文为准。
+    """
+    text = str(status_text or "")
+    m = _LIMIT_AMOUNT_RE.search(text)
+    if m:
+        unit = m.group(2)
+        try:
+            rate = float((fx or {}).get(unit, _LIMIT_FX_DEFAULT[unit]))
+            amount = round(float(m.group(1).replace(",", "")) * rate, 2)
+        except (ValueError, TypeError):
+            amount = None
+        return {"kind": "limited", "limit_cny": amount, "currency": unit,
+                "limit_raw": m.group(0)}
+    if "暂停申购" in text:
+        return {"kind": "suspended", "limit_cny": 0.0, "currency": None,
+                "limit_raw": "暂停申购"}
+    if "限大额" in text:
+        return {"kind": "limited", "limit_cny": None, "currency": None,
+                "limit_raw": text.strip() or "限大额"}
+    if "开放申购" in text:
+        return {"kind": "unlimited", "limit_cny": None, "currency": None,
+                "limit_raw": "开放申购"}
+    return {"kind": "unknown", "limit_cny": None, "currency": None,
+            "limit_raw": text.strip()}
+
+
+def fund_purchase_limit(query: str, force_refresh: bool = False) -> dict:
+    """单基金申购限额/交易状态（主页面 {code}.html，1 请求，当日缓存）。
+
+    E2/E3/E6 实测均无完整限额信息（E3 SGZT 仅「限大额」短文本无金额），
+    唯一来源是主页面交易状态栏。输出：
+      {code, name, status_text 交易状态原文（申购/赎回 cell 以；拼接）,
+       not_for_sale 天天基金暂不代销, kind, limit_cny, currency, limit_raw}
+    kind/折算语义见 parse_purchase_limit。页面无交易状态栏（已清盘/新发
+    未开购/结构变更）→ kind="unknown" 而非报错——按只容错，批量不中断。
+    ⚠️ 批量循环 = N 只 N 请求（主页面无批量接口），tt 线 1.5s 自动节流，
+    400 只约 10 分钟；当日缓存后同日重查 0 请求。
+    """
+    code = resolve_fund_code(query)
+    rel = f"purchase_limits/{code}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
+        if cached is not None:
+            return cached
+    r = ttfund_get(f"https://fund.eastmoney.com/{code}.html",
+                   headers={"Referer": "https://fund.eastmoney.com/"})
+    assert_not_risk_control(r, "tt", f"主页面 {code}")
+    r.raise_for_status()
+    h = r.content.decode("utf-8", errors="replace")
+    _assert_not_risk_content(h, "tt", f"主页面 {code}")   # 200+风控文案页不落缓存
+    m = re.search(r"<title>([^<\-]{2,40})", h)
+    name = ((m.group(1).strip() if m else "").split("(")[0]
+            .split("_")[0].split("-")[0].strip()) or None
+    m = re.search(r"交易状态：</span>(.*?)</div>", h, re.DOTALL)
+    cells = []
+    if m:
+        parser = _StaticCellParser()
+        parser.feed(m.group(1))
+        cells = [c for c in parser.cells if c]   # 滤空 cell：噪声空串不得占 cells[0]
+    status_text = "；".join(cells)
+    # kind 只看申购 cell（cells[0]）——赎回 cell 里的「限大额/暂停」词样不得
+    # 污染申购判定（实测存在「开放申购；限大额赎回」形态：开放可买被误报受限）
+    parsed = parse_purchase_limit(cells[0]) if cells else parse_purchase_limit("")
+    out = {"code": code, "name": name,
+           "status_text": status_text or "未找到交易状态栏",
+           "not_for_sale": "该基金暂不开放购买" in h, **parsed}
+    _cbreak_success("tt")
+    _cache_write(rel, out)
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════
 # L4 解析层 + V0.1 端点：fund_snapshot（E2 主端点，1 请求 = 90% 静态数据）
 # ══════════════════════════════════════════════════════════════════
 
@@ -883,7 +1008,15 @@ def fund_snapshot(query: str, force_refresh: bool = False) -> dict:
         "buy_redemption_status": v.get("Data_buySedemption"),
         "missing_datasets": missing,                   # 坑P3：显式列出，调用方知情
     }
-    _cbreak_success("tt")
+    # V0.7.7 申购限额（主页面独立小请求）：失败/熔断不炸快照——风控信号已由
+    # ttfund_get 内部计数，此处只吞异常并标注 missing（E2 成果不该陪葬）。
+    _cbreak_success("tt")          # E2 业务校验通过才有资格清零（须在限额页 try 前：
+                                   # 限额页 403 被吞时若在其后清零，连击永远凑不满）
+    try:
+        snap["purchase_limit"] = fund_purchase_limit(code)
+    except (RuntimeError, requests.RequestException):
+        snap["purchase_limit"] = None
+        missing.append("purchase_limit(fetch-failed)")
     _cache_write(rel, snap)
     return snap
 
@@ -895,7 +1028,8 @@ def _snapshot_degraded(code: str, reason: str = "", years: float = 1.0) -> dict:
     净值窗口默认近 1 年（F3：原 3 年=37 页连发，批量场景会形成请求风暴；
     需要更长历史可显式传 years，单基金场景代价可接受）。
     """
-    missing: list[str] = ["Data_* 系列（E2 整体不可用）"]
+    missing: list[str] = ["Data_* 系列（E2 整体不可用）",
+                          "purchase_limit(degraded-skip)"]   # V0.7.7：降级期不追打主页面（同域故障概率高），显式标注
     start = (date.today() - timedelta(days=int(years * 365))).isoformat()
     hist = fund_nav_history(code, start=start)        # E3 兜底净值（可能抛错→由调用方感知）
     if not hist:
@@ -926,6 +1060,7 @@ def _snapshot_degraded(code: str, reason: str = "", years: float = 1.0) -> dict:
                   "fetched_at": datetime.now().isoformat(timespec="seconds"),
                   "source": "degraded(E3+E4a+D1)", "reason": reason},
         "name": dj.get("name"), "is_money_fund": None,
+        "purchase_limit": None,                       # V0.7.7：降级期不拉主页面（见 missing 标注）
         "manager": {"name": dj.get("manager")},
         "nav_history": nav_hist,
         "ac_nav_history": [], "top_stocks": top_stocks, "top_bonds": [],

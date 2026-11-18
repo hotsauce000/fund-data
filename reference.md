@@ -1,13 +1,19 @@
-# fund-data 完整参考（reference.md · 按需读取层）V0.7.6
+# fund-data 完整参考（reference.md · 按需读取层）V0.7.7
 
 > 本文件按需读取：调试 / 扩展 / 排查坑时才打开，勿随 skill 激活预加载。
 > 路由与签名速查见 SKILL.md；本文件内嵌代码与 fund_data.py 同源直拼（构建时生成）。
 
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 
-# fund-data 基金底层数据工具包 V0.7.6 模块全档
+# fund-data 基金底层数据工具包 V0.7.7 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复 + V0.7.4 文档三层 + V0.7.5 新浪互备与行情防封加固 + V0.7.6 K线韧性与行业基准：287/287 离线断言通过**（L1 单元 251 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11 须显式 `--online`），覆盖 23 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）、`examples.md`（菜谱+FAQ 层）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复 + V0.7.4 文档三层 + V0.7.5 新浪互备与行情防封加固 + V0.7.6 K线韧性与行业基准 + V0.7.7 申购限额：312/312 离线断言通过**（L1 单元 276 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 47 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练8 · 防封专项F×11 须显式 `--online`），覆盖 24 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）、`examples.md`（菜谱+FAQ 层）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.7.7 申购限额（主页面交易状态栏 → 快照新数据集）：**
+- 🟢 **限额/交易状态入快照**：`fund_snapshot` 新增 `purchase_limit` 数据集（kind 四态 limited/suspended/unlimited/unknown + limit_cny 折算金额 + not_for_sale 不代销标记），快照 1→2 请求（E2+主页面）；失败进 missing_datasets 不炸快照（E2 成果不陪葬）；`fund_purchase_limit(code)` 可单独调用（当日缓存）
+- 🔴 **唯一来源探针证据（P31）**：E2/E3/E6 实测均无完整限额（E3 SGZT 仅「限大额」短文本无金额）——唯一来源是主页面 `{code}.html` 交易状态栏，且**无批量接口**（N 只 N 请求，tt 线 1.5s 节流 400 只约 10 分钟）
+- 🔴 **嵌套 span 解析**：金额与「限大额」分属不同层级 text node（000369 实测）——`_StaticCellParser` depth 嵌套感知全文拼接，简单 regex 必截断
+- 🟡 语义修正：「限大额但金额未识别」诚实返回 limit_cny=None（早期监控脚本硬给 0 会虚报不可买）；外币按静态近似汇率折 CNY（fx 参数可覆盖），精确额度看 limit_raw 原文
 
 **V0.7.6 K线韧性与行业基准（腾讯翻页全史备胎 + 东财行业板块指数 100 个）：**
 - 🟢 **腾讯翻页全史备胎**：fqkline 单页 800 上限（P25）曾被当硬边界——实测 param 第 3/4 槽支持起止日期按「页末锚」串行翻页（茅台 6044 根/沪深300 5250 根，qfq 因子跨请求 0 漂移，2026-11-17）；备胎从「800 根短窗」升级为「翻页缝合全史」，熔断期不再缩到 ~3 年
@@ -167,6 +173,7 @@
 | B1 | `kline_daily(q,lmt)` | 指数/股票日线收盘 [{date,close}]：指数名查表/secid/股票码三形态 | push2his+腾讯备胎 | 1（缓存0） |
 | B2 | `fund_scale_history(q)` | 规模全历史：募集期→最新季报（期间申购/赎回流量+份额+净资产+变动率，升序） | F10 gmbd | 1（缓存0） |
 | B3 | `fund_fees(q)` | 费率全表：管理/托管/销售服务费（每年%）+认购/申购（原/优惠）/赎回三阶梯（持有期递减） | F10 jjfl | 1（缓存0） |
+| PL | `fund_purchase_limit(q)` | 申购限额/交易状态：kind 四态+limit_cny 折算+not_for_sale（P31 唯一来源；已并入快照 purchase_limit 数据集） | fund.eastmoney.com/{code}.html | 1（缓存0）；⚠️无批量接口 |
 | V6 | `fund_manager(q)` / `manager_rank(pages)` | 经理画像（任职/规模/回报/在管清单）/ 排行（姓名序） | eastmoney manager 页+dt=14 | 1·50/页 |
 | 本地 | `adjusted_nav(recs)` | 复权净值（分红再投口径，链式） | 零网络 | 0 |
 | 本地 | `fund_metrics(snap,s,e)` | 区间收益/年化/最大回撤/波动/夏普/卡玛/现申购费标注 | 零网络 | 0 |
@@ -219,6 +226,7 @@
 | P28 腾讯日K翻页协议 | 单页 800 上限（P25）非硬边界：param 第 3/4 槽支持起止日期按页末锚翻页；服务端回含锚日 +1 行重叠供缝校验；qfq 因子跨请求一致（全史翻页实测 0 漂移）；锚停滞/页阀耗尽/中段空页三异常形态曾可静默截断 | `_tencent_kline_page`/`_stitch_tencent_pages`/`_tencent_kline_paginated`：缝双校验+三防线整批拒绝+去重集满口径（V0.7.6，两轮审查加固） |
 | P29 板块 BK 码空间 | BK 码不可凭记忆/类目外推：同码空间跨行业(t:2)/概念(t:3)（BK0477 实为酿酒概念、BK0475=银行Ⅱ 而非白酒）；clist fs 语法是冒号 `t:2` 非 `t=2`（后者 rc:102 参数错） | BENCH_SECID 行业段=clist t:2 快照 + kline name 双样本交叉验证；未命中走 `90.BKxxxx` secid 直传；概念板块不收录（归 a-stock-data 概念域） |
 | P30 新浪行情通道（V0.7.5） | hq.sinajs.cn 无 Referer 即拒（实测空响应）；高频爬虫有封禁前科；银行间信用债无公开实时端点（货币网现券板仅利率债活跃券） | `sina_quote` 内置 Referer + provider=sina 独立分账 120/300s·0.5s·单并发 + 403/429 计熔断 + 空体计信号；定位=腾讯互备低频兜底，银行间实时须 QB 等权限源 |
+| P31 申购限额唯一来源（V0.7.7） | E2/E3/E6 探针实测均无完整限额（E3 SGZT 仅「限大额」短文本无金额）——唯一来源是主页面 `{code}.html` 交易状态栏，且无批量接口（N 只 N 请求）；金额与「限大额」分属不同层级 text node（嵌套 span），简单 regex 必截断（000369 实测）；外币折算是静态近似汇率非实时牌价 | `fund_purchase_limit`：`_StaticCellParser` 嵌套感知全文拼接 + `parse_purchase_limit` 纯函数（kind 四态；限大额无金额诚实 limit_cny=None 不虚报 0）；已并入快照 `purchase_limit` 数据集（失败进 missing 不炸快照）；rankhandler ft=qdii 仅 363 只混合/股票类（联接/LOF 归「指数型-海外股票」不在内） |
 
 ## Prerequisites
 
@@ -235,10 +243,10 @@ pip install requests
 ```python
 # -*- coding: utf-8 -*-
 """
-fund-data V0.7.6 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层）
+fund-data V0.7.7 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
-  1. 单基金深度诊断 ≤2 请求（1×pingzhongdata，0~1×lsjz）
+  1. 单基金深度诊断 ≤3 请求（1×pingzhongdata + 0~1×lsjz + 0~1×主页面限额，V0.7.7 起快照含 purchase_limit）
   2. 全市场筛选走 rankhandler 全量单请求或 TopN 单页，禁止 for fund in all: snapshot(fund)
   3. 同一基金当日快照磁盘缓存命中 = 0 请求
   4. 所有东财/天天请求走 ttfund_get()：串行 + 1.5s 最小间隔 + 会话复用 + 强制 HTTPS
@@ -278,6 +286,7 @@ import math
 import os
 import re
 import time
+from html.parser import HTMLParser
 import random
 import urllib.error
 import urllib.request
@@ -294,7 +303,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.7.6"
+__version__ = "0.7.7"
 
 
 FUND_CACHE_DIR = Path.home() / ".fund_data_cache"
@@ -1117,7 +1126,15 @@ def fund_snapshot(query: str, force_refresh: bool = False) -> dict:
         "buy_redemption_status": v.get("Data_buySedemption"),
         "missing_datasets": missing,                   # 坑P3：显式列出，调用方知情
     }
-    _cbreak_success("tt")
+    # V0.7.7 申购限额（主页面独立小请求）：失败/熔断不炸快照——风控信号已由
+    # ttfund_get 内部计数，此处只吞异常并标注 missing（E2 成果不该陪葬）。
+    _cbreak_success("tt")          # E2 业务校验通过才有资格清零（须在限额页 try 前：
+                                   # 限额页 403 被吞时若在其后清零，连击永远凑不满）
+    try:
+        snap["purchase_limit"] = fund_purchase_limit(code)
+    except (RuntimeError, requests.RequestException):
+        snap["purchase_limit"] = None
+        missing.append("purchase_limit(fetch-failed)")
     _cache_write(rel, snap)
     return snap
 
@@ -1129,7 +1146,8 @@ def _snapshot_degraded(code: str, reason: str = "", years: float = 1.0) -> dict:
     净值窗口默认近 1 年（F3：原 3 年=37 页连发，批量场景会形成请求风暴；
     需要更长历史可显式传 years，单基金场景代价可接受）。
     """
-    missing: list[str] = ["Data_* 系列（E2 整体不可用）"]
+    missing: list[str] = ["Data_* 系列（E2 整体不可用）",
+                          "purchase_limit(degraded-skip)"]   # V0.7.7：降级期不追打主页面（同域故障概率高），显式标注
     start = (date.today() - timedelta(days=int(years * 365))).isoformat()
     hist = fund_nav_history(code, start=start)        # E3 兜底净值（可能抛错→由调用方感知）
     if not hist:
@@ -1160,6 +1178,7 @@ def _snapshot_degraded(code: str, reason: str = "", years: float = 1.0) -> dict:
                   "fetched_at": datetime.now().isoformat(timespec="seconds"),
                   "source": "degraded(E3+E4a+D1)", "reason": reason},
         "name": dj.get("name"), "is_money_fund": None,
+        "purchase_limit": None,                       # V0.7.7：降级期不拉主页面（见 missing 标注）
         "manager": {"name": dj.get("manager")},
         "nav_history": nav_hist,
         "ac_nav_history": [], "top_stocks": top_stocks, "top_bonds": [],
@@ -1172,6 +1191,128 @@ def _snapshot_degraded(code: str, reason: str = "", years: float = 1.0) -> dict:
         "note": f"降级快照：净值窗口近{years}年（非全史）；原因={reason}",
         "window_years": years,
     }
+```
+
+```python
+
+class _StaticCellParser(HTMLParser):
+    """交易状态栏 staticCell span 文本提取（嵌套感知）。
+
+    金额与「限大额」分属不同层级 text node（实测 000369：外层 span 只收到
+    「限大额 (」，「单日累计购买上限N元」在嵌套子 span）——depth 计数期间
+    持续收集 handle_data，单个 cell 输出拼接全文（简单 regex 必截断）。
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._depth = 0
+        self._buf = ""
+        self.cells: list = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "span":
+            return
+        if self._depth == 0 and "staticCell" in (dict(attrs).get("class") or "").split():
+            self._depth, self._buf = 1, ""
+        elif self._depth:
+            self._depth += 1
+
+    def handle_endtag(self, tag):
+        if tag == "span" and self._depth:
+            self._depth -= 1
+            if not self._depth:
+                self.cells.append(" ".join(self._buf.split()))
+
+    def handle_data(self, data):
+        if self._depth:
+            self._buf += data
+
+
+# 近似折算汇率（静态快照口径，非实时牌价）——外币份额限额折 CNY 仅供比较/排序
+_LIMIT_FX_DEFAULT = {"万元": 1e4, "元": 1.0, "美元": 7.2, "港币": 0.92,
+                     "欧元": 7.8, "英镑": 9.2, "日元": 0.05}
+_LIMIT_AMOUNT_RE = re.compile(
+    r"单日累计购买上限\s*([0-9][0-9,.]*)\s*(万元|元|美元|港币|欧元|英镑|日元)")
+
+
+def parse_purchase_limit(status_text: str, fx: Optional[dict] = None) -> dict:
+    """交易状态文本 → 结构化限额（纯函数，零网络）。
+
+    kind 四态：limited / suspended（暂停申购，limit_cny=0——一分买不了）/
+    unlimited（开放申购无限额）/ unknown（封闭期、募集期等未覆盖形态——
+    limit_cny=None 诚实留空，绝不冒充无限额）。
+    金额优先于状态词：暂停申购文本若附带金额仍提取（kind=limited）。
+    「限大额」但金额形态未识别 → limited + limit_cny=None（上游改版预警，
+    不学早期脚本硬给 0 虚报不可买）。外币按近似汇率折 CNY（fx 可覆盖），
+    精确额度以 limit_raw 原文为准。
+    """
+    text = str(status_text or "")
+    m = _LIMIT_AMOUNT_RE.search(text)
+    if m:
+        unit = m.group(2)
+        try:
+            rate = float((fx or {}).get(unit, _LIMIT_FX_DEFAULT[unit]))
+            amount = round(float(m.group(1).replace(",", "")) * rate, 2)
+        except (ValueError, TypeError):
+            amount = None
+        return {"kind": "limited", "limit_cny": amount, "currency": unit,
+                "limit_raw": m.group(0)}
+    if "暂停申购" in text:
+        return {"kind": "suspended", "limit_cny": 0.0, "currency": None,
+                "limit_raw": "暂停申购"}
+    if "限大额" in text:
+        return {"kind": "limited", "limit_cny": None, "currency": None,
+                "limit_raw": text.strip() or "限大额"}
+    if "开放申购" in text:
+        return {"kind": "unlimited", "limit_cny": None, "currency": None,
+                "limit_raw": "开放申购"}
+    return {"kind": "unknown", "limit_cny": None, "currency": None,
+            "limit_raw": text.strip()}
+
+
+def fund_purchase_limit(query: str, force_refresh: bool = False) -> dict:
+    """单基金申购限额/交易状态（主页面 {code}.html，1 请求，当日缓存）。
+
+    E2/E3/E6 实测均无完整限额信息（E3 SGZT 仅「限大额」短文本无金额），
+    唯一来源是主页面交易状态栏。输出：
+      {code, name, status_text 交易状态原文（申购/赎回 cell 以；拼接）,
+       not_for_sale 天天基金暂不代销, kind, limit_cny, currency, limit_raw}
+    kind/折算语义见 parse_purchase_limit。页面无交易状态栏（已清盘/新发
+    未开购/结构变更）→ kind="unknown" 而非报错——按只容错，批量不中断。
+    ⚠️ 批量循环 = N 只 N 请求（主页面无批量接口），tt 线 1.5s 自动节流，
+    400 只约 10 分钟；当日缓存后同日重查 0 请求。
+    """
+    code = resolve_fund_code(query)
+    rel = f"purchase_limits/{code}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
+        if cached is not None:
+            return cached
+    r = ttfund_get(f"https://fund.eastmoney.com/{code}.html",
+                   headers={"Referer": "https://fund.eastmoney.com/"})
+    assert_not_risk_control(r, "tt", f"主页面 {code}")
+    r.raise_for_status()
+    h = r.content.decode("utf-8", errors="replace")
+    _assert_not_risk_content(h, "tt", f"主页面 {code}")   # 200+风控文案页不落缓存
+    m = re.search(r"<title>([^<\-]{2,40})", h)
+    name = ((m.group(1).strip() if m else "").split("(")[0]
+            .split("_")[0].split("-")[0].strip()) or None
+    m = re.search(r"交易状态：</span>(.*?)</div>", h, re.DOTALL)
+    cells = []
+    if m:
+        parser = _StaticCellParser()
+        parser.feed(m.group(1))
+        cells = [c for c in parser.cells if c]   # 滤空 cell：噪声空串不得占 cells[0]
+    status_text = "；".join(cells)
+    # kind 只看申购 cell（cells[0]）——赎回 cell 里的「限大额/暂停」词样不得
+    # 污染申购判定（实测存在「开放申购；限大额赎回」形态：开放可买被误报受限）
+    parsed = parse_purchase_limit(cells[0]) if cells else parse_purchase_limit("")
+    out = {"code": code, "name": name,
+           "status_text": status_text or "未找到交易状态栏",
+           "not_for_sale": "该基金暂不开放购买" in h, **parsed}
+    _cbreak_success("tt")
+    _cache_write(rel, out)
+    return out
 ```
 
 ### fund_nav_history（E3 补充端点：区间 + 每日申赎状态）
@@ -4321,6 +4462,7 @@ rank_persistence(top=20)                     # 业绩持续性矩阵（0 请求�
 fund_scale("161725")                         # 单基金规模（ENDNAV 精确值）
 bond_plus_profile("007300")                  # 固收+画像（仓位带/回撤带/利率标注）
 qdii_premium(["513100", "513500"])           # 场内溢价（净值滞后口径）
+fund_purchase_limit("513100")                # 申购限额（快照 purchase_limit 同源；无批量接口）
 nav_divergence("161725")                     # 重仓探测（背离度→疑似调仓）
 fund_manager("161725")                       # 基金码→现任经理画像（在管清单）
 manager_rank(pages=1)                        # 经理排行 50 位（服务端仅姓名序）

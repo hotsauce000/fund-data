@@ -1,4 +1,4 @@
-# fund-data 复制即用示例（examples.md · 按需读取层）V0.7.6
+# fund-data 复制即用示例（examples.md · 按需读取层）V0.7.7
 
 本文件解决两个问题：**「具体怎么调用」**（12 个高频场景菜谱，复制即跑）与
 **「出问题了怎么办」**（FAQ 按现象直达解法）。每条菜谱 = 意图 + 完整代码 +
@@ -32,7 +32,7 @@ for m in r["matches"]:
 坑提醒：多候选（A/C 份额）**列出不猜**；`resolved=None` 时必须人工选定。
 6 位代码不在清单 → 会提示可能是股票代码（走 a-stock-data skill）。
 
-## 场景 2 · 诊断一只基金（1 请求；当日缓存命中 0 请求）
+## 场景 2 · 诊断一只基金（2 请求：E2+限额页；当日缓存命中 0 请求）
 
 ```python
 snap = fund_data.fund_snapshot("519770")        # 支持代码/名称/拼音
@@ -40,12 +40,17 @@ m = fund_data.fund_metrics(snap)                # 零网络，区间可传 start
 print(snap["name"], "净值记录:", len(snap["nav_history"]))
 print(f"成立以来: 年化 {m['annualized_return_pct']}%  最大回撤 {m['max_drawdown_pct']}%")
 print(f"夏普 {m['sharpe']}  卡玛 {m['calmar']}  年化波动 {m['annualized_volatility_pct']}%")
+pl = snap["purchase_limit"]                     # V0.7.7 申购限额（QDII 限额监控刚需）
+if pl:                                          # None=降级快照或限额页拉取失败（见 missing_datasets）
+    print(f"状态: {pl['status_text']}  kind={pl['kind']}  限额 {pl['limit_cny']} 元")
 ```
 
 输出形态：快照 20+ 数据集（净值全史/规模史/持有人/经理/重仓股债/仓位史/
-基准三曲线/申赎状态…，缺失项列入 `missing_datasets` 绝不静默空）；
+基准三曲线/申赎/申购限额…，缺失项列入 `missing_datasets` 绝不静默空）；
 指标 `{total_return_pct, annualized_return_pct, max_drawdown_pct,
-max_drawdown_window, annualized_volatility_pct, sharpe, calmar, …}`。
+max_drawdown_window, annualized_volatility_pct, sharpe, calmar, …}`；
+`purchase_limit = {status_text 原文, kind 四态, limit_cny 折算金额,
+currency, limit_raw, not_for_sale 不代销}`——单查走 `fund_purchase_limit(码)`。
 坑提醒：**夏普键名就是 `sharpe`**（无 `_ratio` 后缀）；无风险利率默认
 1.5%/年，改传 `fund_metrics(snap, risk_free_annual=0.02)`；
 区间年化 `fund_metrics(snap, start="2024-01-01")`。
@@ -101,7 +106,7 @@ founded, fee_pct, fund_type}`；`fund_type` 传 `zs/gp/hh/zq/qdii/fof`，
 坑提醒：**绝不要**拿排行结果循环 `fund_snapshot`——那是封禁路径；
 初筛收敛到 ≤3 只再逐只诊断。
 
-## 场景 6 · 定投回测（1 请求 + 零网络计算）
+## 场景 6 · 定投回测（2 请求 + 零网络计算）
 
 ```python
 snap = fund_data.fund_snapshot("161725")
@@ -267,3 +272,9 @@ push2 通道连接级熔断触发自动降级（盘中口径拿不到，给收�
 **Q16 为什么名称查询不直接给我一个代码？**
 多候选（如 A/C 份额、同名不同公司）时列全部候选让你选——**绝不猜**，
 猜错的代价比多看一眼高。用 `matches` 里的 type 字段辅助判断。
+
+**Q17 `purchase_limit` 的 limit_cny 是外币限额怎么折的？**
+静态近似汇率（美元 7.2/港币 0.92/欧元 7.8/英镑 9.2/日元 0.05），仅供
+跨币种比较排序——精确额度看 `limit_raw` 原文；`kind=limited` 但
+`limit_cny=None` 是「限大额但金额形态未识别」（上游改版预警），不是无限额。
+→ P31

@@ -4,7 +4,7 @@
 产物一 SKILL.md（瘦路由层，上限 12KB）：skill 激活时唯一进上下文的文件——
   防封铁律 + 场景路由表 + 失效/备源路由表 + 函数签名速查（ast 从模块自动抽取）
 产物二 reference.md（全量参考）：按需读取——完整内嵌代码（与源码同源直拼）
-  + P1~P30 完整坑区 + 端点路由 + 使用示例 + 版本记录
+  + P1~P31 完整坑区 + 端点路由 + 使用示例 + 版本记录
 产物三 examples.md（菜谱+FAQ 层，V0.7.4 引入）：按需读取——12 场景复制即用示例
   + 按现象组织的 FAQ。手工维护（非自动生成），构建时同步到 skill 目录并
   校验章节齐全（评测扣分项"示例与 FAQ 不集中"的对症层）。
@@ -59,11 +59,11 @@ def _sig_rows() -> list:
     return rows
 
 
-VERSION = "0.7.6"
+VERSION = "0.7.7"
 DESCRIPTION = (
     "写代码实际获取基金领域底层数据时使用——零key零登录，八层能力："
     "【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:"
-    "净值全史/规模史/持有人/经理/重仓股债/仓位史/基准三曲线/申赎/费率)、区间净值+申赎状态、"
+    "净值全史/规模史/持有人/经理/重仓股债/仓位史/基准三曲线/申赎/费率/申购限额)、区间净值+申赎状态、"
     "批量实时净值、季度前十大、蛋卷备胎，快照挂自动降级；"
     "【本地计算】复权/回撤/波动/夏普/卡玛/费率标注、定投XIRR、仓位解读(加减仓)、"
     "同类百分位(一年前对照)、相对表现(vs沪深300/同类平均)；"
@@ -81,7 +81,18 @@ DESCRIPTION = (
 # 产物一：瘦路由层 SKILL.md
 # ══════════════════════════════════════════════════════════════════
 
-_sig_md = "\n".join(f"| `{n}({a})` | {d[:34]} |" for n, a, d in _sig_rows())
+_SIG_BOUNDARY = set("，。；、｜|/·）)】」》！？：: ,; ")
+
+
+def _sig_cut(doc: str, limit: int = 30) -> str:
+    """标点感知截断：切点后一字符（首个被排除字符）是边界 → 前 limit 位为完整
+    词段，保留；否则回退一位防词中悬垂（判据看 doc[limit]，非 doc[limit-1]）。"""
+    if len(doc) <= limit:
+        return doc
+    return doc[:limit] if doc[limit] in _SIG_BOUNDARY else doc[:limit - 1]
+
+
+_sig_md = "\n".join(f"| `{n}({a})` | {_sig_cut(d)} |" for n, a, d in _sig_rows())
 
 THIN = []
 THIN.append(f"""---
@@ -113,20 +124,21 @@ THIN.append("""## 防封铁律（先读，违反=封禁20+小时）
 
 东财风控阈值：>5 次/秒、并发 ≥10、5 分钟 ≥300 次。五条铁律：
 
-1. **请求预算**：单基金深度诊断 ≤2 请求（1×pingzhongdata 当日缓存+0~1×lsjz）；当日缓存命中 0 请求
+1. **请求预算**：单基金深度诊断 ≤3 请求（1×pingzhongdata+0~1×lsjz+0~1×主页面限额，当日缓存）；缓存命中 0 请求
 2. **明令禁止** `for fund in all: fund_snapshot(fund)`（全量循环=封禁路径）；全市场排行已内置全量单请求
 3. **聚合优先**：先问 pingzhongdata（1 请求=90% 静态数据），再考虑窄端点
 4. **东财/天天/蛋卷请求必须走 `ttfund_get()`**（F1锁+F2熔断+F6分流+P12直连）；批量≥10只把 TT_MIN_INTERVAL 调 2~3s；巨潮走 _cninfo_post（1.5s节流）
-5. 缓存 TTL：fund_list 30天 / snapshot·持仓·宏观·排行·新发·规模·规模全史·K线 当日 / 公司·经理画像 24h / 抱团度·行业配置季末后120天内1h·其后90天 / lsjz 不缓存
+5. 缓存 TTL：fund_list 30天 / snapshot·限额·持仓·宏观·排行·新发·规模·规模全史·K线 当日 / 公司·经理画像 24h / 抱团度·行业配置季末后120天内1h·其后90天 / lsjz 不缓存
 """)
 
 THIN.append("""## 场景路由（我想做 X → 调什么）
 
 | 场景 | 调用链 | 请求 |
 |---|---|---|
-| 诊断一只基金 | `fund_snapshot`→`fund_metrics`+评测三件套 | 1 |
+| 诊断一只基金 | `fund_snapshot`→`fund_metrics`+评测三件套 | 2（E2+限额页） |
+| 申购限额/交易状态 | 快照 `purchase_limit` 数据集 / 单查 `fund_purchase_limit` | 1（缓存0） |
 | 全市场排行/初筛 | `fund_rank()` 全量1请求，过滤排序本地 | 1（缓存0） |
-| 定投测算 | `fund_snapshot`→`fund_dca_backtest`（XIRR） | 1 |
+| 定投测算 | `fund_snapshot`→`fund_dca_backtest`（XIRR） | 2（缓存0） |
 | 这基金买了什么 | `penetrate` → `plain_text_map`（白话地图） | 冷启≤13/重跑1 |
 | 名称/拼音找代码 | `norm_fund_code`（列候选不猜）/ `resolve_fund_code` | 0 |
 | 净值核对/每日申赎状态 | `fund_nav_history`（新→旧需反转） | 1~N页 |
@@ -168,7 +180,7 @@ THIN.append("""## When to Activate
 ## 深读与边界（按需）
 
 - 复制即用示例（12 场景菜谱）+ 按现象查 FAQ → 同目录 `examples.md`（写调用代码/排错前读）
-- 实现细节/坑区 P1~P30/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
+- 实现细节/坑区 P1~P31/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
 - 不覆盖：账户持仓/交易下单（ttskill）、盘中实时估值、货基万份收益、单基金行业史（E2停供）、语义选基、FOF底层明细与经理姓名索引（P23/P24）
 - 个股深度 → a-stock-data；holding_map() 是官方桥
 """)
@@ -186,9 +198,15 @@ REF.append(f"""# fund-data 完整参考（reference.md · 按需读取层）V{VE
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 """)
 
-REF.append(r"""# fund-data 基金底层数据工具包 V0.7.6 模块全档
+REF.append(r"""# fund-data 基金底层数据工具包 V0.7.7 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复 + V0.7.4 文档三层 + V0.7.5 新浪互备与行情防封加固 + V0.7.6 K线韧性与行业基准：287/287 离线断言通过**（L1 单元 251 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 45 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练7 · 防封专项F×11 须显式 `--online`），覆盖 23 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）、`examples.md`（菜谱+FAQ 层）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复 + V0.7.4 文档三层 + V0.7.5 新浪互备与行情防封加固 + V0.7.6 K线韧性与行业基准 + V0.7.7 申购限额：312/312 离线断言通过**（L1 单元 276 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 47 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练8 · 防封专项F×11 须显式 `--online`），覆盖 24 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）、`examples.md`（菜谱+FAQ 层）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.7.7 申购限额（主页面交易状态栏 → 快照新数据集）：**
+- 🟢 **限额/交易状态入快照**：`fund_snapshot` 新增 `purchase_limit` 数据集（kind 四态 limited/suspended/unlimited/unknown + limit_cny 折算金额 + not_for_sale 不代销标记），快照 1→2 请求（E2+主页面）；失败进 missing_datasets 不炸快照（E2 成果不陪葬）；`fund_purchase_limit(code)` 可单独调用（当日缓存）
+- 🔴 **唯一来源探针证据（P31）**：E2/E3/E6 实测均无完整限额（E3 SGZT 仅「限大额」短文本无金额）——唯一来源是主页面 `{code}.html` 交易状态栏，且**无批量接口**（N 只 N 请求，tt 线 1.5s 节流 400 只约 10 分钟）
+- 🔴 **嵌套 span 解析**：金额与「限大额」分属不同层级 text node（000369 实测）——`_StaticCellParser` depth 嵌套感知全文拼接，简单 regex 必截断
+- 🟡 语义修正：「限大额但金额未识别」诚实返回 limit_cny=None（早期监控脚本硬给 0 会虚报不可买）；外币按静态近似汇率折 CNY（fx 参数可覆盖），精确额度看 limit_raw 原文
 
 **V0.7.6 K线韧性与行业基准（腾讯翻页全史备胎 + 东财行业板块指数 100 个）：**
 - 🟢 **腾讯翻页全史备胎**：fqkline 单页 800 上限（P25）曾被当硬边界——实测 param 第 3/4 槽支持起止日期按「页末锚」串行翻页（茅台 6044 根/沪深300 5250 根，qfq 因子跨请求 0 漂移，2026-11-17）；备胎从「800 根短窗」升级为「翻页缝合全史」，熔断期不再缩到 ~3 年
@@ -350,6 +368,7 @@ REF.append(r"""## 端点路由速查（按需定位，不必通读）
 | B1 | `kline_daily(q,lmt)` | 指数/股票日线收盘 [{date,close}]：指数名查表/secid/股票码三形态 | push2his+腾讯备胎 | 1（缓存0） |
 | B2 | `fund_scale_history(q)` | 规模全历史：募集期→最新季报（期间申购/赎回流量+份额+净资产+变动率，升序） | F10 gmbd | 1（缓存0） |
 | B3 | `fund_fees(q)` | 费率全表：管理/托管/销售服务费（每年%）+认购/申购（原/优惠）/赎回三阶梯（持有期递减） | F10 jjfl | 1（缓存0） |
+| PL | `fund_purchase_limit(q)` | 申购限额/交易状态：kind 四态+limit_cny 折算+not_for_sale（P31 唯一来源；已并入快照 purchase_limit 数据集） | fund.eastmoney.com/{code}.html | 1（缓存0）；⚠️无批量接口 |
 | V6 | `fund_manager(q)` / `manager_rank(pages)` | 经理画像（任职/规模/回报/在管清单）/ 排行（姓名序） | eastmoney manager 页+dt=14 | 1·50/页 |
 | 本地 | `adjusted_nav(recs)` | 复权净值（分红再投口径，链式） | 零网络 | 0 |
 | 本地 | `fund_metrics(snap,s,e)` | 区间收益/年化/最大回撤/波动/夏普/卡玛/现申购费标注 | 零网络 | 0 |
@@ -402,6 +421,7 @@ REF.append(r"""## 端点路由速查（按需定位，不必通读）
 | P28 腾讯日K翻页协议 | 单页 800 上限（P25）非硬边界：param 第 3/4 槽支持起止日期按页末锚翻页；服务端回含锚日 +1 行重叠供缝校验；qfq 因子跨请求一致（全史翻页实测 0 漂移）；锚停滞/页阀耗尽/中段空页三异常形态曾可静默截断 | `_tencent_kline_page`/`_stitch_tencent_pages`/`_tencent_kline_paginated`：缝双校验+三防线整批拒绝+去重集满口径（V0.7.6，两轮审查加固） |
 | P29 板块 BK 码空间 | BK 码不可凭记忆/类目外推：同码空间跨行业(t:2)/概念(t:3)（BK0477 实为酿酒概念、BK0475=银行Ⅱ 而非白酒）；clist fs 语法是冒号 `t:2` 非 `t=2`（后者 rc:102 参数错） | BENCH_SECID 行业段=clist t:2 快照 + kline name 双样本交叉验证；未命中走 `90.BKxxxx` secid 直传；概念板块不收录（归 a-stock-data 概念域） |
 | P30 新浪行情通道（V0.7.5） | hq.sinajs.cn 无 Referer 即拒（实测空响应）；高频爬虫有封禁前科；银行间信用债无公开实时端点（货币网现券板仅利率债活跃券） | `sina_quote` 内置 Referer + provider=sina 独立分账 120/300s·0.5s·单并发 + 403/429 计熔断 + 空体计信号；定位=腾讯互备低频兜底，银行间实时须 QB 等权限源 |
+| P31 申购限额唯一来源（V0.7.7） | E2/E3/E6 探针实测均无完整限额（E3 SGZT 仅「限大额」短文本无金额）——唯一来源是主页面 `{code}.html` 交易状态栏，且无批量接口（N 只 N 请求）；金额与「限大额」分属不同层级 text node（嵌套 span），简单 regex 必截断（000369 实测）；外币折算是静态近似汇率非实时牌价 | `fund_purchase_limit`：`_StaticCellParser` 嵌套感知全文拼接 + `parse_purchase_limit` 纯函数（kind 四态；限大额无金额诚实 limit_cny=None 不虚报 0）；已并入快照 `purchase_limit` 数据集（失败进 missing 不炸快照）；rankhandler ft=qdii 仅 363 只混合/股票类（联接/LOF 归「指数型-海外股票」不在内） |
 
 ## Prerequisites
 
@@ -418,6 +438,7 @@ REF.append("## 层 1 · 前置层：全量基金清单 + 归一化\n")
 REF.append(code(sections["L1 前置层：全量基金清单（主键表，缓存 30 天）"]))
 REF.append("## 层 2 · 端点层（模块 L4 + V0.1 端点）\n\n### fund_snapshot（E2 ⭐主端点 + 自动降级）\n")
 REF.append(code(sections["L4 解析层 + V0.1 端点：fund_snapshot（E2 主端点，1 请求 = 90% 静态数据）"]))
+REF.append(code(sections["V0.7.7 申购限额：基金主页面交易状态栏（E2/E3/E6 实测均无此信息，坑P31）"]))
 REF.append("### fund_nav_history（E3 补充端点：区间 + 每日申赎状态）\n")
 REF.append(code(sections["V0.1 端点：fund_nav_history（E3 补充端点：区间 + 每日申赎状态）"]))
 REF.append("### fund_holdings（E4a 季度前十大，可按年份拉历史）\n")
@@ -491,6 +512,7 @@ rank_persistence(top=20)                     # 业绩持续性矩阵（0 请求�
 fund_scale("161725")                         # 单基金规模（ENDNAV 精确值）
 bond_plus_profile("007300")                  # 固收+画像（仓位带/回撤带/利率标注）
 qdii_premium(["513100", "513500"])           # 场内溢价（净值滞后口径）
+fund_purchase_limit("513100")                # 申购限额（快照 purchase_limit 同源；无批量接口）
 nav_divergence("161725")                     # 重仓探测（背离度→疑似调仓）
 fund_manager("161725")                       # 基金码→现任经理画像（在管清单）
 manager_rank(pages=1)                        # 经理排行 50 位（服务端仅姓名序）
@@ -519,6 +541,7 @@ assert "def fund_crowding(rdate: str = \"\", force_refresh: bool = False)" in re
 assert "def kline_daily(query: str" in ref_text                       # V0.6.1 内嵌同源
 assert "def fund_scale_history(query: str" in ref_text                # V0.6.2 内嵌同源
 assert "def fund_fees(query: str" in ref_text                          # V0.7.0 内嵌同源
+assert "def fund_purchase_limit(query: str" in ref_text                # V0.7.7 内嵌同源
 assert "_push2_conn_file" in ref_text                                  # V0.7.1 连接级熔断内嵌
 assert "IP 缓释桶" in ref_text                                          # P26 修正定性入册
 assert 'rows.append({"date": p[0], "close": float(p[1]), "source": "push2his"})' in ref_text  # source 标注
