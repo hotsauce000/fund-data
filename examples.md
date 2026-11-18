@@ -1,6 +1,6 @@
-# fund-data 复制即用示例（examples.md · 按需读取层）V0.7.7
+# fund-data 复制即用示例（examples.md · 按需读取层）V0.7.8
 
-本文件解决两个问题：**「具体怎么调用」**（12 个高频场景菜谱，复制即跑）与
+本文件解决两个问题：**「具体怎么调用」**（13 个高频场景菜谱，复制即跑）与
 **「出问题了怎么办」**（FAQ 按现象直达解法）。每条菜谱 = 意图 + 完整代码 +
 预期输出形态 + 一行坑提醒。实现细节/坑区全档 → `reference.md`；
 场景路由总表 → `SKILL.md`。
@@ -205,6 +205,27 @@ print(k[0]["date"], "→", k[-1]["date"], f"共 {len(k)} 根")
 行业板块指数无腾讯备胎（EM 单源）；跟踪指数名/股票码都可，前缀形态 `sh000016`
 会保市场信息防错路由；缓存键含 `lmt`——窗口拉大不会吃到旧短缓存。
 
+## 场景 13 · 基金定期报告清单与 PDF 下载（清单 1 请求 + PDF 1~2 请求/份）
+
+```python
+rp = fund_data.fund_reports("交银趋势")            # 默认 periodic：季度/中期/年报
+latest = rp["reports"][0]
+print(f"{latest['kind']} {latest['year']}  {latest['date']}")   # Q3 2026  2026-10-27
+annuals = [r for r in rp["reports"] if r["kind"] == "annual"]   # 只看年报（本地过滤）
+
+path = fund_data.fund_report_pdf(latest)           # 下载最新季报 PDF 到当前目录
+print(path)                                        # 519702_2026-10-27_Q3_986993.pdf
+```
+
+输出形态：清单 `{code, category, total, reports:[{code, report_id, title,
+short_title, date, year, kind, pdf_url}]}`（新→旧；kind=Q1~Q4/interim/annual/
+other）；`fund_report_pdf` 返回本地路径 str（文件名 {code}_{date}_{kind}_{ID尾6}.pdf
+防年报/摘要同日撞名；已存在同名文件 0 请求直返）。
+坑提醒：category 七类目 periodic/all/issuing/dividend/staff/sales/other（=公告
+页 tab）；PDF 通道有腾讯 EdgeOne 反爬——**勿裸 requests 直链**，必须走
+`fund_report_pdf`（需系统 node，同巨潮 enckey 依赖）；场外基金全覆盖
+（巨潮仅上市基金，P32）。
+
 ---
 
 # FAQ · 按现象找解法（每条 ≤5 行，深链 reference.md 坑号）
@@ -272,6 +293,11 @@ push2 通道连接级熔断触发自动降级（盘中口径拿不到，给收�
 **Q16 为什么名称查询不直接给我一个代码？**
 多候选（如 A/C 份额、同名不同公司）时列全部候选让你选——**绝不猜**，
 猜错的代价比多看一眼高。用 `matches` 里的 type 字段辅助判断。
+
+**Q18 报告 PDF 下载报 node 缺失 / EdgeOne 挑战失败？**
+pdf.dfcfw.com 前有腾讯 EdgeOne 反爬（200+伪装成 pdf 的 988B 脚本挑战），
+本模块用系统 node vm 沙箱自动解挑战重放（同巨潮 enckey 的 node 依赖）——
+装 node 即可；「挑战 cookie 不全/仍非 PDF」= 上游改版预警。→ P32
 
 **Q17 `purchase_limit` 的 limit_cny 是外币限额怎么折的？**
 静态近似汇率（美元 7.2/港币 0.92/欧元 7.8/英镑 9.2/日元 0.05），仅供

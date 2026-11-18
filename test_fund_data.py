@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-fund-data V0.7.6 分层测试运行器（按测试计划 V1.0）
+fund-data V0.7.8 分层测试运行器（按测试计划 V1.0）
   L1 单元（零网络）· L2 端点 smoke（结构断言）· L3 交叉验证（三源互证）
   L4 请求预算审计 · L5 降级演练与坑回归 · L6 穿透层（确定性/降级/路由/清洗）
 用法: python3 test_fund_data.py [--offline-only | --online]（默认离线）
@@ -301,6 +301,230 @@ def test_l1_offline():
     finally:
         fd.ttfund_get, fd._cache_read, fd._cache_write = _orig_tt7, _orig_cr7, _orig_cw7
         fd.fund_list = _orig_fl7
+
+    # ── V0.7.8 基金报告：清单分类/缓存解耦/EdgeOne 挑战/PDF 下载（stub 零网络）──
+    class _RPResp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.content = payload if isinstance(payload, bytes) else payload.encode("utf-8")
+            self.text = self.content.decode("utf-8", "replace")
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return json.loads(self.text)
+
+    _JJGG = {"Data": [
+        {"ID": "AN202610271830986993",
+         "TITLE": "交银施罗德趋势优先混合型证券投资基金2026年第3季度报告",
+         "ShortTitle": "交银趋势混合A", "PUBLISHDATE": "2026-10-27 00:00:00"},
+        {"ID": "AN202608311828777324",
+         "TITLE": "交银施罗德趋势优先混合型证券投资基金2026年中期报告",
+         "ShortTitle": "", "PUBLISHDATE": "2026-08-31"},
+        {"ID": "AN202603281820829871",
+         "TITLE": "交银施罗德趋势优先混合型证券投资基金2025年年度报告",
+         "ShortTitle": "交银趋势混合A", "PUBLISHDATE": "2026-03-28"},
+        {"ID": "", "TITLE": "无ID行应跳过", "ShortTitle": "", "PUBLISHDATE": "2026-01-01"},
+    ], "TotalCount": 114, "ErrCode": 0}
+    # 机制等价合成挑战（算术→document.cookie 两赋值→setTimeout 字符串；不存档真实挑战体）
+    _SYN_CHALLENGE = (
+        '<script>function a(a){function n(){for(var a={wQzOV:"4|2|0|3|1",'
+        'iTyzs:function(a,n){return a+n}},n=a.wQzOV.split("|"),e=0;;){'
+        'switch(n[e++]){case"0":t+="EO_Bot_Ssid=";continue;case"1":return t;'
+        'case"2":t+="";continue;case"3":t=a.iTyzs(t,111222333);continue;'
+        'case"4":var t="";continue}break}}'
+        'var e={WTKkN:100000001,bOYDu:200000002,dtzqS:function(a,n){return a+n},'
+        'wyeCN:300000003,pCQRM:function(a){return a()}},t=0;'
+        'return t+=e.WTKkN,t+=e.bOYDu,t=e.dtzqS(t,e.wyeCN),[t,e.pCQRM(n)][a]}'
+        'document.cookie="__tst_status="+a(0)+"#;",document.cookie=a(1)+";",'
+        'setTimeout("location.href=location.href",1200);</script>')
+    _cl = fd._classify_report_title
+    check("L1", "报告-标题分类", _cl("某基金2026年第3季度报告") == {"year": 2026, "kind": "Q3"}
+          and _cl("某基金2026年第1季度报告") == {"year": 2026, "kind": "Q1"}
+          and _cl("某基金2026年中期报告") == {"year": 2026, "kind": "interim"}
+          and _cl("某基金2025年年度报告") == {"year": 2025, "kind": "annual"}
+          and _cl("某基金2025年年度报告摘要") == {"year": 2025, "kind": "annual"}
+          and _cl("招募说明书(更新)") == {"year": None, "kind": "other"}
+          and _cl("") == {"year": None, "kind": "other"}
+          and _cl(None) == {"year": None, "kind": "other"})
+    _eo = fd._edgeone_solve(_SYN_CHALLENGE)
+    check("L1", "报告-EdgeOne挑战求解",
+          _eo == {"__tst_status": "600000006#", "EO_Bot_Ssid": "111222333"}, str(_eo))
+    try:
+        fd._edgeone_solve("<script></script>")
+        check("L1", "报告-空挑战体应抛未抛", False)
+    except RuntimeError:
+        check("L1", "报告-空挑战体显式报错", True)
+    try:
+        fd._edgeone_solve("<script>--version</script>")   # option 形挑战体（argv 注入面）
+        check("L1", "报告-option形挑战体应抛未抛", False)
+    except RuntimeError:
+        check("L1", "报告-option形挑战体不进宿主进程", True)
+
+    _orig_tt8, _orig_cr8, _orig_cw8 = fd.ttfund_get, fd._cache_read, fd._cache_write
+    _orig_fl8, _orig_eoc8 = fd.fund_list, list(fd._EO_COOKIE_CACHE)
+    fd._EO_COOKIE_CACHE[:] = []                    # 块首复位进程级挑战缓存（防哨兵泄漏）
+    _store8, _hits8, _ttlog8 = {}, [0], []
+    try:
+        fd.fund_list = lambda **k: _SEED_LIST + [
+            {"code": "519702", "pinyin": "jyqs", "name": "交银趋势优先混合A", "type": "混合型-灵活"}]
+        fd._cache_read = lambda rel, max_age_hours=None: None
+        fd._cache_write = lambda rel, payload: _store8.update({rel: payload})
+
+        def _tt_jjgg(url, **k):
+            _ttlog8.append((url, k.get("params"), k.get("headers")))
+            return _RPResp(json.dumps(_JJGG))
+
+        fd.ttfund_get = _tt_jjgg
+        _r8 = fd.fund_reports("519702")
+        check("L1", "报告-清单结构化", _r8["code"] == "519702"
+              and _r8["category"] == "periodic" and _r8["total"] == 114
+              and len(_r8["reports"]) == 3                      # 无 ID 行被跳过
+              and _r8["reports"][0] == {"code": "519702", "report_id": "AN202610271830986993",
+                                        "title": "交银施罗德趋势优先混合型证券投资基金2026年第3季度报告",
+                                        "short_title": "交银趋势混合A", "date": "2026-10-27",
+                                        "year": 2026, "kind": "Q3",
+                                        "pdf_url": "https://pdf.dfcfw.com/pdf/H2_AN202610271830986993_1.pdf"}
+              and _r8["reports"][1]["kind"] == "interim"
+              and _r8["reports"][1]["short_title"] is None
+              and _r8["reports"][2]["kind"] == "annual",
+              str(_r8["reports"][0])[:100])
+        check("L1", "报告-Referer与全量抓取",
+              len(_ttlog8) == 1 and _ttlog8[0][1]["type"] == 3
+              and _ttlog8[0][1]["pageSize"] == 100                       # 缓存与 limit 解耦
+              and f"jjgg_519702_3.html" in (_ttlog8[0][2] or {}).get("Referer", ""),
+              str(_ttlog8[0][1]))
+        check("L1", "报告-缓存键独立", "reports/519702_c3.json" in _store8
+              and len(_store8["reports/519702_c3.json"]["reports"]) == 3)
+        # limit 切片：未命中路径抓满 100 后按 limit 切；命中路径同样按 limit 切
+        _r8b = fd.fund_reports("519702", limit=1)
+        check("L1", "报告-limit切片(未命中抓满后切)",
+              len(_r8b["reports"]) == 1 and len(_ttlog8) == 2
+              and _ttlog8[-1][1]["pageSize"] == 100,
+              f"rows={len(_r8b['reports'])}")
+        fd._cache_read = lambda rel, max_age_hours=None: (
+            _hits8.__setitem__(0, _hits8[0] + 1), _store8.get(rel))[1]
+        _r8c = fd.fund_reports("519702", limit=2)
+        check("L1", "报告-缓存命中按limit切0请求",
+              len(_r8c["reports"]) == 2 and _hits8[0] == 1 and len(_ttlog8) == 2,
+              f"limit2={len(_r8c['reports'])} 命中{_hits8[0]}")
+        _cr_hits8 = [0]
+
+        def _cr_count8(rel, max_age_hours=None):
+            _cr_hits8[0] += 1
+            return None
+
+        fd._cache_read = _cr_count8
+        fd.fund_reports("519702", force_refresh=True)
+        check("L1", "报告-force_refresh绕缓存", _cr_hits8[0] == 0 and len(_ttlog8) == 3)
+        try:
+            fd.fund_reports("519702", category="quarterly")
+            check("L1", "报告-非法category应抛未抛", False)
+        except ValueError:
+            check("L1", "报告-非法category显式报错", True)
+        fd.ttfund_get = lambda url, **k: _RPResp('{"Data":"","ErrCode":-999,"TotalCount":0}')
+        try:
+            fd.fund_reports("519702")
+            check("L1", "报告-假成功形态应抛未抛", False)
+        except RuntimeError as e:
+            check("L1", "报告-假成功形态(ErrCode-999)显式报错",
+                  "ErrCode=-999" in str(e) or "Data 非 list" in str(e), str(e)[:80])
+        fd.ttfund_get = _tt_jjgg
+        _no_id = {"Data": [{"TITLE": "无ID", "PUBLISHDATE": "2026-01-01"}], "TotalCount": 7}
+        fd.ttfund_get = lambda url, **k: _RPResp(json.dumps(_no_id))
+        try:
+            fd.fund_reports("519702")
+            check("L1", "报告-total>0解析空应抛未抛", False)
+        except RuntimeError as e:
+            check("L1", "报告-total>0解析空拒绝空返回", "total=7" in str(e), str(e)[:80])
+        fd.ttfund_get = lambda url, **k: _RPResp('{"Data": [], "TotalCount": 0}')
+        _r8d = fd.fund_reports("519702", category="dividend")
+        check("L1", "报告-空类别诚实空", _r8d["reports"] == [] and _r8d["total"] == 0,
+              str(_r8d))
+
+        # PDF 下载：URL 白名单 / 已存在跳过 / 挑战→重放 / 顽固挑战 / 非预期体
+        try:
+            fd.fund_report_pdf({"pdf_url": "https://example.com/x.pdf"})
+            check("L1", "报告-非dfcfw直链应拒未拒", False)
+        except ValueError:
+            check("L1", "报告-非dfcfw直链拒绝", True)
+        _pdf_row = {"code": "519702", "date": "2026-10-27", "kind": "Q3",
+                    "pdf_url": "https://pdf.dfcfw.com/pdf/H2_TEST_1.pdf"}
+        with tempfile.TemporaryDirectory() as _d8:
+            _p8 = Path(_d8) / "519702_2026-10-27_Q3.pdf"
+            _p8.write_bytes(b"exists")              # 已存在（>0B）→ 0 请求直返
+
+            def _tt_never(url, **k):
+                raise AssertionError("已存在文件不应发起网络请求")
+
+            fd.ttfund_get = _tt_never
+            check("L1", "报告-已存在跳过0请求", fd.fund_report_pdf(_pdf_row, dest_dir=_d8) == str(_p8))
+            _p8.unlink(missing_ok=True)
+            _seq8 = [_RPResp(_SYN_CHALLENGE), _RPResp(b"%PDF-1.7" + b"x" * 3000)]
+
+            def _tt_seq8(url, **k):
+                _ttlog8.append(k.get("headers"))
+                return _seq8.pop(0)
+
+            fd.ttfund_get = _tt_seq8
+            _p8r = fd.fund_report_pdf(_pdf_row, dest_dir=_d8)
+            check("L1", "报告-挑战求解重放落盘",
+                  Path(_p8r).name == "519702_2026-10-27_Q3.pdf"
+                  and Path(_p8r).read_bytes()[:4] == b"%PDF"
+                  and fd._EO_COOKIE_CACHE == ["__tst_status=600000006#",
+                                               "EO_Bot_Ssid=111222333"]
+                  and "EO_Bot_Ssid=111222333" in (_ttlog8[-1] or {}).get("Cookie", ""),
+                  f"{Path(_p8r).name} cookie重放验证")
+            _p8.unlink(missing_ok=True)
+            _seq8[:] = [_RPResp(_SYN_CHALLENGE), _RPResp(_SYN_CHALLENGE)]  # 顽固挑战
+            fd.ttfund_get = _tt_seq8
+            try:
+                fd.fund_report_pdf(_pdf_row, dest_dir=_d8)
+                check("L1", "报告-顽固挑战应抛未抛", False)
+            except RuntimeError as e:
+                check("L1", "报告-挑战后仍非PDF显式报错", "仍未取得 PDF" in str(e), str(e)[:70])
+            _p8.unlink(missing_ok=True)
+            fd.ttfund_get = lambda url, **k: _RPResp(b"<html>404 not found</html>")
+            try:
+                fd.fund_report_pdf(_pdf_row, dest_dir=_d8)
+                check("L1", "报告-非预期响应体应抛未抛", False)
+            except RuntimeError as e:
+                check("L1", "报告-非预期响应体拒绝", "非预期" in str(e), str(e)[:70])
+            fd.ttfund_get = lambda url, **k: _RPResp(b"%PDF-tiny" + b"y" * 50)   # <1000B
+            try:
+                fd.fund_report_pdf(_pdf_row, dest_dir=_d8)
+                check("L1", "报告-残包应拒未拒", False)
+            except RuntimeError as e:
+                check("L1", "报告-残包(<1KB)拒绝落盘", "疑似不完整" in str(e), str(e)[:70])
+            _p8.unlink(missing_ok=True)
+            # 撞名防护：年报与年报(摘要)同日披露同 kind=annual——rid 尾 6 位隔离
+            _row_a = {"code": "519702", "date": "2026-03-27", "kind": "annual",
+                      "report_id": "AN202603271111000001",
+                      "pdf_url": "https://pdf.dfcfw.com/pdf/H2_AAA_1.pdf"}
+            _row_b = {"code": "519702", "date": "2026-03-27", "kind": "annual",
+                      "report_id": "AN202603271111000002",
+                      "pdf_url": "https://pdf.dfcfw.com/pdf/H2_BBB_1.pdf"}
+            fd.ttfund_get = lambda url, **k: _RPResp(b"%PDF-1.7" + b"a" * 2500)
+            _pa8 = fd.fund_report_pdf(_row_a, dest_dir=_d8)
+            _pb8 = fd.fund_report_pdf(_row_b, dest_dir=_d8)
+            check("L1", "报告-同日同kind不同报告不撞名",
+                  _pa8 != _pb8 and Path(_pa8).name.endswith("000001.pdf")
+                  and Path(_pb8).name.endswith("000002.pdf"),
+                  f"{Path(_pa8).name} vs {Path(_pb8).name}")
+            # 字符串直链：文件名取 URL 尾段；会话 cookie 复用（首查带缓存 cookie 直连）
+            fd.ttfund_get = lambda url, **k: (
+                _ttlog8.append(k.get("headers")), _RPResp(b"%PDF-1.5" + b"z" * 2500))[1]
+            _p8s = fd.fund_report_pdf("https://pdf.dfcfw.com/pdf/H2_STR8_1.pdf", dest_dir=_d8)
+            check("L1", "报告-字符串直链+cookie复用",
+                  Path(_p8s).name == "H2_STR8_1.pdf"
+                  and (_ttlog8[-1] or {}).get("Cookie", "").startswith("__tst_status="),
+                  Path(_p8s).name)
+    finally:
+        fd.ttfund_get, fd._cache_read, fd._cache_write = _orig_tt8, _orig_cr8, _orig_cw8
+        fd.fund_list = _orig_fl8
+        fd._EO_COOKIE_CACHE[:] = _orig_eoc8
 
     # ── V0.7.5 行情通道防封加固：软封锁/连接级/结构守卫/403 分流（stub 零网络）──
     class _StubOpener2:
@@ -942,8 +1166,8 @@ def test_l1_offline():
     _thin = (_repo / "SKILL.md").read_text(encoding="utf-8")
     _ref = (_repo / "reference.md").read_text(encoding="utf-8")
     _thin_b = len(_thin.encode("utf-8"))
-    check("L1", "架构-瘦SKILL体积上限", _thin_b < 13300,
-          f"{_thin_b}B/上限13300（含平台必填市场元数据~0.5KB；超重=往路由层塞长文，移 reference.md）")
+    check("L1", "架构-瘦SKILL体积上限", _thin_b < 13400,
+          f"{_thin_b}B/上限13400（含平台必填市场元数据~0.5KB；超重=往路由层塞长文，移 reference.md）")
     _pub = [n.name for n in _ast.parse((_repo / "fund_data.py").read_text(encoding="utf-8")).body
             if isinstance(n, _ast.FunctionDef) and not n.name.startswith("_")]
     check("L1", "架构-签名速查全覆盖", len(_pub) >= 32 and all(f"| `{n}(" in _thin for n in _pub),
@@ -2777,6 +3001,21 @@ def test_l2_smoke():
           pl2["code"] == "000369" and pl2["kind"] in ("limited", "unknown")
           and pl2["name"] and ("限大额" in pl2["status_text"] or pl2["kind"] == "unknown"),
           f"{pl2['status_text'][:36]} kind={pl2['kind']}")
+    # V0.7.8 报告：交银趋势 519702 场外基金——巨潮无披露、东财清单+直链全量（坑P32）
+    rp = fd.fund_reports("519702")
+    check("L2", "RP 报告-清单/分类/直链(V0.7.8)",
+          rp["total"] >= 50 and len(rp["reports"]) == 20
+          and rp["reports"][0]["kind"] == "Q3" and rp["reports"][0]["year"] == 2026
+          and rp["reports"][0]["pdf_url"].startswith("https://pdf.dfcfw.com/pdf/H2_AN")
+          and {"Q1", "Q3", "interim", "annual"} <= {x["kind"] for x in rp["reports"]},
+          f"total={rp['total']} 首行{rp['reports'][0]['kind']}{rp['reports'][0]['year']}")
+    with tempfile.TemporaryDirectory() as _rpdir:
+        _rpp = fd.fund_report_pdf(rp["reports"][0], dest_dir=_rpdir)   # 1~2 请求（含挑战）
+        _rpb = Path(_rpp).read_bytes()
+        check("L2", "RP 报告-PDF下载挑战自动解(V0.7.8)",
+              _rpb[:4] == b"%PDF" and len(_rpb) > 100000
+              and Path(_rpp).name.startswith("519702_"),
+              f"{Path(_rpp).name} {len(_rpb)}B")
     check("L2", "E2 快照-规模史修复(V0.4)",
           snap["scale_history"]
           and isinstance(snap["scale_history"][-1]["scale_yi"], float),
@@ -3095,6 +3334,13 @@ def test_l4_budget():
     fd.fund_snapshot("161725")
     check("L4", "流A-缓存命中0请求", fd.TT_REQUEST_COUNT[0] == 0,
           f"实发{fd.TT_REQUEST_COUNT[0]}次")
+
+    fd.TT_REQUEST_COUNT[0] = 0
+    fd.TT_REQUEST_COUNT[1].clear()
+    fd.fund_reports("161725", force_refresh=True)     # V0.7.8：清单 1 请求（pageSize=100）
+    n2, hosts2 = fd.TT_REQUEST_COUNT[0], dict(fd.TT_REQUEST_COUNT[1])
+    check("L4", "流A-报告清单1请求", n2 == 1 and "api.fund.eastmoney.com" in hosts2,
+          f"共{n2}次 {hosts2}")
 
 
 # ════════════════════ L5 降级演练 + 坑回归 ═════════════════════

@@ -1,13 +1,19 @@
-# fund-data 完整参考（reference.md · 按需读取层）V0.7.7
+# fund-data 完整参考（reference.md · 按需读取层）V0.7.8
 
 > 本文件按需读取：调试 / 扩展 / 排查坑时才打开，勿随 skill 激活预加载。
 > 路由与签名速查见 SKILL.md；本文件内嵌代码与 fund_data.py 同源直拼（构建时生成）。
 
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 
-# fund-data 基金底层数据工具包 V0.7.7 模块全档
+# fund-data 基金底层数据工具包 V0.7.8 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复 + V0.7.4 文档三层 + V0.7.5 新浪互备与行情防封加固 + V0.7.6 K线韧性与行业基准 + V0.7.7 申购限额：312/312 离线断言通过**（L1 单元 276 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 47 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练8 · 防封专项F×11 须显式 `--online`），覆盖 24 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）、`examples.md`（菜谱+FAQ 层）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复 + V0.7.4 文档三层 + V0.7.5 新浪互备与行情防封加固 + V0.7.6 K线韧性与行业基准 + V0.7.8 基金报告：334/334 离线断言通过**（L1 单元 298 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 49 · L3三源交叉验证5 · L4请求预算审计3 · L5降级演练8 · 防封专项F×11 须显式 `--online`），覆盖 26 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）、`examples.md`（菜谱+FAQ 层）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.7.8 基金报告（清单 + PDF 直链，场外/上市全覆盖）：**
+- 🟢 **报告清单 `fund_reports(q, category, limit)`**：f10/JJGG 七类目（periodic 默认=定期报告/all/issuing/dividend/staff/sales/other，type=页面 tab 实测钉死），返回新→旧行 {report_id,title,date,year,kind(Q1~Q4/interim/annual/other),pdf_url}；固定抓满 pageSize=100 再本地切片——缓存与 limit 解耦；当日缓存；1 请求
+- 🟢 **PDF 下载 `fund_report_pdf(row|url, dest_dir)`**：直链规律 `pdf.dfcfw.com/pdf/H2_{清单ID}_1.pdf`（_1 附件号不可省）；本地已存在同名文件 0 请求直返；文件名 {code}_{date}_{kind}_{ID尾6}.pdf（防年报/摘要同日撞名）
+- 🔴 **EdgeOne 反爬（P32）**：裸请求 200+Content-Type 伪装 application/pdf 但 body 是 988B `<script>` 静态挑战——node vm 沙箱 eval 捕获 `__tst_status`/`EO_Bot_Ssid` 两 cookie 重放即真 PDF（沙箱无 require/fs/net，timeout 防死循环）；挑战按会话/IP 计费，解一次后同会话直连；需系统 node（同巨潮 enckey 依赖）
+- 🔴 **场外基金覆盖**：巨潮 column=fund 仅上市基金（交银趋势 519702 三路全零实证）——东财清单+直链是全量唯一解；JJGG 裸 UA 是 200+ErrCode-999+Data="" 假成功形态，必须带 fundf10 Referer
 
 **V0.7.7 申购限额（主页面交易状态栏 → 快照新数据集）：**
 - 🟢 **限额/交易状态入快照**：`fund_snapshot` 新增 `purchase_limit` 数据集（kind 四态 limited/suspended/unlimited/unknown + limit_cny 折算金额 + not_for_sale 不代销标记），快照 1→2 请求（E2+主页面）；失败进 missing_datasets 不炸快照（E2 成果不陪葬）；`fund_purchase_limit(code)` 可单独调用（当日缓存）
@@ -174,6 +180,7 @@
 | B2 | `fund_scale_history(q)` | 规模全历史：募集期→最新季报（期间申购/赎回流量+份额+净资产+变动率，升序） | F10 gmbd | 1（缓存0） |
 | B3 | `fund_fees(q)` | 费率全表：管理/托管/销售服务费（每年%）+认购/申购（原/优惠）/赎回三阶梯（持有期递减） | F10 jjfl | 1（缓存0） |
 | PL | `fund_purchase_limit(q)` | 申购限额/交易状态：kind 四态+limit_cny 折算+not_for_sale（P31 唯一来源；已并入快照 purchase_limit 数据集） | fund.eastmoney.com/{code}.html | 1（缓存0）；⚠️无批量接口 |
+| RP | `fund_reports(q,category,limit)` / `fund_report_pdf(row,dest_dir)` | 报告清单（7 类目·新→旧·kind/年份分类）+ PDF 下载（EdgeOne 挑战 node 自动解，需系统 node；场外/上市全覆盖 P32） | api.fund.eastmoney.com/f10/JJGG + pdf.dfcfw.com | 清单1（缓存0）·PDF 1~2/份 |
 | V6 | `fund_manager(q)` / `manager_rank(pages)` | 经理画像（任职/规模/回报/在管清单）/ 排行（姓名序） | eastmoney manager 页+dt=14 | 1·50/页 |
 | 本地 | `adjusted_nav(recs)` | 复权净值（分红再投口径，链式） | 零网络 | 0 |
 | 本地 | `fund_metrics(snap,s,e)` | 区间收益/年化/最大回撤/波动/夏普/卡玛/现申购费标注 | 零网络 | 0 |
@@ -227,6 +234,7 @@
 | P29 板块 BK 码空间 | BK 码不可凭记忆/类目外推：同码空间跨行业(t:2)/概念(t:3)（BK0477 实为酿酒概念、BK0475=银行Ⅱ 而非白酒）；clist fs 语法是冒号 `t:2` 非 `t=2`（后者 rc:102 参数错） | BENCH_SECID 行业段=clist t:2 快照 + kline name 双样本交叉验证；未命中走 `90.BKxxxx` secid 直传；概念板块不收录（归 a-stock-data 概念域） |
 | P30 新浪行情通道（V0.7.5） | hq.sinajs.cn 无 Referer 即拒（实测空响应）；高频爬虫有封禁前科；银行间信用债无公开实时端点（货币网现券板仅利率债活跃券） | `sina_quote` 内置 Referer + provider=sina 独立分账 120/300s·0.5s·单并发 + 403/429 计熔断 + 空体计信号；定位=腾讯互备低频兜底，银行间实时须 QB 等权限源 |
 | P31 申购限额唯一来源（V0.7.7） | E2/E3/E6 探针实测均无完整限额（E3 SGZT 仅「限大额」短文本无金额）——唯一来源是主页面 `{code}.html` 交易状态栏，且无批量接口（N 只 N 请求）；金额与「限大额」分属不同层级 text node（嵌套 span），简单 regex 必截断（000369 实测）；外币折算是静态近似汇率非实时牌价 | `fund_purchase_limit`：`_StaticCellParser` 嵌套感知全文拼接 + `parse_purchase_limit` 纯函数（kind 四态；限大额无金额诚实 limit_cny=None 不虚报 0）；已并入快照 `purchase_limit` 数据集（失败进 missing 不炸快照）；rankhandler ft=qdii 仅 363 只混合/股票类（联接/LOF 归「指数型-海外股票」不在内） |
+| P32 基金报告双通道（V0.7.8） | ①JJGG 必须带 fundf10 Referer——裸 UA 是 200+ErrCode-999+Data=""「假成功」；type=页面 tab（0 全部/1 发行运作/2 分红送配/3 定期报告/4 人事调整/5 基金销售/6 其他），部分基金加披 Q2/Q4 季报（交银趋势实测 6 期/年）②PDF 直链 `H2_{ID}_1.pdf` 的 _1 附件号不可省（少了拿到挑战壳）③pdf.dfcfw.com 腾讯 EdgeOne 反爬：200+Content-Type 伪装 pdf 但 body 是 988B 静态 `<script>` 挑战；巨潮 column=fund 仅上市基金，场外不在其体系 | `fund_reports`：Referer 必带+Data 非 list 显式报错+无 ID 行跳过+total>0 解析空拒绝；`fund_report_pdf`：_edgeone_solve node vm 沙箱（无 require/fs/net+timeout）解 `__tst_status`/`EO_Bot_Ssid` 重放一次，仍非 PDF/残包(<1KB)显式报错；挑战 cookie 进程级复用；dfcfw.com 归 eastmoney 线同账限流 |
 
 ## Prerequisites
 
@@ -243,13 +251,15 @@ pip install requests
 ```python
 # -*- coding: utf-8 -*-
 """
-fund-data V0.7.7 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层）
+fund-data V0.7.8 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层 + 基金报告）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤3 请求（1×pingzhongdata + 0~1×lsjz + 0~1×主页面限额，V0.7.7 起快照含 purchase_limit）
   2. 全市场筛选走 rankhandler 全量单请求或 TopN 单页，禁止 for fund in all: snapshot(fund)
   3. 同一基金当日快照磁盘缓存命中 = 0 请求
   4. 所有东财/天天请求走 ttfund_get()：串行 + 1.5s 最小间隔 + 会话复用 + 强制 HTTPS
+  5. 基金报告清单 1 请求（f10/JJGG，当日缓存）；报告 PDF 下载 1~2 请求/份
+     （EdgeOne 挑战自动解，同会话后续通常 1 请求直连，V0.7.8）
 
 坑记录（2026-11-05 实测）：
   P1  pingzhongdata 必须 HTTPS（UA 无关）——HTTP 静默返回 0 字节，HTTP 200 照常
@@ -303,7 +313,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.7.7"
+__version__ = "0.7.8"
 
 
 FUND_CACHE_DIR = Path.home() / ".fund_data_cache"
@@ -4124,6 +4134,228 @@ def fund_fees(query: str, force_refresh: bool = False) -> dict:
     _cbreak_success("tt")
     _cache_write(rel, out)
     return out
+```
+
+```python
+# 2026-11-18 实测钉死：
+#   · api.fund.eastmoney.com/f10/JJGG 必须带 fundf10 Referer——裸 UA 请求是
+#     200+ErrCode-999+Data="" 的「假成功」形态；type=页面 tab：0 全部公告/1 发行
+#     运作/2 分红送配/3 定期报告/4 人事调整/5 基金销售/6 其他公告（NEWCATEGORY
+#     镜像 type），源序新→旧；行字段 ID=AN202610271830986993 形态。
+#   · PDF 直链规律 https://pdf.dfcfw.com/pdf/H2_{清单ID}_1.pdf——_1 附件号不可省
+#     （少了 _1 拿到的是挑战壳）。场外/上市基金全覆盖：巨潮 column=fund 仅上市
+#     基金（LOF/ETF），交银趋势 519702 场外在巨潮三路全零、东财直链 636KB 实证。
+#   · pdf.dfcfw.com 前有腾讯 EdgeOne 反爬：裸请求 200 + Content-Type 伪装
+#     application/pdf，但 body 是 988B <script> 挑战（静态计算 __tst_status /
+#     EO_Bot_Ssid 两 cookie 后重放即真 PDF）。挑战 JS 无时间无随机 → node vm
+#     沙箱 eval 捕获 document.cookie 赋值（同 P20 enckey 的 node 先例；vm 上下文
+#     无 require/fs/net，timeout 防死循环）。挑战按会话/IP 计费：解一次后同
+#     会话后续 PDF 直连命中（实测连续 3 份仅首份触发）。
+
+_REPORT_CATEGORIES = {          # fund_reports category 键 → JJGG type（=页面 tab）
+    "all": 0, "issuing": 1, "dividend": 2, "periodic": 3,
+    "staff": 4, "sales": 5, "other": 6,
+}
+_REPORT_KIND_RES = [            # 定期报告标题 → 报告期分类
+    (re.compile(r"(\d{4})年第([1-4])季度报告"), "Q{1}"),
+    (re.compile(r"(\d{4})年中期报告"), "interim"),
+    (re.compile(r"(\d{4})年年度报告"), "annual"),
+]
+
+
+def _classify_report_title(title: str) -> dict:
+    """报告标题 → {year, kind}；kind: Q1~Q4 / interim(中期) / annual(年度) / other。
+
+    「年度报告摘要」行同样命中 annual（子串匹配）；other 是未覆盖形态
+    （如更新招募提示），诚实标注不猜。"""
+    for rex, tmpl in _REPORT_KIND_RES:
+        m = rex.search(title or "")
+        if m:
+            kind = tmpl.format(m.group(1), m.group(2)) if "{1}" in tmpl else tmpl
+            return {"year": int(m.group(1)), "kind": kind}
+    return {"year": None, "kind": "other"}
+
+
+def fund_reports(query: str, category: str = "periodic", limit: int = 20,
+                 force_refresh: bool = False) -> dict:
+    """基金公告/定期报告清单（f10/JJGG，1 请求，当日缓存）。
+
+    category（=公告页 tab）: periodic(默认)=定期报告·季度/中期/年度 | all 全部公告
+    | issuing 发行运作 | dividend 分红送配 | staff 人事调整 | sales 基金销售
+    | other 其他公告。
+    返回 {code, category, total, reports:[{code, report_id, title, short_title,
+    date, year, kind, pdf_url}]}，源序【新→旧】（定期报告法定 1 年 4 期：
+    Q1/Q3 季报+中期+年度，部分基金加披 Q2/Q4 季报——交银趋势实测 6 期/年；
+    limit 默认 20≈近 3~5 年（越界自动钳入 1~100）；固定抓满 100 条再本地切片——缓存与 limit
+    解耦，先小后大的调用序列不拿残缺缓存；更早年份看 total 判断）。kind 分类见
+    _classify_report_title；pdf_url 是东财 CDN 直链（H2_{ID}_1.pdf，场外/上市
+    全覆盖——巨潮仅上市基金，坑P32）——下载走 fund_report_pdf()（有 EdgeOne
+    反爬挑战，勿裸 requests）。
+    """
+    if category not in _REPORT_CATEGORIES:
+        raise ValueError(f"category 需为 {sorted(_REPORT_CATEGORIES)} 之一: {category!r}")
+    limit = max(1, min(int(limit), 100))
+    ctype = _REPORT_CATEGORIES[category]
+    code = resolve_fund_code(query)
+    rel = f"reports/{code}_c{ctype}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=SNAPSHOT_TTL_HOURS)
+        if cached is not None:
+            return {**cached, "reports": (cached.get("reports") or [])[:limit]}
+    # 固定抓满 pageSize=100（服务端上限）再本地切片——缓存与 limit 解耦，
+    # 先小 limit 后大 limit 的调用序列不会拿到残缺缓存
+    r = ttfund_get("https://api.fund.eastmoney.com/f10/JJGG",
+                   params={"fundcode": code, "pageIndex": 1, "pageSize": 100,
+                           "type": ctype},
+                   headers={"Referer": f"https://fundf10.eastmoney.com/jjgg_{code}_{ctype}.html"})
+    assert_not_risk_control(r, "tt", f"jjgg {code}")
+    r.raise_for_status()
+    j = r.json()
+    rows = j.get("Data")
+    if not isinstance(rows, list):                 # ErrCode-999 假成功形态 Data=""
+        raise RuntimeError(f"jjgg 响应异常（{code} Data 非 list，"
+                           f"ErrCode={j.get('ErrCode')}）——缺 Referer 或上游改版")
+    reports = []
+    for x in rows:
+        rid = str(x.get("ID") or "")
+        if not rid:
+            continue
+        title = (x.get("TITLE") or "").strip()
+        raw_date = str(x.get("PUBLISHDATE") or "")
+        date = raw_date[:10] if re.match(r"\d{4}-\d{2}-\d{2}", raw_date) else None
+        reports.append({"code": code, "report_id": rid, "title": title,
+                        "short_title": (x.get("ShortTitle") or "").strip() or None,
+                        "date": date,
+                        **_classify_report_title(title),
+                        "pdf_url": f"https://pdf.dfcfw.com/pdf/H2_{rid}_1.pdf"})
+    if not reports and (j.get("TotalCount") or 0) > 0:
+        raise RuntimeError(f"jjgg 清单解析为空（{code} total={j.get('TotalCount')}"
+                           f"）——上游结构变更，拒绝空返回")
+    _cbreak_success("tt")
+    out = {"code": code, "category": category,
+           "total": j.get("TotalCount") if isinstance(j.get("TotalCount"), int)
+           else len(reports),
+           "reports": reports}                    # 缓存存全量（≤100），返回按 limit 切
+    _cache_write(rel, out)
+    return {**out, "reports": reports[:limit]}
+
+
+_EO_VM_TMPL = (
+    "const vm=require('vm');"
+    "const chunks=[];"
+    "const ctx=vm.createContext({"
+    "document:{set cookie(v){chunks.push(String(v));}},"
+    "location:{href:'https://pdf.dfcfw.com/'},"
+    "setTimeout:function(){}},"
+    "{codeGeneration:{strings:false,wasm:false}});"   # 沙箱内禁 eval/new Function
+    "vm.runInContext(process.argv[1],ctx,{timeout:1000});"
+    "console.log(JSON.stringify(chunks));"
+)
+_EO_COOKIE_CACHE: list[str] = []      # 进程级挑战解（挑战按会话/IP 计费，解一次复用）
+
+
+def _edgeone_solve(script_html: str) -> dict:
+    """解 pdf.dfcfw.com 腾讯 EdgeOne 挑战 → {cookie 名: 值}（坑P32）。
+
+    挑战 JS 是纯静态计算（无时间无随机），node vm 沙箱 eval 捕获 document.cookie
+    赋值。沙箱上下文只给 document/location/setTimeout 三个桩（无 require/fs/net/
+    process），runInContext timeout 防死循环，codeGeneration 双保险禁沙箱内二次
+    eval/new Function；挑战体作 argv 数据位传入（`--` 分隔——以 - 开头也不会被
+    node 当 CLI 选项解析）。残留面（诚实记录）：vm 非硬安全边界，桩对象可经
+    constructor 链取宿主 Function 逃逸——本场景威胁模型是反爬脚本的意外副作用
+    而非定向攻击，收窄到该程度即可；若上游换成需要 eval 的挑战会显式报错不静默。
+    与 P20 enckey 同为 node 标准库先例，零新 Python 依赖。挑战体异样（改版）→
+    显式 RuntimeError 不静默。"""
+    import subprocess
+    body = (script_html or "").replace("<script>", "").replace("</script>", "")
+    if not body.strip():
+        raise RuntimeError("EdgeOne 挑战体为空——上游改版预警")
+    try:
+        out = subprocess.run(["node", "-e", _EO_VM_TMPL, "--", body],
+                             capture_output=True, text=True, timeout=10)
+    except FileNotFoundError:
+        raise RuntimeError("需要系统 node（EdgeOne 挑战计算，同巨潮 enckey 依赖）"
+                           "——未找到 node 可执行文件") from None
+    except (subprocess.TimeoutExpired, OSError) as e:
+        raise RuntimeError(f"EdgeOne 挑战求解 node 进程异常: "
+                           f"{type(e).__name__} {str(e)[:80]}") from None
+    if out.returncode != 0:
+        raise RuntimeError(f"EdgeOne 挑战求解失败（node vm）: {out.stderr[:120]}")
+    pairs = {}
+    try:
+        for c in json.loads(out.stdout.strip().splitlines()[-1]):
+            c = c.rstrip(";")
+            if "=" in c:
+                k, v = c.split("=", 1)
+                pairs[k.strip()] = v
+    except (json.JSONDecodeError, IndexError) as e:
+        raise RuntimeError(f"EdgeOne 挑战输出不可解析: {out.stdout[:120]!r}") from e
+    if not {"__tst_status", "EO_Bot_Ssid"} <= set(pairs):
+        raise RuntimeError(f"EdgeOne 挑战 cookie 不全: {sorted(pairs)}——上游改版预警")
+    return pairs
+
+
+def fund_report_pdf(report, dest_dir=None, force_refresh: bool = False) -> str:
+    """下载单份基金报告 PDF（1~2 请求；本地同名文件已存在则 0 请求直返路径）。
+
+    report: fund_reports 返回的行 dict（用其 pdf_url；文件名
+            {code}_{date}_{kind}_{报告ID尾6}.pdf——尾段防「年报与年报摘要」
+            同日同 kind 撞名后 exists-skip 静默拿错文件）或直接 pdf_url 字符串
+            （文件名取 URL 尾段）。
+    dest_dir: 保存目录（默认当前工作目录），不存在自动创建。
+    ⚠️ pdf.dfcfw.com 前有腾讯 EdgeOne 反爬挑战（坑P32）：裸 requests 拿到的是
+    988B <script> 挑战壳（Content-Type 伪装 application/pdf）——本函数自动
+    node 解挑战重放（需系统 node，同巨潮 enckey 依赖）；挑战按会话计费，
+    同进程后续下载通常直连。返回本地文件路径（str）。
+    """
+    if isinstance(report, dict):
+        url = str(report.get("pdf_url") or "")
+        rid = str(report.get("report_id") or "")
+        main = re.sub(r"[^0-9A-Za-z_.-]", "_",
+                      f"{report.get('code') or 'fund'}_{report.get('date') or 'na'}_"
+                      f"{report.get('kind') or 'ann'}")[:74]
+        # 先截主部再拼 rid 尾 6 位——防撞名段永不进截断窗（复审建议）；
+        # 手工构造的行请带 report_id，缺省时回退无尾段形态（撞名保护失效）
+        stem = main + (f"_{rid[-6:]}" if rid else "")
+    else:
+        url = str(report or "")
+        stem = re.sub(r"[^0-9A-Za-z_.-]", "_",
+                      url.rsplit("/", 1)[-1].split("?")[0].removesuffix(".pdf")
+                      or "report")[:80]
+    if not url.startswith("https://pdf.dfcfw.com/"):
+        raise ValueError("仅支持 pdf.dfcfw.com 报告直链（用 fund_reports 取行内 "
+                         f"pdf_url）: {url[:80]!r}")
+    dest = Path.cwd() if dest_dir is None else Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / (stem + ".pdf")
+    if path.exists() and path.stat().st_size > 0 and not force_refresh:
+        return str(path)
+    headers = {"Referer": "https://fundf10.eastmoney.com/"}
+    if _EO_COOKIE_CACHE:
+        headers["Cookie"] = "; ".join(_EO_COOKIE_CACHE)
+
+    def _fetch(h):
+        resp = ttfund_get(url, headers=h, timeout=60)
+        assert_not_risk_control(resp, "tt", f"报告PDF {stem}")
+        resp.raise_for_status()
+        return resp.content
+
+    body = _fetch(headers)
+    if body[:4] != b"%PDF":
+        if not body.lstrip()[:8].startswith(b"<script>"):
+            raise RuntimeError(f"报告 PDF 响应非预期（{stem}，{len(body)}B）: "
+                               f"{body[:80]!r}——直链失效或上游改版")
+        cookies = _edgeone_solve(body.decode("utf-8", errors="replace"))
+        _EO_COOKIE_CACHE[:] = [f"{k}={v}" for k, v in cookies.items()]
+        body = _fetch({**headers, "Cookie": "; ".join(_EO_COOKIE_CACHE)})
+        if body[:4] != b"%PDF":
+            raise RuntimeError(f"EdgeOne 挑战后仍未取得 PDF（{stem}，{len(body)}B）: "
+                               f"{body[:60]!r}")
+    if len(body) < 1000:                           # 真 PDF 200KB+；残包/空包拒绝落盘
+        raise RuntimeError(f"报告 PDF 疑似不完整（{stem} 仅 {len(body)}B），未保存")
+    path.write_bytes(body)
+    _cbreak_success("tt")
+    return str(path)
 
 
 # ── Sprint 2 默认激活：跨进程请求协调（真实时钟；测试可随时重建）────────
@@ -4463,6 +4695,8 @@ fund_scale("161725")                         # 单基金规模（ENDNAV 精确�
 bond_plus_profile("007300")                  # 固收+画像（仓位带/回撤带/利率标注）
 qdii_premium(["513100", "513500"])           # 场内溢价（净值滞后口径）
 fund_purchase_limit("513100")                # 申购限额（快照 purchase_limit 同源；无批量接口）
+fund_reports("交银趋势")                     # 定期报告清单（默认 periodic，1 请求当日缓存）
+fund_report_pdf(rp["reports"][0])            # 报告 PDF 下载（EdgeOne 自动解，返回本地路径）
 nav_divergence("161725")                     # 重仓探测（背离度→疑似调仓）
 fund_manager("161725")                       # 基金码→现任经理画像（在管清单）
 manager_rank(pages=1)                        # 经理排行 50 位（服务端仅姓名序）

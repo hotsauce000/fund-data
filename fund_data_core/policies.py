@@ -63,6 +63,9 @@ _HOST_PROVIDERS = {
     "gu.qq.com": "tencent",
     "sinajs.cn": "sina",
     "sina.com.cn": "sina",
+    # dfcfw.com 是东方财富自有 CDN 域（pdf.=基金报告 PDF，j5.=静态 JS）——
+    # V0.7.8 起 pdf.dfcfw.com 承载报告直链，归入 eastmoney 线同账限流
+    "dfcfw.com": "eastmoney",
 }
 
 

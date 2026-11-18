@@ -59,7 +59,7 @@ def _sig_rows() -> list:
     return rows
 
 
-VERSION = "0.7.7"
+VERSION = "0.7.8"
 DESCRIPTION = (
     "写代码实际获取基金领域底层数据时使用——零key零登录，八层能力："
     "【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:"
@@ -72,7 +72,7 @@ DESCRIPTION = (
     "【全市场】24792只排行底座(过滤排序全本地)、新发基金全量、公司画像、"
     "抱团度(巨潮)、19门类行业配置；"
     "【经理与专项】经理画像(在管清单/任期/回报)、排行、持续性矩阵、固收+画像、费率全表(管理/托管/赎回阶梯)、"
-    "单基金规模(ENDNAV)、规模全历史(53期含申赎流量)、QDII溢价、重仓探测；"
+    "单基金规模(ENDNAV)、规模全历史(53期含申赎流量)、QDII溢价、重仓探测、定期报告清单/PDF下载(f10/JJGG+pdf直链,场外上市全覆盖)；"
     "【基准指数】指数/行业板块/股票日线(宽基+风格+东财行业板块共119指数,十年全史,1请求)。"
     "请求预算制防封(铁律见下)。"
     "仅在需要调用数据接口取数时使用：基金概念解释、投资观点讨论等无需取数的话题不要加载本skill。")
@@ -84,9 +84,10 @@ DESCRIPTION = (
 _SIG_BOUNDARY = set("，。；、｜|/·）)】」》！？：: ,; ")
 
 
-def _sig_cut(doc: str, limit: int = 30) -> str:
+def _sig_cut(doc: str, limit: int = 28) -> str:
     """标点感知截断：切点后一字符（首个被排除字符）是边界 → 前 limit 位为完整
-    词段，保留；否则回退一位防词中悬垂（判据看 doc[limit]，非 doc[limit-1]）。"""
+    词段，保留；否则回退一位防词中悬垂（判据看 doc[limit]，非 doc[limit-1]）。
+    V0.7.8：30→28（签名表 53 函数自然增长，SKILL 体积纪律配套收紧）。"""
     if len(doc) <= limit:
         return doc
     return doc[:limit] if doc[limit] in _SIG_BOUNDARY else doc[:limit - 1]
@@ -103,7 +104,7 @@ display_name: 基金数据底座 FundBase
 display_name_en: FundBase · The Data Foundation for China Funds
 description: {DESCRIPTION}
 description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集、白话持仓穿透地图、24792 只全市场排行、经理画像与抱团度、十年指数日线与 53 期规模全史——零 key 零登录，请求预算制防封，分层断言全绿。为一切基金应用打地基。
-description_en: The full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), plain-language holdings maps, 24,792-fund market rankings, manager profiles and crowding, 10-year index klines, 53-period scale history. Zero keys, zero login, layered assertions green. The ground every fund application builds on.
+description_en: Full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), holdings maps, 24,792-fund rankings, manager profiles, 10-year klines, 53-period scale history, report PDFs. Zero keys/login, budget-guarded, assertions green.
 author: hotsauce000
 origin: custom
 version: {VERSION}
@@ -111,7 +112,7 @@ version: {VERSION}
 
 # fund-data 路由层 V{VERSION}
 
-本文件是**路由层**（≈4K token，激活只加载本文件）。细节/坑区/内嵌代码在同目录 **reference.md（按需读取）**；复制即用示例与 FAQ 在 **examples.md（按需读取）**；运行代码 `fund_data.py`（import 用，勿通读）：
+本文件是**路由层**（≈4K token，激活只加载本文件）。坑区/内嵌代码→**reference.md**、菜谱/FAQ→**examples.md**（均按需读取）；`fund_data.py` import 用勿通读：
 
 ```python
 import sys
@@ -128,7 +129,7 @@ THIN.append("""## 防封铁律（先读，违反=封禁20+小时）
 2. **明令禁止** `for fund in all: fund_snapshot(fund)`（全量循环=封禁路径）；全市场排行已内置全量单请求
 3. **聚合优先**：先问 pingzhongdata（1 请求=90% 静态数据），再考虑窄端点
 4. **东财/天天/蛋卷请求必须走 `ttfund_get()`**（F1锁+F2熔断+F6分流+P12直连）；批量≥10只把 TT_MIN_INTERVAL 调 2~3s；巨潮走 _cninfo_post（1.5s节流）
-5. 缓存 TTL：fund_list 30天 / snapshot·限额·持仓·宏观·排行·新发·规模·规模全史·K线 当日 / 公司·经理画像 24h / 抱团度·行业配置季末后120天内1h·其后90天 / lsjz 不缓存
+5. 缓存 TTL：fund_list 30天 / snapshot·限额·持仓·宏观·排行·新发·规模·规模全史·K线·报告清单 当日 / 公司·经理画像 24h / 抱团度·行业配置季末后120天内1h·其后90天 / lsjz 不缓存
 """)
 
 THIN.append("""## 场景路由（我想做 X → 调什么）
@@ -137,21 +138,22 @@ THIN.append("""## 场景路由（我想做 X → 调什么）
 |---|---|---|
 | 诊断一只基金 | `fund_snapshot`→`fund_metrics`+评测三件套 | 2（E2+限额页） |
 | 申购限额/交易状态 | 快照 `purchase_limit` 数据集 / 单查 `fund_purchase_limit` | 1（缓存0） |
+| 定期报告/PDF | `fund_reports`（7 类目）→ `fund_report_pdf`（EdgeOne 自动解） | 1（缓存0）·PDF 1~2 |
 | 全市场排行/初筛 | `fund_rank()` 全量1请求，过滤排序本地 | 1（缓存0） |
 | 定投测算 | `fund_snapshot`→`fund_dca_backtest`（XIRR） | 2（缓存0） |
 | 这基金买了什么 | `penetrate` → `plain_text_map`（白话地图） | 冷启≤13/重跑1 |
 | 名称/拼音找代码 | `norm_fund_code`（列候选不猜）/ `resolve_fund_code` | 0 |
 | 净值核对/每日申赎状态 | `fund_nav_history`（新→旧需反转） | 1~N页 |
 | 批量最新净值 | `fund_realtime_nav`（输入去重，≤50/请求） | N/50 |
-| 新发/在发基金 | `fund_new_issues()`（全量+公司ID映射） | ~7（缓存0） |
+| 新发/在发基金 | `fund_new_issues()`（全量） | ~7（缓存0） |
 | 基金公司画像 | `fund_company(基金码或8位公司ID)` | 1（基金码+1） |
-| 抱团度/行业配置 | `fund_crowding()` / `fund_industry_allocation()`（季度巨潮） | 季末后120天内1h/历史90天 |
-| 业绩持续性/固收+画像 | `rank_persistence()` / `bond_plus_profile(q)`（零请求） | 0 |
+| 抱团度/行业配置 | `fund_crowding()` / `fund_industry_allocation()`（巨潮） | 季末后120天内1h/其后90天 |
+| 业绩持续性/固收+画像 | `rank_persistence()` / `bond_plus_profile(q)` | 0 |
 | 规模·全史/费率/溢价/重仓探测 | `fund_scale`·`fund_scale_history`·`fund_fees`·`qdii_premium`·`nav_divergence` | 各1·2·冷启≤12 |
 | 经理画像/排行 | `fund_manager(基金码或经理ID)` · `manager_rank(pages)`（仅姓名序） | 0~1·50/页 |
-| 指数日线 | `kline_daily("沪深300")`（指数名/行业板块名/股票码） | 1（缓存0） |
+| 指数日线 | `kline_daily("沪深300")`（指数名/板块名/股票码） | 1（缓存0） |
 | 债基利率敏感度 | `cb_yield_curve` + `credit_spread` / `treasury_yield_daily` | 1~2 |
-| 重仓股深度（龙虎榜/估值史） | `holding_map` → **a-stock-data skill** | 0 |
+| 重仓股深度 | `holding_map` → **a-stock-data skill** | 0 |
 
 ## 失效与备源路由（失败时怎么办）
 
@@ -198,9 +200,15 @@ REF.append(f"""# fund-data 完整参考（reference.md · 按需读取层）V{VE
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 """)
 
-REF.append(r"""# fund-data 基金底层数据工具包 V0.7.7 模块全档
+REF.append(r"""# fund-data 基金底层数据工具包 V0.7.8 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复 + V0.7.4 文档三层 + V0.7.5 新浪互备与行情防封加固 + V0.7.6 K线韧性与行业基准 + V0.7.7 申购限额：312/312 离线断言通过**（L1 单元 276 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 47 · L3三源交叉验证5 · L4请求预算审计2 · L5降级演练8 · 防封专项F×11 须显式 `--online`），覆盖 24 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）、`examples.md`（菜谱+FAQ 层）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层（rankhandler 排行底座 + 巨潮第四线）**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.7.3 审查修复 + V0.7.4 文档三层 + V0.7.5 新浪互备与行情防封加固 + V0.7.6 K线韧性与行业基准 + V0.7.8 基金报告：334/334 离线断言通过**（L1 单元 298 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条（含锁契约 14）。在线层 L2端点smoke 49 · L3三源交叉验证5 · L4请求预算审计3 · L5降级演练8 · 防封专项F×11 须显式 `--online`），覆盖 26 个上游接口。同目录 `fund_data.py`（可直接 import 的同款模块）、`fund_data_core/`（跨进程请求协调核心：Gateway/Coordinator/Cache，与主模块同一套部署）、`examples.md`（菜谱+FAQ 层）与 `test_fund_data.py`（回归测试）；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.7.8 基金报告（清单 + PDF 直链，场外/上市全覆盖）：**
+- 🟢 **报告清单 `fund_reports(q, category, limit)`**：f10/JJGG 七类目（periodic 默认=定期报告/all/issuing/dividend/staff/sales/other，type=页面 tab 实测钉死），返回新→旧行 {report_id,title,date,year,kind(Q1~Q4/interim/annual/other),pdf_url}；固定抓满 pageSize=100 再本地切片——缓存与 limit 解耦；当日缓存；1 请求
+- 🟢 **PDF 下载 `fund_report_pdf(row|url, dest_dir)`**：直链规律 `pdf.dfcfw.com/pdf/H2_{清单ID}_1.pdf`（_1 附件号不可省）；本地已存在同名文件 0 请求直返；文件名 {code}_{date}_{kind}_{ID尾6}.pdf（防年报/摘要同日撞名）
+- 🔴 **EdgeOne 反爬（P32）**：裸请求 200+Content-Type 伪装 application/pdf 但 body 是 988B `<script>` 静态挑战——node vm 沙箱 eval 捕获 `__tst_status`/`EO_Bot_Ssid` 两 cookie 重放即真 PDF（沙箱无 require/fs/net，timeout 防死循环）；挑战按会话/IP 计费，解一次后同会话直连；需系统 node（同巨潮 enckey 依赖）
+- 🔴 **场外基金覆盖**：巨潮 column=fund 仅上市基金（交银趋势 519702 三路全零实证）——东财清单+直链是全量唯一解；JJGG 裸 UA 是 200+ErrCode-999+Data="" 假成功形态，必须带 fundf10 Referer
 
 **V0.7.7 申购限额（主页面交易状态栏 → 快照新数据集）：**
 - 🟢 **限额/交易状态入快照**：`fund_snapshot` 新增 `purchase_limit` 数据集（kind 四态 limited/suspended/unlimited/unknown + limit_cny 折算金额 + not_for_sale 不代销标记），快照 1→2 请求（E2+主页面）；失败进 missing_datasets 不炸快照（E2 成果不陪葬）；`fund_purchase_limit(code)` 可单独调用（当日缓存）
@@ -369,6 +377,7 @@ REF.append(r"""## 端点路由速查（按需定位，不必通读）
 | B2 | `fund_scale_history(q)` | 规模全历史：募集期→最新季报（期间申购/赎回流量+份额+净资产+变动率，升序） | F10 gmbd | 1（缓存0） |
 | B3 | `fund_fees(q)` | 费率全表：管理/托管/销售服务费（每年%）+认购/申购（原/优惠）/赎回三阶梯（持有期递减） | F10 jjfl | 1（缓存0） |
 | PL | `fund_purchase_limit(q)` | 申购限额/交易状态：kind 四态+limit_cny 折算+not_for_sale（P31 唯一来源；已并入快照 purchase_limit 数据集） | fund.eastmoney.com/{code}.html | 1（缓存0）；⚠️无批量接口 |
+| RP | `fund_reports(q,category,limit)` / `fund_report_pdf(row,dest_dir)` | 报告清单（7 类目·新→旧·kind/年份分类）+ PDF 下载（EdgeOne 挑战 node 自动解，需系统 node；场外/上市全覆盖 P32） | api.fund.eastmoney.com/f10/JJGG + pdf.dfcfw.com | 清单1（缓存0）·PDF 1~2/份 |
 | V6 | `fund_manager(q)` / `manager_rank(pages)` | 经理画像（任职/规模/回报/在管清单）/ 排行（姓名序） | eastmoney manager 页+dt=14 | 1·50/页 |
 | 本地 | `adjusted_nav(recs)` | 复权净值（分红再投口径，链式） | 零网络 | 0 |
 | 本地 | `fund_metrics(snap,s,e)` | 区间收益/年化/最大回撤/波动/夏普/卡玛/现申购费标注 | 零网络 | 0 |
@@ -422,6 +431,7 @@ REF.append(r"""## 端点路由速查（按需定位，不必通读）
 | P29 板块 BK 码空间 | BK 码不可凭记忆/类目外推：同码空间跨行业(t:2)/概念(t:3)（BK0477 实为酿酒概念、BK0475=银行Ⅱ 而非白酒）；clist fs 语法是冒号 `t:2` 非 `t=2`（后者 rc:102 参数错） | BENCH_SECID 行业段=clist t:2 快照 + kline name 双样本交叉验证；未命中走 `90.BKxxxx` secid 直传；概念板块不收录（归 a-stock-data 概念域） |
 | P30 新浪行情通道（V0.7.5） | hq.sinajs.cn 无 Referer 即拒（实测空响应）；高频爬虫有封禁前科；银行间信用债无公开实时端点（货币网现券板仅利率债活跃券） | `sina_quote` 内置 Referer + provider=sina 独立分账 120/300s·0.5s·单并发 + 403/429 计熔断 + 空体计信号；定位=腾讯互备低频兜底，银行间实时须 QB 等权限源 |
 | P31 申购限额唯一来源（V0.7.7） | E2/E3/E6 探针实测均无完整限额（E3 SGZT 仅「限大额」短文本无金额）——唯一来源是主页面 `{code}.html` 交易状态栏，且无批量接口（N 只 N 请求）；金额与「限大额」分属不同层级 text node（嵌套 span），简单 regex 必截断（000369 实测）；外币折算是静态近似汇率非实时牌价 | `fund_purchase_limit`：`_StaticCellParser` 嵌套感知全文拼接 + `parse_purchase_limit` 纯函数（kind 四态；限大额无金额诚实 limit_cny=None 不虚报 0）；已并入快照 `purchase_limit` 数据集（失败进 missing 不炸快照）；rankhandler ft=qdii 仅 363 只混合/股票类（联接/LOF 归「指数型-海外股票」不在内） |
+| P32 基金报告双通道（V0.7.8） | ①JJGG 必须带 fundf10 Referer——裸 UA 是 200+ErrCode-999+Data=""「假成功」；type=页面 tab（0 全部/1 发行运作/2 分红送配/3 定期报告/4 人事调整/5 基金销售/6 其他），部分基金加披 Q2/Q4 季报（交银趋势实测 6 期/年）②PDF 直链 `H2_{ID}_1.pdf` 的 _1 附件号不可省（少了拿到挑战壳）③pdf.dfcfw.com 腾讯 EdgeOne 反爬：200+Content-Type 伪装 pdf 但 body 是 988B 静态 `<script>` 挑战；巨潮 column=fund 仅上市基金，场外不在其体系 | `fund_reports`：Referer 必带+Data 非 list 显式报错+无 ID 行跳过+total>0 解析空拒绝；`fund_report_pdf`：_edgeone_solve node vm 沙箱（无 require/fs/net+timeout）解 `__tst_status`/`EO_Bot_Ssid` 重放一次，仍非 PDF/残包(<1KB)显式报错；挑战 cookie 进程级复用；dfcfw.com 归 eastmoney 线同账限流 |
 
 ## Prerequisites
 
@@ -461,6 +471,7 @@ REF.append("## 层 7 · 规模全历史（V0.6.2，F10 规模变动 gmbd 通道�
 REF.append(code(sections[next(k for k in sections if k.startswith("V0.6.2"))]))
 REF.append("## 层 7 · 费率全表（V0.7.0，F10 购买信息 jjfl 通道）\n")
 REF.append(code(sections[next(k for k in sections if k.startswith("V0.7.0"))]))
+REF.append(code(sections["V0.7.8 基金报告：f10/JJGG 清单（全类目）+ pdf.dfcfw.com PDF 直链（坑P32）"]))
 REF.append("## 层 8 · 基准指数层（V0.6.1，quant-excess 端点层收编：指数名查表 + 日线原语）\n")
 REF.append(code(sections[next(k for k in sections if k.startswith("V0.6.1"))]))
 
@@ -513,6 +524,8 @@ fund_scale("161725")                         # 单基金规模（ENDNAV 精确�
 bond_plus_profile("007300")                  # 固收+画像（仓位带/回撤带/利率标注）
 qdii_premium(["513100", "513500"])           # 场内溢价（净值滞后口径）
 fund_purchase_limit("513100")                # 申购限额（快照 purchase_limit 同源；无批量接口）
+fund_reports("交银趋势")                     # 定期报告清单（默认 periodic，1 请求当日缓存）
+fund_report_pdf(rp["reports"][0])            # 报告 PDF 下载（EdgeOne 自动解，返回本地路径）
 nav_divergence("161725")                     # 重仓探测（背离度→疑似调仓）
 fund_manager("161725")                       # 基金码→现任经理画像（在管清单）
 manager_rank(pages=1)                        # 经理排行 50 位（服务端仅姓名序）
@@ -529,7 +542,7 @@ thin_text = "\n".join(THIN)
 ref_text = "\n".join(REF)
 
 thin_bytes = len(thin_text.encode("utf-8"))
-assert thin_bytes < 13300, f"瘦 SKILL.md 超重 {thin_bytes}B（上限 13300）——把长内容移入 reference.md。"
+assert thin_bytes < 13400, f"瘦 SKILL.md 超重 {thin_bytes}B（上限 13400）——把长内容移入 reference.md。"
 # 上限 12000→13000（V0.6.2）：分发平台（workbuddy）必填市场元数据字段 display_name/description_zh/en
 # 约 +0.5KB，属接口非内容膨胀；正文纪律不变（description 已同步压缩）
 for n, _, _ in _sig_rows():                          # 签名覆盖：每个公开函数都在路由层
@@ -542,6 +555,9 @@ assert "def kline_daily(query: str" in ref_text                       # V0.6.1 �
 assert "def fund_scale_history(query: str" in ref_text                # V0.6.2 内嵌同源
 assert "def fund_fees(query: str" in ref_text                          # V0.7.0 内嵌同源
 assert "def fund_purchase_limit(query: str" in ref_text                # V0.7.7 内嵌同源
+assert "def fund_reports(query: str" in ref_text                       # V0.7.8 内嵌同源
+assert "def fund_report_pdf(report" in ref_text                        # V0.7.8 PDF 下载内嵌
+assert "def _edgeone_solve" in ref_text                               # EdgeOne 挑战求解内嵌
 assert "_push2_conn_file" in ref_text                                  # V0.7.1 连接级熔断内嵌
 assert "IP 缓释桶" in ref_text                                          # P26 修正定性入册
 assert 'rows.append({"date": p[0], "close": float(p[1]), "source": "push2his"})' in ref_text  # source 标注
@@ -555,7 +571,7 @@ assert all(p2 in ref_text for p2 in ("P22", "P23", "P24"))                     #
 examples_src = HERE / "examples.md"
 examples_text = examples_src.read_text(encoding="utf-8")
 assert "## 环境准备" in examples_text, "examples.md 缺「环境准备」章节"
-for _i in range(1, 13):                                # 逐场景断言：任一场景被删即拦住（锚点带" ·"防 1 被 10 子串掩盖）
+for _i in range(1, 14):                                # 逐场景断言：任一场景被删即拦住（锚点带" ·"防 1 被 10 子串掩盖）
     assert f"## 场景 {_i} ·" in examples_text, f"examples.md 缺「场景 {_i}」"
 assert "# FAQ" in examples_text, "examples.md 缺 FAQ 区"
 assert f"V{VERSION}" in examples_text, f"examples.md 版本号未对齐 V{VERSION}"
