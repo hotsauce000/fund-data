@@ -1,6 +1,6 @@
 # fund-data 复制即用示例（examples.md · 按需读取层）V0.8.1
 
-本文件解决两个问题：**「具体怎么调用」**（14 个高频场景菜谱，复制即跑）与
+本文件解决两个问题：**「具体怎么调用」**（15 个高频场景菜谱，复制即跑）与
 **「出问题了怎么办」**（FAQ 按现象直达解法）。每条菜谱 = 意图 + 完整代码 +
 预期输出形态 + 一行坑提醒。实现细节/坑区全档 → `reference.md`；
 场景路由总表 → `SKILL.md`。
@@ -256,6 +256,40 @@ pe_ttm}`；日期已按官方有效日期清单清洗，非交易日占位行不
 `all_indices=True`，单并发且可恢复；不要用价格指数静默替代失败的全收益数据。
 审计报告在 `~/.fund_data_cache/csindex/reports/`，同步清单在同目录
 `sync_manifest.json`。→ P33
+---
+
+## 场景 15 · 申万行业指数对标（官方估值 PE/PB/股息率 + 成分股）
+
+**意图**：行业基金对标要「申万官方口径 + 官方估值」，而不是东财 BK 板块近似
+（无估值、非申万编制）。
+
+```python
+import fund_data as fd
+
+# 一级行业官方清单（31 个，24h 缓存）
+sw = fd.sw_index_list("一级行业")
+print([x["index_name"] for x in sw if x["index_code"] in ("801030", "801780")])
+
+# 官方估值序列（PE/PB/股息率/流通市值，按年缓存，当日盘后 pending_today 标注）
+v = fd.sw_index_valuation("801030", "20240101")     # 基础化工 2024 至今
+print(v[-1]["date"], "PE", v[-1]["pe"], "PB", v[-1]["pb"], "股息率", v[-1]["dividend_yield"])
+
+# 指数日线全史（1999-12-30 起，6497 行一发，day/week/month 键隔离）
+d = fd.sw_index_daily("801010", period="week")      # 农林牧渔周线
+
+# 成分股（单发拿全，30 天缓存；801030 实测 413 只）
+c = fd.sw_index_components("801030")
+print(len(c), "只，前十权重和",
+      round(sum(x["weight"] for x in c[:10]), 2))
+```
+
+输出形态：清单/估值/日线/成分全部升序 `list[dict]`；估值行含
+`{date, close, pe, pb, dividend_yield, turnover_rate, float_mv, mean_price}`。
+坑提醒：**swsresearch.com 有 TLS 中间证书缺陷（P34）**——库内自组 CA bundle
+自动处理，报「证书校验失败」说明站点换签发者（更新库内 PEM 常量即可，勿自行
+`verify=False`）；估值当日盘后未发布走 `pending_today` 豁免不报错；pe 为 None
+是亏损期官方口径，不是缺数。→ P34
+
 
 ---
 

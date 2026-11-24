@@ -54,6 +54,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | 指数日线 | `kline_daily("沪深300")`（指数名/板块名/股票码） | 1（缓存0） |
 | 全收益指数 | `csindex_resolve_total_return`→`csindex_total_return_daily` | 冷启≤5/缓存0 |
 | 全收益批量同步 | `csindex_sync_total_return(codes=[...])`；全量须 `all_indices=True` | 显式任务 |
+| 申万行业指数 | `sw_index_list()` → `sw_index_valuation("801030")`（官方PE/PB/股息率）·`sw_index_daily`·`sw_index_components`；挂时行业对标退 `kline_daily` 东财口径 | 冷启≤4（估值≤2年窗）/缓存0；全史估值 ~12 发分页 |
 | 债基利率敏感度 | `cb_yield_curve` + `credit_spread` / `treasury_yield_daily` | 1~2 |
 | 重仓股深度 | `holding_map` → **a-stock-data skill** | 0 |
 
@@ -70,7 +71,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | cninfo 451/token null | enckey 时效**非风控**，刷新重试一次（P20） | 仍拒=时钟漂移 |
 | 403/429 | `RiskControlError` 上抛+熔断10min（不触发降级） | 冷却期零网络，等勿重试 |
 
-## 函数速查（57 个，构建时自动生成勿手改）
+## 函数速查（61 个，构建时自动生成勿手改）
 
 | 函数 | 说明 |
 |---|---|
@@ -131,6 +132,10 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | `csindex_resolve_total_return(index_code, force_refresh=False)` | 基础/全收益代码 → 官方映射；不猜代码，歧义与未知口 |
 | `csindex_total_return_daily(index_code, start_date='', end_date='', force_refresh=False)` | 官方人民币全收益指数日线；官方日期过滤、完整性和数值校 |
 | `csindex_sync_total_return(codes=None, all_indices=False, start_date='', end_date='', resume=True)` | 显式批量同步；风险/连续三次上游故障停止，单指数数据问 |
+| `sw_index_list(indextype='一级行业', force_refresh=False)` | 申万官方指数清单（indextype 白名单五类；翻页 |
+| `sw_index_daily(index_code, period='day', force_refresh=False)` | 申万指数日线全史（period=day/week/mo |
+| `sw_index_valuation(index_code, start_date='', end_date='', force_refresh=False)` | 申万官方估值序列（PE/PB/股息率/换手率/流通市值 |
+| `sw_index_components(index_code, force_refresh=False)` | 申万指数成分股（单发 page_size=10000； |
 
 ## When to Activate
 
@@ -138,7 +143,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 
 ## 深读与边界（按需）
 
-- 复制即用示例（14 场景菜谱）+ FAQ → 同目录 `examples.md`
-- 实现细节/坑区 P1~P33/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
+- 复制即用示例（15 场景菜谱）+ FAQ → 同目录 `examples.md`
+- 实现细节/坑区 P1~P34/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
 - 不覆盖：账户持仓/交易下单（ttskill）、盘中实时估值、货基万份收益、单基金行业史（E2停供）、语义选基、FOF底层明细与经理姓名索引（P23/P24）
 - 个股深度 → a-stock-data；holding_map() 是官方桥

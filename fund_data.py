@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-fund-data V0.8.1 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层 + 基金报告 + 中证全收益指数）
+fund-data V0.8.2 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层 + 基金报告 + 中证全收益指数 + 申万行业指数）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤3 请求（1×pingzhongdata + 0~1×lsjz + 0~1×主页面限额，V0.7.7 起快照含 purchase_limit）
@@ -44,6 +44,8 @@ import json
 import math
 import os
 import re
+import ssl
+import sys
 import time
 from html.parser import HTMLParser
 import random
@@ -62,7 +64,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 # ══════════════════════════════════════════════════════════════════
 # L1 前置层：限流入口 / 缓存目录 / 请求计数
@@ -95,7 +97,7 @@ _CBREAK_COOLDOWN = 600           # F2：熔断冷却 10 分钟
 _CBREAK_TRIP = 3                 # 连续 3 次风控信号触发熔断
 _cbreak_state = {"tt": [0, 0.0], "em": [0, 0.0], "cninfo": [0, 0.0],
                  "danjuan": [0, 0.0], "sina": [0, 0.0], "tencent": [0, 0.0],
-                 "cb": [0, 0.0], "csindex": [0, 0.0]}
+                 "cb": [0, 0.0], "csindex": [0, 0.0], "sws": [0, 0.0]}
 
 # Sprint 2/3：异常与缓存语义与 fund_data_core 统一（core 为硬依赖，与主模块同一套部署）。
 from fund_data_core import CachePolicy, CacheRepository, StaleDataError
@@ -122,7 +124,7 @@ _CACHE_REPO = None     # Sprint 3：CacheRepository（FUND_CACHE_DIR 即缓存�
 _CORE_LINE_PROVIDER = {"tt": "eastmoney", "em": "eastmoney", "cninfo": "cninfo",
                        "danjuan": "danjuan", "tencent": "tencent", "sina": "sina",
                        "chinabond": "chinabond", "cb": "chinabond",
-                       "csindex": "csindex"}
+                       "csindex": "csindex", "sws": "sws"}
 
 
 def _reset_request_coordination(clock=None, sleeper=None, policies=None):
@@ -169,6 +171,10 @@ def _reset_request_coordination(clock=None, sleeper=None, policies=None):
             open_seconds=_CBREAK_COOLDOWN),
         "csindex": ProviderPolicy(
             max_requests=120, window_seconds=300, min_interval=CSINDEX_MIN_INTERVAL,
+            max_in_flight=1, lease_seconds=180, circuit_threshold=_CBREAK_TRIP,
+            open_seconds=_CBREAK_COOLDOWN),
+        "sws": ProviderPolicy(
+            max_requests=120, window_seconds=300, min_interval=SWS_MIN_INTERVAL,
             max_in_flight=1, lease_seconds=180, circuit_threshold=_CBREAK_TRIP,
             open_seconds=_CBREAK_COOLDOWN),
     }
@@ -298,7 +304,7 @@ def _line_label(line: str) -> str:
     """熔断文案按实际 provider 标注，避免跨域备胎误报为东财。"""
     return {"cninfo": "巨潮", "danjuan": "蛋卷", "sina": "新浪",
             "tencent": "腾讯", "chinabond": "中债", "cb": "中债",
-            "csindex": "中证指数"}.get(line, "东财")
+            "csindex": "中证指数", "sws": "申万指数"}.get(line, "东财")
 
 
 def _cbreak_check(line: str):
@@ -5082,6 +5088,572 @@ def csindex_sync_total_return(codes=None, all_indices: bool = False,
     summary["manifest"] = rel
     summary["jobs"] = [jobs[code] for code in selected if code in jobs]
     return summary
+
+
+
+
+# ══════════════════════════════════════════════════════════════════
+# V0.8.2 申万行业指数层：官方清单 / 日线全史 / 官方估值 / 成分股（sws 线）
+# ══════════════════════════════════════════════════════════════════
+# 数据源：申万宏源研究官网 www.swsresearch.com/institute-sw/api/（第一手，
+# P34：该站负载均衡部分节点漏发中间证书，见 _sws_ca_bundle 的自组 bundle 方案，
+# 绝不 verify=False）。AkShare 的乐咕聚合通道（token 反爬）不采用。
+# 探针实锚（2026-11-24，sws 线预算 ≤9 发实花 4 发）：
+#   · 估值报表 {"code":"200","message":"ok","data":{count,next,previous,results}}
+#   · 估值回溯至 2003-01-02（更早无数据）；单码查询 swindexcode=801180 支持
+#   · page_size=300 一页装下全年 242 行（翻页省请求）；行值多为字符串须 float 化
+#   · trend 一发全史（801010 共 6497 行，最早 1999-12-30，基期 1000）；无日期参数
+#   · markup=涨跌幅%（hike=涨跌点）→ change_pct 取 markup；成分 413 只单发拿全
+#   · 流通市值 negotiablessharesum1 单位=亿元
+
+SWS_MIN_INTERVAL = 1.0
+SWS_BASE = "https://www.swsresearch.com/institute-sw/api"
+SWS_SESSION = requests.Session()
+SWS_SESSION.trust_env = False
+SWS_SESSION.headers.update({"User-Agent": UA,
+                            "Referer": "https://www.swsresearch.com/"})
+SWS_REQUEST_COUNT = [0]
+_SWS_CODE_RE = re.compile(r"\d{6}")
+_SWS_INDEX_TYPES = ("市场表征", "一级行业", "二级行业", "风格指数")
+# GET 轨四类（实测 9/31/124/16）；「大类风格指数」「金创指数」上游走另一 POST
+# 接口（AkShare __index_realtime_sw 形态）——GET current/ 对金创返回空（烟测
+# 实证 fail-loud 触发），归 backlog 不在 GET 白名单冒充
+_SWS_VALUATION_EPOCH = "2003-01-01"              # 估值报表最早可用日（探针实锚）
+# P34：GeoTrust G2 TLS CN RSA4096 SHA256 2022 CA1 中间证书（公共 CA 证书，
+# DigiCert AIA 分发 cacerts.digicert.cn，有效期 2022-12-15 ~ 2032-12-14，
+# 签发者根 DigiCert Global Root G2 已在系统信任库）。站点服务器漏发此级，
+# 浏览器可 AIA 自动补抓而 requests/curl 不会——自组 bundle 保持完整链校验。
+# 站点若换签发者：本常量失效 → SSLCertVerificationError 显式报错（fail-loud，
+# 不计熔断），更新此 PEM 即恢复。
+_SWS_EXTRA_CERT_PEM = (
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIIFxjCCBK6gAwIBAgIQDwa7CTBhSCZ/yhtxwduAfTANBgkqhkiG9w0BAQsFADBh\n"
+    "MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3\n"
+    "d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBH\n"
+    "MjAeFw0yMjEyMTUwMDAwMDBaFw0zMjEyMTQyMzU5NTlaMFsxCzAJBgNVBAYTAlVT\n"
+    "MRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjEzMDEGA1UEAxMqR2VvVHJ1c3QgRzIg\n"
+    "VExTIENOIFJTQTQwOTYgU0hBMjU2IDIwMjIgQ0ExMIICIjANBgkqhkiG9w0BAQEF\n"
+    "AAOCAg8AMIICCgKCAgEAn1dxOo4OzYa4O1EJd0nhFI5QB/kXAJTHRI6C1J2Gz86B\n"
+    "Ge9+DD8R4vexG7/QnUvV+5887o+G4enlkDwJV1Pehq4i0n+X6VKIPg5cThCx6/o0\n"
+    "3bUkLWld7slhi3Hli/MaosZZuytdU1uCzQlGpaLB2TiTZbDImiVaykdfwl8V6AXP\n"
+    "0Ab4wIcvPggl4qlwyPsBY6NODbP884BmL1ntdXfzecGst30FnAtm4w+PTo0I1T3F\n"
+    "ITYXaNuIJnKonD1xXaN4Ar/rvcpKpntxVyZQ2T1Lb7vlfYISqNF+1ugpTzKnI1z7\n"
+    "xV7tSqXd2vs6Csy6yFN+QLWwMnGWuQkvrO1m+F7V85S9ECpbqn9qNtKl8gIQ7JeZ\n"
+    "BmBdLroW+4j1PDzBWmSWKB+gvRubVSTuoDR3VCtlI4G/Uh+ObF4UStbhKjr1SNCW\n"
+    "JcrB1oF+wWBl8Bvozm4xflyyGDY47KCP/Fn9X5GHDNLQA9R0zqDKRumipp1UXswF\n"
+    "uzH0I+gOuqSdZSsYID9XSVq6adcJ3rIMAcTuODcrPrJssOFKGFUbmY/VxbxMgYHI\n"
+    "/07Zfdxoa+q0osWpofbMhLPZz9UuJFBCLsjgSckkSU02/4itmLm9e3lt6E/4q9Mc\n"
+    "MCaS8+qrLWKG9wQtviC8zGynEXpxjEQE8WyrfeYKyXwZFCPB4rpTw1joJmGFeLUC\n"
+    "AwEAAaOCAX4wggF6MBIGA1UdEwEB/wQIMAYBAf8CAQAwHQYDVR0OBBYEFEFOjmmd\n"
+    "9G4l7HgUHH7XzR2Zz/lrMB8GA1UdIwQYMBaAFE4iVCAYlebjbuYP+vq5Eu0GF485\n"
+    "MA4GA1UdDwEB/wQEAwIBhjAdBgNVHSUEFjAUBggrBgEFBQcDAQYIKwYBBQUHAwIw\n"
+    "dAYIKwYBBQUHAQEEaDBmMCMGCCsGAQUFBzABhhdodHRwOi8vb2NzcC5kaWdpY2Vy\n"
+    "dC5jbjA/BggrBgEFBQcwAoYzaHR0cDovL2NhY2VydHMuZGlnaWNlcnQuY24vRGln\n"
+    "aUNlcnRHbG9iYWxSb290RzIuY3J0MEAGA1UdHwQ5MDcwNaAzoDGGL2h0dHA6Ly9j\n"
+    "cmwuZGlnaWNlcnQuY24vRGlnaUNlcnRHbG9iYWxSb290RzIuY3JsMD0GA1UdIAQ2\n"
+    "MDQwCwYJYIZIAYb9bAIBMAcGBWeBDAEBMAgGBmeBDAECATAIBgZngQwBAgIwCAYG\n"
+    "Z4EMAQIDMA0GCSqGSIb3DQEBCwUAA4IBAQAkpDVI+nCKnAEEpDfldytHXUYOr2ys\n"
+    "aGeboE3d1KAN4Gt+eioRvgNdmDKbVFCYY0C6ErIXIvSGXafsprU2dclka/kmH+9U\n"
+    "4q3v5Acx6KwcnEuYLN0QOtrlQ9s3Z4IbIzdYUv8IauXC27a3x99x2WMVxNu1KGJy\n"
+    "0r1Z+Xya1adf9/e1LFj1CGdq9HfQ/HFWP2khzxQZ4u62sOHuZdPgtNidFOhQLC+2\n"
+    "5cNsPgqsaCrGLbSjzni7VN7NhAbTsLhA1oz41vHHB+q4ZzNlC01elmPBOtupe2HM\n"
+    "/lqMA/J/nTxc718THdxpszFllAET1/lFEolnqihpUFPaPjRwU7yZIseS\n"
+    "-----END CERTIFICATE-----\n"
+)
+def _sws_extra_cert_info() -> str:
+    """内置中间证书摘要（与 _SWS_EXTRA_CERT_PEM 一并维护——站点换签发者时同步更新）。"""
+    return ("GeoTrust G2 TLS CN RSA4096 SHA256 2022 CA1 / issuer=DigiCert Global Root G2 / "
+            "notBefore=2022-12-15 / notAfter=2032-12-14 / AIA cacerts.digicert.cn")
+
+
+_sws_ca_bundle_cache: list = []                  # 惰性单例（路径），FUND_CACHE_DIR 重定向后重建
+
+
+def _sws_ca_bundle() -> str:
+    """certifi 根库 + 申万站缺失的中间证书拼自组 bundle（完整链校验，绝不 verify=False）。
+
+    bundle 落缓存目录（与缓存同生命周期）；FUND_CACHE_DIR 被测试重定向后按新目录
+    重建（探测：路径变化即重写，不做内容探测——EXTRA_CERT 常量变更由版本升级
+    触发全量失效）。"""
+    import certifi
+    path = FUND_CACHE_DIR / ".sws_ca_bundle.pem"
+    if (_sws_ca_bundle_cache and str(_sws_ca_bundle_cache[0]) == str(path)
+            and path.exists()):
+        return str(path)
+    path.parent.mkdir(parents=True, exist_ok=True)  # 全新环境缓存目录不存在（P1：import 即崩实测复现）
+    base = Path(certifi.where()).read_text(encoding="utf-8")
+    path.write_text(base + "\n" + _SWS_EXTRA_CERT_PEM, encoding="utf-8")
+    _sws_ca_bundle_cache[:] = [path]
+    return str(path)
+
+
+SWS_SESSION.verify = _sws_ca_bundle()              # 模块级初始化（P34）；_sws_request 每请求刷新
+                                                   # （FUND_CACHE_DIR 测试重定向后自动重建）
+
+
+def _sws_code(value) -> str:
+    code = str(value or "").strip()
+    if not _SWS_CODE_RE.fullmatch(code):
+        raise ValueError(f"申万指数代码须为 6 位数字（如 801010），收到 {value!r}")
+    return code
+
+
+def _sws_hit(url: str):
+    SWS_REQUEST_COUNT[0] += 1
+
+
+def _sws_conn_file() -> Path:
+    return FUND_CACHE_DIR / ".cbreak_swconn"
+
+
+_sws_conn_fails = [0]
+
+
+def _sws_conn_check():
+    """申万连接级熔断检查（P26 同款：RST/超时无状态码，F2 看不见）。
+
+    证书校验失败（SSLCertVerificationError）不计入——证书问题≠IP 封锁，
+    停机只会白白冻结通道；provider 级 gateway record_failure 照常计数作为
+    证书风暴的兜底背板（有意接受，V0.8.2 审查钉死口径）。"""
+    f = _sws_conn_file()
+    if f.exists():
+        try:
+            until = float((f.read_text().split() or ["0"])[0])
+        except (ValueError, OSError):
+            until = 0.0
+        if until > time.time():
+            remain = int(until - time.time())
+            raise RuntimeError(
+                f"申万通道连接级熔断中（疑似 IP 级封锁/持续 RST，已自动停机保护），剩 {remain}s。"
+                "停机期零网络——指数日线可用东财 kline 备胎口径过渡；继续请求只会延长封锁。")
+        f.unlink(missing_ok=True)
+        _sws_conn_fails[0] = 0
+
+
+def _sws_conn_fail(why: str):
+    _sws_conn_fails[0] += 1
+    if _sws_conn_fails[0] >= 2:
+        try:
+            _sws_conn_file().parent.mkdir(parents=True, exist_ok=True)
+            _sws_conn_file().write_text(f"{time.time() + _SINACONN_COOLDOWN:.0f} {why}")
+        except OSError:
+            pass
+        _sws_conn_fails[0] = 0
+
+
+def _sws_request(path: str, params: Optional[dict] = None, timeout: int = 30):
+    """申万官网统一请求：独立配额/熔断/账本；业务 code≠200 → UpstreamRequestError。
+
+    teardown 模式 fail-closed（csindex 同款）；证书校验失败显式报错不计连接级
+    熔断（P34）；其余传输失败计连接级熔断 2 连败停 1h；403/429 风控分流（F6）。"""
+    url = SWS_BASE + path
+    headers = {"Referer": "https://www.swsresearch.com/"}
+    _sws_conn_check()
+    SWS_SESSION.verify = _sws_ca_bundle()          # 每请求刷新（FUND_CACHE_DIR 可被测试重定向）
+    if _REQUEST_GATEWAY is not None:
+        session = _SessionAdapter(SWS_SESSION, _sws_hit)
+        try:
+            resp = _REQUEST_GATEWAY.get(url, params=params, headers=headers,
+                                        timeout=timeout, retries=1, retry_statuses=(),
+                                        session=session)
+        except requests.exceptions.SSLError as e:
+            cause = e.__cause__
+            if isinstance(cause, ssl.SSLCertVerificationError) or \
+                    "CERTIFICATE_VERIFY_FAILED" in str(cause or e):
+                # 证书问题≠封锁：不计连接级熔断（fail-loud 显式指引）；provider 级
+                # record_failure 已在 gateway 内照计（兜底背板）
+                raise RuntimeError(
+                    "申万官网证书校验失败——服务器漏发中间证书且自组 CA bundle 未覆盖"
+                    "（站点换签发者？）→ 更新 fund_data._SWS_EXTRA_CERT_PEM（P34）。"
+                    "本错误不计入熔断。") from e
+            _sws_conn_fail(f"sws-conn-ssl-{type(cause).__name__ if cause else 'SSL'}")
+            raise                                  # 非证书类 SSL 错：连接级失败
+        except requests.exceptions.RequestException as e:
+            _sws_conn_fail(f"sws-conn-{type(e.__cause__).__name__ if e.__cause__ else type(e).__name__}")
+            raise                                  # RST/超时/拒连：P26 同款 2 连败停 1h
+        _release_pending(resp, "sws-passthrough")
+    else:
+        raise RuntimeError(
+            "申万请求禁止 legacy/teardown 直连：跨进程滑窗、单并发和共享风控必须保持激活；"
+            "请恢复 _reset_request_coordination() 后重试")
+    assert_not_risk_control(resp, "sws", path)
+    resp.raise_for_status()
+    text = resp.content.decode("utf-8", errors="replace")
+    _assert_not_risk_content(text, "sws", path)
+    try:
+        body = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise UpstreamRequestError(f"申万响应非 JSON（{path}）: {text[:100]!r}") from e
+    if not isinstance(body, dict) or str(body.get("code")) != "200":
+        raise UpstreamRequestError(
+            f"申万业务失败（{path}，code={body.get('code') if isinstance(body, dict) else None}，"
+            f"msg={body.get('message') if isinstance(body, dict) else None}）")
+    _cbreak_success("sws")
+    return body
+
+
+def _sws_date(value, field: str = "date") -> str:
+    """上游日期统一 ISO 化：兼容 1999-12-30 / 2003-01-10T08:00:00+08:00 / 20030110。"""
+    text = str(value or "").strip()[:10]
+    try:
+        if re.fullmatch(r"\d{8}", text):
+            return datetime.strptime(text, "%Y%m%d").date().isoformat()
+        return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+    except ValueError as e:
+        raise UpstreamFormatError(f"申万{field}须为日期形态，收到 {value!r}") from e
+
+
+def _sws_float(value):
+    """上游数值多为字符串（探针实锤）——float 化，空/非法→None（不拒绝，由各守卫裁决）。"""
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def sw_index_list(indextype: str = "一级行业", force_refresh: bool = False) -> list[dict]:
+    """申万官方指数清单（indextype 白名单五类；翻页拉全；24h 缓存）。
+
+    返回 [{index_code, index_name, prev_close, open, latest, high, low,
+    volume, amount}]；上游实为六类，「大类风格指数」走另一 POST 接口（本期
+    GET 轨不覆盖）。一级行业锚：实收 ≥31 且含 801010（探针实值）。"""
+    if indextype not in _SWS_INDEX_TYPES:
+        raise ValueError(f"indextype 须为 {_SWS_INDEX_TYPES} 之一，收到 {indextype!r}")
+    rel = f"sws/index_list_{indextype}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=24)
+        if cached is not None:
+            return cached
+    rows, page, received = [], 1, 0
+    while True:
+        body = _sws_request("/index_publish/current/", params={
+            "page": page, "page_size": 200, "indextype": indextype})
+        data = body.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            raise UpstreamFormatError(f"申万清单响应缺 data/results（{indextype}）")
+        results = data["results"]
+        if not results and page == 1:
+            raise UpstreamFormatError(f"申万清单空返回（{indextype}）——上游改版或软封嫌疑")
+        for item in results:
+            code = str(item.get("swindexcode") or "").strip()
+            name = str(item.get("swindexname") or "").strip()
+            if not _SWS_CODE_RE.fullmatch(code) or not name:
+                raise UpstreamFormatError(f"申万清单行结构异常：{item!r:.120}")
+            rows.append({
+                "index_code": code, "index_name": name,
+                "prev_close": _sws_float(item.get("l3")),
+                "open": _sws_float(item.get("l4")),
+                "amount": _sws_float(item.get("l5")),
+                "high": _sws_float(item.get("l6")),
+                "low": _sws_float(item.get("l7")),
+                "latest": _sws_float(item.get("l8")),
+                "volume": _sws_float(item.get("l11")),
+            })
+        received += len(results)
+        if received >= int(data.get("count") or 0) or not results:
+            break
+        page += 1
+        if page > 20:                              # 防御：count 漂移防死循环
+            raise UpstreamFormatError(f"申万清单翻页超限（{indextype}，count={data.get('count')}）")
+    total = int((body.get("data") or {}).get("count") or 0)
+    if total and len(rows) != total:
+        raise UpstreamFormatError(f"申万清单不完整：count={total}，实收={len(rows)}")
+    if indextype == "一级行业" and (len(rows) < 31
+                                    or "801010" not in {x["index_code"] for x in rows}):
+        raise UpstreamFormatError(f"申万一级行业清单异常：实收 {len(rows)} 行（锚 ≥31 且含 801010）")
+    _cache_write(rel, rows)
+    return rows
+
+
+def _sws_year_rows(rel_prefix: str, code: str, current_year: int,
+                   stale_current: Optional[list] = None) -> tuple[list, bool]:
+    """按年缓存拼接通用段：历史年永久缓存、当前年 20h TTL；返回 (拼接行, 是否完整)。"""
+    import glob as _glob
+    combined, complete, years = [], True, []
+    for path in sorted(_glob.glob(str(FUND_CACHE_DIR / f"{rel_prefix}_*.json"))):
+        stem = Path(path).stem
+        try:
+            years.append(int(stem.rsplit("_", 1)[-1]))
+        except ValueError:
+            continue                               # 非年文件（防御）
+    if not years:
+        return [], False
+    for year in years:
+        rel = f"{rel_prefix}_{year}.json"
+        cached = _cache_read(rel, max_age_hours=20 if year == current_year else None)
+        if cached is None and year == current_year:
+            cached = stale_current                 # 过期但结构有效 → 增量种子
+        if cached is None:
+            complete = False
+            break
+        combined.extend(cached)
+    return combined, complete
+
+
+def _sws_cache_valid(rows, code: str, date_key: str = "date") -> bool:
+    """sws 年缓存结构校验：行 dict/代码匹配/日期合法升序唯一/数值有限（bool 排除）。"""
+    if not isinstance(rows, list) or not rows:
+        return False
+    dates = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("index_code") != code:
+            return False
+        day = row.get(date_key)
+        if not isinstance(day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            return False
+        try:
+            datetime.strptime(day, "%Y-%m-%d")
+        except ValueError:
+            return False
+        close = row.get("close")
+        if isinstance(close, bool) or not isinstance(close, (int, float)) \
+                or not math.isfinite(close) or close <= 0:
+            return False
+        dates.append(day)
+    return dates == sorted(dates) and len(set(dates)) == len(dates)
+
+
+def sw_index_daily(index_code, period: str = "day",
+                   force_refresh: bool = False) -> list[dict]:
+    """申万指数日线全史（period=day/week/month；trend 一发全史，按年切片缓存）。
+
+    返回 [{date, open, high, low, close, volume, amount, change_pct}] 升序；
+    close 与 change_pct 勾稽 ±0.5% 警告（markup 口径未深探，先宽后紧，探针⑦锚）。
+    当前年盘后发布：末行日期<今天 → 当年缓存 mtime 回拨 18h（≈2h 后过期增量），
+    全史重发即可自然补当日行（trend 无日期参数，重发=全量一发）。
+    已知局限：缓存完整性按现存年文件盘点——历史年文件被手工删除会静默短史
+    （trend 每次全史落盘、重发一发即自愈；valuation 层已加请求年份对账）。"""
+    code = _sws_code(index_code)
+    if period not in ("day", "week", "month"):
+        raise ValueError(f"period 须为 day/week/month，收到 {period!r}")
+    today = datetime.now(_BJ_TZ).date().isoformat()
+    current_year = int(today[:4])
+    rel_prefix = f"sws/daily/{code}_{period}"
+
+    if not force_refresh:
+        combined, complete = _sws_year_rows(rel_prefix, code, current_year)
+        if complete and combined:
+            return combined
+        # 当前年过期/缺失（complete=False）→ trend 一发全史重拉覆盖（无日期参数，
+        # 增量无收益；mtime 回拨保证盘后 2h 内触发补当日行）
+    body = _sws_request("/index_publish/trend/",
+                        params={"swindexcode": code, "period": period.upper()},
+                        timeout=60)
+    raw = body.get("data")
+    if not isinstance(raw, list) or not raw:
+        raise UpstreamFormatError(f"申万日线空返回（{code} {period}）——上游改版或软封嫌疑")
+    rows, warnings = [], []
+    for item in raw:
+        day = _sws_date(item.get("bargaindate"), "bargaindate")
+        close = _sws_float(item.get("closeindex"))
+        if close is None or close <= 0:
+            raise UpstreamFormatError(f"申万日线收盘非法（{code} {day}: {close}）")
+        open_ = _sws_float(item.get("openindex"))
+        rows.append({
+            "index_code": code, "date": day,
+            "open": open_, "high": _sws_float(item.get("maxindex")),
+            "low": _sws_float(item.get("minindex")), "close": close,
+            "volume": _sws_float(item.get("bargainamount")),
+            "amount": _sws_float(item.get("bargainsum")),
+            "change_pct": _sws_float(item.get("markup")),
+        })
+        prev = rows[-2]["close"] if len(rows) >= 2 else None
+        pct = rows[-1]["change_pct"]
+        if prev and pct is not None and abs((close / prev - 1) * 100 - pct) > 0.5:
+            warnings.append(f"{day}:change_pct")
+    dates = [x["date"] for x in rows]
+    if dates != sorted(dates) or len(set(dates)) != len(dates):
+        raise UpstreamFormatError(f"申万日线日期非升序或重复（{code}）")
+    _cache_write(f"sws/reports/{code}_{period}_latest.json",
+                 {"index_code": code, "period": period, "rows": len(rows),
+                   "numeric_warnings": sorted(set(warnings)),
+                   "first_date": rows[0]["date"], "last_date": rows[-1]["date"],
+                   "fetched_at": datetime.now(_BJ_TZ).isoformat()})
+    by_year = defaultdict(list)
+    for row in rows:
+        by_year[int(row["date"][:4])].append(row)
+    for year, year_rows in by_year.items():
+        _cache_write(f"{rel_prefix}_{year}.json", year_rows)
+    if rows[-1]["date"] < today:                   # 盘后未发布：当年 mtime 回拨 18h
+        current_path = FUND_CACHE_DIR / f"{rel_prefix}_{current_year}.json"
+        if current_year in by_year and current_path.exists():
+            back = time.time() - 18 * 3600
+            os.utime(current_path, (back, back))
+    return rows
+
+
+def sw_index_valuation(index_code, start_date: str = "", end_date: str = "",
+                       force_refresh: bool = False) -> list[dict]:
+    """申万官方估值序列（PE/PB/股息率/换手率/流通市值；行业基金对标核心增量）。
+
+    返回 [{date, close, pe, pb, dividend_yield, turnover_rate, float_mv,
+    mean_price}] 升序；pe 允许 None（亏损期口径，探针未采到负样本，负值合法
+    不拒——守卫只拒 |pe|≥2000 的脏值）；pb 须 (0,500)；股息率 [0,30)。
+    float_mv=negotiablessharesum1（单位亿元，探针实锚）。当日估值盘后发布：
+    end=今天且缺行 → 不计缺失、pending_today 写入 sws/reports/ 缓存文件（同
+    csindex 口径）；当年末行<今天 → mtime 回拨 18h。"""
+    code = _sws_code(index_code)
+    today = datetime.now(_BJ_TZ).date().isoformat()
+    start = _sws_date(start_date, "start_date") if start_date else _SWS_VALUATION_EPOCH
+    end = _sws_date(end_date, "end_date") if end_date else today
+    if end > today:
+        raise ValueError(f"end_date 不可超过今天 {today}，收到 {end}")
+    if start > end:
+        raise ValueError(f"start_date {start} 晚于 end_date {end}")
+    current_year = int(today[:4])
+    rel_prefix = f"sws/valuation/{code}"
+
+    stale_current, combined = None, []
+    if not force_refresh:
+        rel_current = f"{rel_prefix}_{current_year}.json"
+        cached_current = _cache_read(rel_current, max_age_hours=20)
+        if cached_current is not None and _sws_cache_valid(cached_current, code):
+            stale_current = None                   # 新鲜：直接返回缓存，不做增量
+        else:
+            stale = _cache_read(rel_current, max_age_hours=None)
+            if _sws_cache_valid(stale, code):
+                stale_current = stale              # 仅过期缓存作增量种子
+
+    def _parse(raw):
+        rows, seen = [], set()
+        for item in raw:
+            day = _sws_date(item.get("bargaindate"), "bargaindate")
+            if day in seen:
+                raise UpstreamFormatError(f"申万估值重复日期（{code} {day}）")
+            seen.add(day)
+            close = _sws_float(item.get("closeindex"))
+            if close is None or close <= 0:
+                raise UpstreamFormatError(f"申万估值收盘非法（{code} {day}: {close}）")
+            pe, pb, dp = (_sws_float(item.get("pe")),
+                          _sws_float(item.get("pb")), _sws_float(item.get("dp")))
+            if pe is not None and abs(pe) >= 2000:
+                raise UpstreamFormatError(f"申万估值 PE 越界（{code} {day}: {pe}）")
+            if pb is not None and not 0 < pb < 500:
+                raise UpstreamFormatError(f"申万估值 PB 越界（{code} {day}: {pb}）")
+            if dp is not None and not 0 <= dp < 30:
+                raise UpstreamFormatError(f"申万估值股息率越界（{code} {day}: {dp}）")
+            rows.append({
+                "index_code": code, "date": day, "close": close,
+                "pe": pe, "pb": pb, "dividend_yield": dp,
+                "turnover_rate": _sws_float(item.get("turnoverrate")),
+                "float_mv": _sws_float(item.get("negotiablessharesum1")),
+                "mean_price": _sws_float(item.get("meanprice")),
+            })
+        # 上游按日期降序返回（探针⑥a：单页首行=区间最新日）——排序后再校验
+        rows.sort(key=lambda x: x["date"])   # 上游降序返回（探针⑥a）——排正后查重
+        if len({x["date"] for x in rows}) != len(rows):
+            raise UpstreamFormatError(f"申万估值日期重复（{code}）")
+        return rows
+
+    need_fetch, fetch_start = True, None
+    if not force_refresh:
+        combined, complete = _sws_year_rows(rel_prefix, code, current_year,
+                                            stale_current or [])
+        # P1（审查实测复现）：complete 只盘点磁盘现存年——请求了未缓存年份
+        # （如先查 2025 再查 2024、或默认全史）会静默返回空/短史。complete
+        # 须对照请求区间年份集合，缺年显式取数（绝不静默空）
+        want_years = set(range(int(start[:4]), int(min(end, today)[:4]) + 1))
+        have_years = {int(x["date"][:4]) for x in combined}
+        if complete and not want_years.issubset(have_years):
+            complete = False
+            fetch_start = f"{min(want_years - have_years)}-01-01"
+        if complete:
+            if stale_current is None:
+                return [x for x in combined if start <= x["date"] <= end]
+            # 当前年过期：增量从末行起（重叠一天，合并以新覆旧）
+            last = max(stale_current, key=lambda x: x["date"])["date"]
+            need_fetch, fetch_start = True, last
+        elif fetch_start is None:
+            fetch_start = f"{min(want_years)}-01-01"
+    effective_start = fetch_start or start
+    raw_all, page = [], 1
+    while True:
+        body = _sws_request("/index_analysis/index_analysis_report/", params={
+            "page": page, "page_size": 500, "index_type": "一级行业",
+            # 上游要 ISO 带横线格式（YYYY-MM-DD）——探针⑥实证（紧凑 YYYYMMDD
+            # HTTP 500 首版烟测实锤）；page_size=500 在线全量 507 实证可用
+            # （探针⑥单锚 300 一页装下全年 242 行）
+            "start_date": effective_start,
+            "end_date": today, "type": "DAY",
+            "swindexcode": code}, timeout=60)
+        data = body.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            raise UpstreamFormatError(f"申万估值响应缺 data/results（{code}）")
+        raw_all.extend(data["results"])
+        total = int(data.get("count") or 0)
+        if not data["results"] or (total and len(raw_all) >= total):
+            break
+        page += 1
+        if page > 100:
+            raise UpstreamFormatError(f"申万估值翻页超限（{code}）")
+    # P2：终局 count 对账（防 count 缺失时半截史静默入库——清单层同款）
+    total = int((body.get("data") or {}).get("count") or 0)
+    if total and len(raw_all) != total:
+        raise UpstreamFormatError(f"申万估值不完整：count={total}，实收={len(raw_all)}")
+    fresh = _parse(raw_all)
+    pending_today = None
+    if end == today and (not fresh or fresh[-1]["date"] < today):
+        pending_today = today                  # 当日盘后未发布：豁免不拒
+    merged = {x["date"]: x for x in combined}  # 全史拼段为基座（防历史年丢失）
+    for x in fresh:                            # 新覆旧（重叠段）
+        merged[x["date"]] = x
+    rows = [merged[d] for d in sorted(merged)]
+    report = {"index_code": code, "rows": len(rows),
+               "missing_dates": [], "pending_today": pending_today,
+               "fetched_at": datetime.now(_BJ_TZ).isoformat()}
+    by_year = defaultdict(list)
+    for row in rows:
+        by_year[int(row["date"][:4])].append(row)
+    for year, year_rows in by_year.items():
+        _cache_write(f"{rel_prefix}_{year}.json", year_rows)
+    _cache_write(f"sws/reports/{code}_val_latest.json", report)
+    if pending_today and current_year in by_year:
+        current_path = FUND_CACHE_DIR / f"{rel_prefix}_{current_year}.json"
+        if current_path.exists():
+            back = time.time() - 18 * 3600
+            os.utime(current_path, (back, back))
+    return [x for x in rows if start <= x["date"] <= end]
+
+
+def sw_index_components(index_code, force_refresh: bool = False) -> list[dict]:
+    """申万指数成分股（单发 page_size=10000；季频数据 30 天缓存）。
+
+    返回 [{stock_code, stock_name, weight, since}]（weight %；since=计入日期）。
+    空成分显式报错不静默空；权重和 ∉[95,105] → stderr 警告不拒绝（申万含
+    长尾低权重股，历史上曾个别缺行）。"""
+    code = _sws_code(index_code)
+    rel = f"sws/components/{code}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=24 * 30)
+        if cached is not None:
+            return cached
+    body = _sws_request("/index_publish/details/component_stocks/",
+                        params={"swindexcode": code, "page": 1, "page_size": 10000})
+    data = body.get("data")
+    results = (data or {}).get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list) or not results:
+        raise UpstreamFormatError(f"申万成分空返回（{code}）——指数无公开成分或上游改版")
+    rows = []
+    for item in results:
+        stock = str(item.get("stockcode") or "").strip()
+        if not stock:
+            continue
+        rows.append({
+            "index_code": code, "stock_code": stock,
+            "stock_name": str(item.get("stockname") or "").strip(),
+            "weight": _sws_float(item.get("newweight")),
+            "since": _sws_date(item.get("beginningdate"), "beginningdate")
+            if item.get("beginningdate") else None,
+        })
+    weight_sum = sum(x["weight"] or 0 for x in rows)
+    if not 95 <= weight_sum <= 105:
+        print(f"[fund_data] 警告：申万成分 {code} 权重和 {weight_sum:.2f}%"
+              " ∉[95,105]（长尾缺行嫌疑），数据照常返回", file=sys.stderr)
+    _cache_write(rel, rows)
+    return rows
 
 
 # ── Sprint 2 默认激活：跨进程请求协调（真实时钟；测试可随时重建）────────

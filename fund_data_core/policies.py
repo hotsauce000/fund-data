@@ -49,6 +49,12 @@ DEFAULT_POLICIES = {
     # 请求进行中第二进程穿透并发约束
     "csindex": ProviderPolicy(max_requests=120, min_interval=1.0, max_in_flight=1,
                               lease_seconds=180),
+    # 申万宏源研究官网（V0.8.2 行业指数层）：与主模块 _reset_request_coordination
+    # 的 replace 覆盖值逐字段一致（120/300s·1.0s·单并发，测试双向锁）。lease 180s
+    # 同 csindex——trend 全史/估值大区间响应体大 timeout=60，短租约会让慢请求
+    # 进行中第二进程穿透单并发
+    "sws": ProviderPolicy(max_requests=120, min_interval=1.0, max_in_flight=1,
+                          lease_seconds=180),
 }
 
 _PROVIDER_ALIASES = {
@@ -57,6 +63,7 @@ _PROVIDER_ALIASES = {
     "cninfo": "cninfo", "chinabond": "chinabond", "cb": "chinabond",
     "danjuan": "danjuan", "dj": "danjuan", "tencent": "tencent", "tx": "tencent",
     "sina": "sina", "sinahq": "sina", "csindex": "csindex", "csi": "csindex",
+    "sws": "sws", "swindex": "sws",
 }
 
 _HOST_PROVIDERS = {
@@ -70,6 +77,8 @@ _HOST_PROVIDERS = {
     "sinajs.cn": "sina",
     "sina.com.cn": "sina",
     "csindex.com.cn": "csindex",
+    # swsresearch.com 是申万宏源研究官网（V0.8.2 行业指数层第一手源）
+    "swsresearch.com": "sws",
     # dfcfw.com 是东方财富自有 CDN 域（pdf.=基金报告 PDF，j5.=静态 JS）——
     # V0.7.8 起 pdf.dfcfw.com 承载报告直链，归入 eastmoney 线同账限流
     "dfcfw.com": "eastmoney",

@@ -146,6 +146,7 @@ THIN.append("""## 场景路由（我想做 X → 调什么）
 | 指数日线 | `kline_daily("沪深300")`（指数名/板块名/股票码） | 1（缓存0） |
 | 全收益指数 | `csindex_resolve_total_return`→`csindex_total_return_daily` | 冷启≤5/缓存0 |
 | 全收益批量同步 | `csindex_sync_total_return(codes=[...])`；全量须 `all_indices=True` | 显式任务 |
+| 申万行业指数 | `sw_index_list()` → `sw_index_valuation("801030")`（官方PE/PB/股息率）·`sw_index_daily`·`sw_index_components`；挂时行业对标退 `kline_daily` 东财口径 | 冷启≤4（估值≤2年窗）/缓存0；全史估值 ~12 发分页 |
 | 债基利率敏感度 | `cb_yield_curve` + `credit_spread` / `treasury_yield_daily` | 1~2 |
 | 重仓股深度 | `holding_map` → **a-stock-data skill** | 0 |
 
@@ -176,8 +177,8 @@ THIN.append("""## When to Activate
 
 ## 深读与边界（按需）
 
-- 复制即用示例（14 场景菜谱）+ FAQ → 同目录 `examples.md`
-- 实现细节/坑区 P1~P33/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
+- 复制即用示例（15 场景菜谱）+ FAQ → 同目录 `examples.md`
+- 实现细节/坑区 P1~P34/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
 - 不覆盖：账户持仓/交易下单（ttskill）、盘中实时估值、货基万份收益、单基金行业史（E2停供）、语义选基、FOF底层明细与经理姓名索引（P23/P24）
 - 个股深度 → a-stock-data；holding_map() 是官方桥
 """)
@@ -197,7 +198,14 @@ REF.append(f"""# fund-data 完整参考（reference.md · 按需读取层）V{VE
 
 REF.append(r"""# fund-data 基金底层数据工具包 V0.8.1 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复：381/381 离线断言通过**（L1 单元 345 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 93 条。在线全量须显式 `--online`），覆盖 30 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层 + 申万行业指数层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复 + V0.8.2 申万行业指数：412/412 离线断言通过**（L1 单元 376 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 93 条。在线全量须显式 `--online`），覆盖 31 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.8.2 申万行业指数层（官方源直连，行业基金对标升级）：**
+- 🟢 **`sw_index_list()`**：申万宏源官网官方清单四类 GET 轨（市场表征 9/一级行业 31/二级行业 124/风格指数 16，实测 2026-11-24），翻页拉全 count 强校验，24h 缓存；「大类风格指数/金创指数」属上游 POST 轨（backlog）
+- 🟢 **`sw_index_valuation(code, start, end)` ★**：官方日度估值报表——PE/PB/股息率/换手率/流通市值（亿元），单码查询按年切片缓存（历史年永久、当前年 20h TTL + 当年 mtime 回拨 18h）、当日未发布 pending_today 豁免；pe 允许 None（亏损期），pb/股息率越界拒缓存
+- 🟢 **`sw_index_daily(code, period)`**：trend 一发全史（801010 实测 6497 行、最早 1999-12-30），按年切片、day/week/month 键隔离；`sw_index_components(code)`：成分单发拿全（801030 实测 413 只）
+- 🔴 **P34 实测坑（TLS 链）**：swsresearch.com 服务器漏发中间证书（GeoTrust G2 TLS CN RSA4096 SHA256 2022 CA1，AIA cacerts.digicert.cn，效期至 2032-12-14）——负载均衡部分节点全漏，重试赌节点不可靠；AkShare 用 verify=False 关校验（不可接受），本项目自组 CA bundle（certifi+中间证书 PEM 内置常量）保持**完整链校验**；证书失败显式报错不计连接级熔断（provider 级 record_failure 照计数兜底）
+- 🟡 独立 sws provider 线（120/300s·1.0s·单并发·lease180，与 core 两处同值双向锁）；行业基金对标从「东财 BK 板块（无估值）」升级为申万官方口径+估值；「申万走 a-stock-data」旧口径声明作废
 
 **V0.8.1 审查修复批（V0.8.0 全收益层双路独立审查产出：1×P1 + 5×P2 + 11×P3）：**
 - 🔴 **P1 映射语义**：`csindex_resolve_total_return` 无 TRI 衍生分支误标 `return_type:"total_return"`——如实改 `price_return`（无 TR 衍生的股票指数是价格指数）；30 天旧错值 mapping 缓存读取时自愈重取；测试补锁 return_type/total_return_code
@@ -443,6 +451,7 @@ REF.append(r"""## 端点路由速查（按需定位，不必通读）
 | P30 新浪行情通道（V0.7.5） | hq.sinajs.cn 无 Referer 即拒（实测空响应）；高频爬虫有封禁前科；银行间信用债无公开实时端点（货币网现券板仅利率债活跃券） | `sina_quote` 内置 Referer + provider=sina 独立分账 120/300s·0.5s·单并发 + 403/429 计熔断 + 空体计信号；定位=腾讯互备低频兜底，银行间实时须 QB 等权限源 |
 | P31 申购限额唯一来源（V0.7.7） | E2/E3/E6 探针实测均无完整限额（E3 SGZT 仅「限大额」短文本无金额）——唯一来源是主页面 `{code}.html` 交易状态栏，且无批量接口（N 只 N 请求）；金额与「限大额」分属不同层级 text node（嵌套 span），简单 regex 必截断（000369 实测）；外币折算是静态近似汇率非实时牌价 | `fund_purchase_limit`：`_StaticCellParser` 嵌套感知全文拼接 + `parse_purchase_limit` 纯函数（kind 四态；限大额无金额诚实 limit_cny=None 不虚报 0）；已并入快照 `purchase_limit` 数据集（失败进 missing 不炸快照）；rankhandler ft=qdii 仅 363 只混合/股票类（联接/LOF 归「指数型-海外股票」不在内） |
 | P32 基金报告双通道（V0.7.8） | ①JJGG 必须带 fundf10 Referer——裸 UA 是 200+ErrCode-999+Data=""「假成功」；type=页面 tab（0 全部/1 发行运作/2 分红送配/3 定期报告/4 人事调整/5 基金销售/6 其他），部分基金加披 Q2/Q4 季报（交银趋势实测 6 期/年）②PDF 直链 `H2_{ID}_1.pdf` 的 _1 附件号不可省（少了拿到挑战壳）③pdf.dfcfw.com 腾讯 EdgeOne 反爬：200+Content-Type 伪装 pdf 但 body 是 988B 静态 `<script>` 挑战；巨潮 column=fund 仅上市基金，场外不在其体系 | `fund_reports`：Referer 必带+Data 非 list 显式报错+无 ID 行跳过+total>0 解析空拒绝；`fund_report_pdf`：_edgeone_solve node vm 沙箱（无 require/fs/net+timeout）解 `__tst_status`/`EO_Bot_Ssid` 重放一次，仍非 PDF/残包(<1KB)显式报错；挑战 cookie 进程级复用；dfcfw.com 归 eastmoney 线同账限流 |
+| P34 申万官网 TLS（V0.8.2） | swsresearch.com 漏发中间证书（GeoTrust G2 2022 CA1，效期 2032-12-14），负载均衡部分节点全漏——requests/curl 必报 `unable to get local issuer certificate`，重试赌节点不可靠；AkShare 以 verify=False 绕过（关校验不可接受） | 自组 CA bundle：内置中间证书 PEM 常量 + certifi 根库拼接（完整链校验保留）；证书失败（SSLCertVerificationError）显式报错更新指引、不计连接级熔断；provider 级 record_failure 照计数兜底；P34 诊断命令 `openssl s_client -connect … | grep verify` |
 | P33 中证全收益（V0.8.0） | 非交易日起始日会生成与下一交易日相同的占位行；全收益代码存在 H00300/H20269/932000CNY010 等无统一规律形态；HTTP 200 可携带业务400；个别历史行 change 与收盘差有上游口径差；当日 tradeDate 清单先行含今天而行情盘后才发布 | 官方 tradeDate 过滤+缺失按年重取；衍生指数+基本资料+行情三验身份；业务 code 强校验；change 异常写审计警告，changePct 与收盘明显矛盾拒绝入库；不降级价格指数；当日未发布不计缺失（pending_today 入报告，V0.8.1 盘前同步不炸） |
 
 ## Prerequisites
@@ -488,6 +497,8 @@ REF.append("## 层 8 · 基准指数层（V0.6.1，quant-excess 端点层收编�
 REF.append(code(sections[next(k for k in sections if k.startswith("V0.6.1"))]))
 REF.append("## 层 9 · 中证官方全收益指数层（V0.8.0：清单 + 官方映射 + 验证历史 + 同步）\n")
 REF.append(code(sections[next(k for k in sections if k.startswith("V0.8.0 中证官方全收益指数层"))]))
+REF.append("## 层 10 · 申万行业指数层（V0.8.2：官方清单 + 估值 + 日线 + 成分）\n")
+REF.append(code(sections[next(k for k in sections if k.startswith("V0.8.2 申万行业指数层"))]))
 
 REF.append("""## 使用示例
 
@@ -594,12 +605,18 @@ assert "def _csindex_rebase_base_code" in ref_text                          # V0
 assert 'return_type": "price_return"' in ref_text                           # V0.8.1 无 TRI 语义修正
 assert "pending_today" in ref_text                                          # V0.8.1 盘前豁免入报告
 assert "P33" in ref_text                                                    # 中证实测坑入册
+assert "def sw_index_list(" in ref_text                                     # V0.8.2 申万清单
+assert "def sw_index_valuation(" in ref_text                                # V0.8.2 官方估值
+assert "def sw_index_components(" in ref_text                               # V0.8.2 成分
+assert "def _sws_ca_bundle" in ref_text                                     # V0.8.2 自组 bundle
+assert "_SWS_EXTRA_CERT_PEM" in ref_text                                    # 中间证书常量入册
+assert "P34" in ref_text                                                    # TLS 坑入册
 
 # 产物三 examples.md（手工维护）：校验章节齐全后原样同步到 skill 目录
 examples_src = HERE / "examples.md"
 examples_text = examples_src.read_text(encoding="utf-8")
 assert "## 环境准备" in examples_text, "examples.md 缺「环境准备」章节"
-for _i in range(1, 15):                                # 逐场景断言：任一场景被删即拦住（锚点带" ·"防 1 被 10 子串掩盖）
+for _i in range(1, 16):                                # 逐场景断言：任一场景被删即拦住（锚点带" ·"防 1 被 10 子串掩盖）
     assert f"## 场景 {_i} ·" in examples_text, f"examples.md 缺「场景 {_i}」"
 assert "# FAQ" in examples_text, "examples.md 缺 FAQ 区"
 assert f"V{VERSION}" in examples_text, f"examples.md 版本号未对齐 V{VERSION}"

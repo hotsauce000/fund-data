@@ -33,7 +33,7 @@ fd.FUND_CACHE_DIR = Path(_TEST_CACHE_TMP.name)
 # 测试期的配额/熔断状态绝不写进 ~/.fund_data_cache/coordinator。间隔归零：
 # 滑窗/间隔语义由 fund_data_core 单测钉死，集成回归不为节流真睡 1.5s。
 _ZERO_POLICY = {line: {"min_interval": 0} for line in
-                ("eastmoney", "cninfo", "danjuan", "tencent", "sina", "chinabond", "csindex")}
+                ("eastmoney", "cninfo", "danjuan", "tencent", "sina", "chinabond", "csindex", "sws")}
 
 
 def _fresh_coordination():
@@ -3507,6 +3507,322 @@ def test_csindex_offline():
         fd._push2_get = _orig_p2g_bench
 
 
+
+
+# ════════════════════ V0.8.2 申万行业指数层（固定样本零网络）════════════
+def test_sws_offline():
+    check("L1", "申万-代码校验",
+          fd._sws_code("801010") == "801010")
+    expect_raise("L1", "申万-非法代码拒绝", lambda: fd._sws_code("80a010"), "6 位数字")
+    # 策略双向锁（core 默认表 ↔ 主模块覆盖，V0.8.1 同款）
+    fd._reset_request_coordination()               # 真实策略解析（沙箱可能处于零间隔态）
+    _sws_real = fd._COORDINATOR.policy("sws")
+    _fresh_coordination()
+    from fund_data_core.policies import DEFAULT_POLICIES as _DP
+    _sws_default = _DP["sws"]
+    check("L1", "申万防封-core默认表与主模块覆盖一致",
+          (_sws_default.max_requests, _sws_default.window_seconds, _sws_default.min_interval,
+           _sws_default.max_in_flight, _sws_default.lease_seconds)
+          == (_sws_real.max_requests, _sws_real.window_seconds, _sws_real.min_interval,
+              _sws_real.max_in_flight, _sws_real.lease_seconds)
+          == (120, 300, fd.SWS_MIN_INTERVAL, 1, 180),
+          "单一来源两处一致（双向锁）")
+    expect_raise("L1", "申万-非法indextype拒绝",
+                 lambda: fd.sw_index_list("申万自营"), "indextype")
+
+    class _SWSResp:
+        def __init__(self, status, body):
+            self.status_code = status
+            self.content = json.dumps(body).encode("utf-8") if not isinstance(body, (bytes, str)) \
+                else (body.encode("utf-8") if isinstance(body, str) else body)
+
+        def raise_for_status(self):
+            return None
+
+    _orig_get = fd.SWS_SESSION.get
+    try:
+        # 软封三态：200 非 JSON / 业务 code≠200 / 清单空返回
+        fd.SWS_SESSION.get = lambda *a, **k: _SWSResp(200, "not-json-{")
+        expect_raise("L1", "申万-200非JSON拒绝",
+                     lambda: fd.sw_index_list("一级行业", force_refresh=True), "非 JSON")
+        _fresh_coordination()
+        fd.SWS_SESSION.get = lambda *a, **k: _SWSResp(
+            200, {"code": "400", "message": "Parameter Errors", "data": {}})
+        expect_raise("L1", "申万-业务code拒绝",
+                     lambda: fd.sw_index_list("一级行业", force_refresh=True), "业务")
+        _fresh_coordination()
+        fd.SWS_SESSION.get = lambda *a, **k: _SWSResp(
+            200, {"code": "200", "data": {"count": 0, "results": []}})
+        expect_raise("L1", "申万-清单空返回拒绝",
+                     lambda: fd.sw_index_list("一级行业", force_refresh=True), "空返回")
+        _fresh_coordination()
+        # 403 风控分流
+        fd.SWS_SESSION.get = lambda *a, **k: _SWSResp(403, {})
+        expect_raise("L1", "申万-403风控分流",
+                     lambda: fd.sw_index_list("一级行业", force_refresh=True), "403")
+        _fresh_coordination()
+        # teardown fail-closed（零 transport）
+        _legacy_calls = [0]
+
+        def _legacy_forbidden(*a, **k):
+            _legacy_calls[0] += 1
+            raise AssertionError("legacy 不得发申万请求")
+
+        fd.SWS_SESSION.get = _legacy_forbidden
+        fd._teardown_request_coordination()
+        expect_raise("L1", "申万-teardown直连fail-closed",
+                     lambda: fd._sws_request("/index_publish/current/"), "禁止 legacy")
+        check("L1", "申万-teardown零transport", _legacy_calls == [0])
+        _fresh_coordination()
+        # SSL 证书失败分流：显式指引、不计连接级熔断（零标记）
+        _cert_err = fd.requests.exceptions.SSLError("verify failed")
+        _cert_err.__cause__ = fd.ssl.SSLCertVerificationError(1, "CERTIFICATE_VERIFY_FAILED")
+        fd.SWS_SESSION.get = lambda *a, **k: _cert_err
+        _fresh_coordination()
+        try:
+            fd.sw_index_list("一级行业", force_refresh=True)
+            check("L1", "申万-证书失败应抛未抛", False)
+        except RuntimeError as e:
+            check("L1", "申万-证书失败显式指引零熔断标记",
+                  "证书校验失败" in str(e) and not fd._sws_conn_file().exists(), str(e)[:60])
+        _fresh_coordination()
+        # 传输失败 → 连接级熔断 2 连败停机，第 3 次零网络
+        _conn_err = fd.requests.exceptions.ConnectionError("connection reset")
+        fd.SWS_SESSION.get = lambda *a, **k: _conn_err
+        for _ in range(2):
+            try:
+                fd._sws_request("/index_publish/current/")
+            except fd.requests.exceptions.ConnectionError:
+                pass
+        check("L1", "申万-2连败停机标记落盘", fd._sws_conn_file().exists())
+        try:
+            fd._sws_request("/index_publish/current/")
+            check("L1", "申万-停机期应拒未拒", False)
+        except RuntimeError as e:
+            check("L1", "申万-停机期零网络直拒",
+                  "连接级熔断" in str(e) and fd.SWS_REQUEST_COUNT[0] >= 0)
+        fd._sws_conn_file().write_text("0 stale-test")   # 期满标记 → 自动复位
+        fd._sws_conn_file().unlink()
+        fd._sws_conn_fails[0] = 0
+        _fresh_coordination()
+
+        # 清单翻页合并 + 缓存二调 0 请求（mock 数据用风格指数避开一级行业锚）
+        def _list_fake(url, **k):
+            page = k["params"]["page"]
+            rows = [{"swindexcode": "801950", "swindexname": "大市值", "l3": 1, "l4": 2,
+                     "l5": 3, "l6": 4, "l7": 0.5, "l8": 2.5, "l11": 9}] if page == 1 else [
+                {"swindexcode": "801951", "swindexname": "中市值", "l3": 1, "l4": 2,
+                 "l5": 3, "l6": 4, "l7": 0.5, "l8": 2.5, "l11": 9}]
+            return _SWSResp(200, {"code": "200", "data": {
+                "count": 2, "results": rows if page == 1 else rows, "next": None}})
+
+        fd.SWS_SESSION.get = _list_fake
+        _lst = fd.sw_index_list("风格指数", force_refresh=True)
+        _n1 = fd.SWS_REQUEST_COUNT[0]
+        check("L1", "申万-清单翻页合并",
+              len(_lst) == 2 and _lst[0]["index_code"] == "801950"
+              and _lst[0]["latest"] == 2.5, str(_lst)[:80])
+        _lst2 = fd.sw_index_list("风格指数")
+        check("L1", "申万-清单缓存二调0请求",
+              fd.SWS_REQUEST_COUNT[0] == _n1 and len(_lst2) == 2)
+        # 自组 CA bundle（P34）：_sws_request 已刷新 verify=沙箱 bundle 路径（非 False）
+        _bundle = fd._sws_ca_bundle()
+        _bundle_text = Path(_bundle).read_text(encoding="utf-8")
+        check("L1", "申万-自组CA bundle完整校验",
+              str(fd.SWS_SESSION.verify) == _bundle
+              and "BEGIN CERTIFICATE" in _bundle_text
+              and "GeoTrust" in fd._sws_extra_cert_info()
+              and "MIIFxjCCBK6gAwIBAgIQ" in fd._SWS_EXTRA_CERT_PEM,   # PEM 本体锚（base64 首 16 字节）
+              f"verify={fd.SWS_SESSION.verify!r}")
+
+        # 日线：全史单发 + 年切片 + day/week 键隔离 + mtime 回拨
+        _today = fd.datetime.now(fd._BJ_TZ).date().isoformat()
+        # P1（审查）：月 1 号 day-1=0 会钳回 1——必须 timedelta 回退（每月 1 号回归不炸）
+        _yesterday = (fd.datetime.now(fd._BJ_TZ) - fd.timedelta(days=1)).date().isoformat()
+
+        def _trend_fake(url, **k):
+            code = k["params"]["swindexcode"]
+            period = k["params"]["period"]
+            factor = {"DAY": 1.0, "WEEK": 2.0, "MONTH": 3.0}[period]
+            raw = [
+                {"swindexcode": code, "bargaindate": "1999-12-30", "openindex": 1000.0,
+                 "maxindex": 1001.0, "minindex": 999.0, "closeindex": 1000.0,
+                 "hike": 0.0, "markup": 0.0, "bargainamount": 1.0, "bargainsum": 2.0},
+                {"swindexcode": code, "bargaindate": "2026-11-20", "openindex": 2000.0,
+                 "maxindex": 2010.0, "minindex": 1995.0, "closeindex": 2000.0,
+                 "hike": 20.0, "markup": 1.01, "bargainamount": 3.0, "bargainsum": 4.0},
+                {"swindexcode": code, "bargaindate": _yesterday, "openindex": 2000.0,
+                 "maxindex": 2010.0, "minindex": 1995.0, "closeindex": 2020.2,
+                 "hike": 20.2, "markup": 1.01, "bargainamount": 3.0, "bargainsum": 4.0},
+            ]
+            return _SWSResp(200, {"code": "200", "data": raw})
+
+        fd.SWS_SESSION.get = _trend_fake
+        _d = fd.sw_index_daily("801010", force_refresh=True)
+        _n2 = fd.SWS_REQUEST_COUNT[0]
+        check("L1", "申万-日线全史切片与字段",
+              len(_d) == 3 and _d[0]["date"] == "1999-12-30"
+              and _d[-1]["close"] == 2020.2 and _d[-1]["change_pct"] == 1.01
+              and fd._cache_read("sws/daily/801010_day_1999.json", None) is not None)
+        _d2 = fd.sw_index_daily("801010")
+        check("L1", "申万-日线缓存二调0请求",
+              fd.SWS_REQUEST_COUNT[0] == _n2 and len(_d2) == 3)
+        _w = fd.sw_index_daily("801010", period="week", force_refresh=True)
+        check("L1", "申万-day/week缓存键隔离",
+              fd._cache_read("sws/daily/801010_week_2026.json", None) is not None
+              and len(_w) == 3 and _w[0]["close"] == 1000.0
+              and fd._cache_read("sws/daily/801010_day_1999.json", None)[0]["close"] == 1000.0)
+        _rep = fd._cache_read("sws/reports/801010_day_latest.json", None)
+        check("L1", "申万-日线盘后未发布mtime回拨",
+              _rep is not None and _rep["last_date"] == _yesterday and _rep["last_date"] < _today
+              and os.path.getmtime(fd.FUND_CACHE_DIR / f"sws/daily/801010_day_{_today[:4]}.json")
+              < time.time() - 17 * 3600,
+              f"last={_rep['last_date'] if _rep else None} today={_today}")
+        expect_raise("L1", "申万-非法period拒绝",
+                     lambda: fd.sw_index_daily("801010", period="hour"), "period")
+
+        # 估值：区间 mock + None PE 容错 + 越界拒缓存 + pending_today
+        def _val_fake(url, **k):
+            p = k["params"]
+            assert p["start_date"].startswith("2"), p
+            rows = [
+                {"swindexcode": "801010", "bargaindate": f"{p['start_date'][:4]}-06-05T08:00:00+08:00",
+                 "closeindex": "2500", "pe": "48.5", "pb": "2.7", "dp": "1.1",
+                 "turnoverrate": "0.8", "negotiablessharesum1": "6050.08", "meanprice": "12.3"},
+                {"swindexcode": "801010", "bargaindate": f"{p['start_date'][:4]}-06-06T08:00:00+08:00",
+                 "closeindex": "2510", "pe": None, "pb": "2.71", "dp": "1.1",
+                 "turnoverrate": "0.8", "negotiablessharesum1": "6060", "meanprice": "12.4"},
+            ]
+            return _SWSResp(200, {"code": "200", "data": {
+                "count": 2, "results": rows, "next": None}})
+
+        fd.SWS_SESSION.get = _val_fake
+        _v = fd.sw_index_valuation("801010", "20240601", "20240630", force_refresh=True)
+        _n3 = fd.SWS_REQUEST_COUNT[0]
+        check("L1", "申万-估值字段与None容错",
+              len(_v) == 2 and _v[0]["date"] == "2024-06-05" and _v[0]["pe"] == 48.5
+              and _v[1]["pe"] is None and _v[1]["pb"] == 2.71
+              and _v[0]["float_mv"] == 6050.08, str(_v)[:100])
+        _v2 = fd.sw_index_valuation("801010", "20240601", "20240630")
+        check("L1", "申万-估值缓存二调0请求",
+              fd.SWS_REQUEST_COUNT[0] == _n3 and len(_v2) == 2)
+        expect_raise("L1", "申万-估值end超今天拒绝",
+                     lambda: fd.sw_index_valuation("801010", "", "20991231"), "不可超过今天")
+        expect_raise("L1", "申万-估值start晚于end拒绝",
+                     lambda: fd.sw_index_valuation("801010", "20240610", "20240601"), "晚于")
+
+        def _val_bad_pe(url, **k):
+            return _SWSResp(200, {"code": "200", "data": {
+                "count": 1, "results": [{"swindexcode": "801010",
+                                         "bargaindate": "2024-06-05", "closeindex": "2500",
+                                         "pe": "99999", "pb": "2.7", "dp": "1.1"}], "next": None}})
+
+        fd.SWS_SESSION.get = _val_bad_pe
+        expect_raise("L1", "申万-估值PE越界拒缓存",
+                     lambda: fd.sw_index_valuation("801030", "20240601", "20240630",
+                                                   force_refresh=True), "越界")
+        _fresh_coordination()
+
+        # 当日未发布 pending_today：区间含今天但无今日行 → 豁免 + report
+        def _val_today_fake(url, **k):
+            return _SWSResp(200, {"code": "200", "data": {
+                "count": 1, "results": [{"swindexcode": "801010",
+                                         "bargaindate": f"{_yesterday}T08:00:00+08:00",
+                                         "closeindex": "2520", "pe": "48.0", "pb": "2.7",
+                                         "dp": "1.1"}], "next": None}})
+
+        fd.SWS_SESSION.get = _val_today_fake
+        _vt = fd.sw_index_valuation("801010", _today, force_refresh=True)
+        _vrep = fd._cache_read("sws/reports/801010_val_latest.json", None)
+        check("L1", "申万-估值当日未发布pending豁免",
+              len(_vt) == 0 and _vrep is not None
+              and _vrep["pending_today"] == _today
+              and _vrep["rows"] == 1,              # 昨日行已入库缓存（区间外不返回）
+              str(_vrep))
+
+        # P1 回归锁：请求未缓存年份 → 显式取数（审查实测复现场景：先查 2025 再查 2024）
+        fd.SWS_SESSION.get = _val_fake
+        fd.sw_index_valuation("801010", "20250601", "20250630", force_refresh=True)
+        (fd.FUND_CACHE_DIR / "sws/valuation/801010_2024.json").unlink(missing_ok=True)
+        _n5 = fd.SWS_REQUEST_COUNT[0]
+        _v_gap = fd.sw_index_valuation("801010", "20240601", "20240630")
+        check("L1", "申万-估值缺年显式取数不静默空",
+              len(_v_gap) == 2 and fd.SWS_REQUEST_COUNT[0] > _n5   # 缺年触发取数
+                                                                        # （fetch 到 today，
+                                                                        # 近 3 年翻页 ≥1 发）
+              and _v_gap[0]["date"] == "2024-06-05",
+              f"{len(_v_gap)} 行（修复前 0 静默空）")
+        # 成分：单发 + 权重和警告 + 空 results 显式报错 + 缓存
+        def _comp_fake(url, **k):
+            return _SWSResp(200, {"code": "200", "data": {"count": 2, "results": [
+                {"stockcode": "000510", "stockname": "新金路", "newweight": "50.0",
+                 "beginningdate": "2021-12-13T08:00:00+08:00"},
+                {"stockcode": "600000", "stockname": "浦发银行", "newweight": "49.98",
+                 "beginningdate": "2021-12-13T08:00:00+08:00"}]}})
+
+        fd.SWS_SESSION.get = _comp_fake
+        _c = fd.sw_index_components("801030", force_refresh=True)
+        _n4 = fd.SWS_REQUEST_COUNT[0]
+        check("L1", "申万-成分字段与权重和",
+              len(_c) == 2 and _c[0]["stock_code"] == "000510"
+              and _c[0]["since"] == "2021-12-13"
+              and abs(sum(x["weight"] for x in _c) - 99.98) < 0.01)
+        _c2 = fd.sw_index_components("801030")
+        check("L1", "申万-成分缓存二调0请求",
+              fd.SWS_REQUEST_COUNT[0] == _n4 and len(_c2) == 2)
+
+        def _comp_empty(url, **k):
+            return _SWSResp(200, {"code": "200", "data": {"count": 0, "results": []}})
+
+        fd.SWS_SESSION.get = _comp_empty
+        expect_raise("L1", "申万-成分空返回显式报错",
+                     lambda: fd.sw_index_components("801980", force_refresh=True), "空返回")
+    finally:
+        fd.SWS_SESSION.get = _orig_get
+        _fresh_coordination()
+        # mock 数据不入真缓存（V0.8.1 教训：同进程在线层会读沙箱缓存）
+        import shutil as _sh_sws
+        _sh_sws.rmtree(fd.FUND_CACHE_DIR / "sws", ignore_errors=True)
+        fd._sws_conn_file().unlink(missing_ok=True)
+        fd._sws_conn_fails[0] = 0
+        fd._sws_ca_bundle_cache[:] = []            # 进程内状态卫生（审查 P3）
+        fd.SWS_SESSION.verify = fd._sws_ca_bundle()
+
+
+
+
+def test_sws_online():
+    """申万层在线锚（sws 线预算 ≤6 发：清单 1 + 日线 1 + 估值 1~3 + 成分 1）。"""
+    lst = fd.sw_index_list("一级行业")
+    codes = {x["index_code"] for x in lst}
+    check("L2", "申万清单-一级行业官方锚",
+          len(lst) >= 31 and {"801010", "801030", "801780"} <= codes
+          and lst[0]["latest"] is not None,
+          f"{len(lst)} 行，含 801010/801030/801780")
+    d = fd.sw_index_daily("801010")
+    _today = fd.datetime.now(fd._BJ_TZ).date()
+    _last_gap = (_today - fd.datetime.strptime(d[-1]["date"], "%Y-%m-%d").date()).days
+    check("L2", "申万日线-801010全史锚",
+          d[0]["date"] < "2000-01-01" and len(d) > 6000 and _last_gap <= 7
+          and 0 < d[-1]["close"] < 100000,
+          f"{len(d)} 行 {d[0]['date']}→{d[-1]['date']}（距今 {_last_gap} 天）")
+    v = fd.sw_index_valuation("801010", "20240101", "20241231")
+    check("L2", "申万估值-801010 2024完整区间",
+          len(v) == 242 and v[0]["date"] == "2024-01-02" and v[-1]["date"] == "2024-12-31"
+          and 0 < v[0]["pe"] < 200 and 0 < v[0]["pb"] < 50,
+          f"{len(v)} 行，PE {v[0]['pe']}/PB {v[0]['pb']} → PE {v[-1]['pe']}")
+    _n = fd.SWS_REQUEST_COUNT[0]
+    v2 = fd.sw_index_valuation("801010", "20240601", "20240630")
+    check("L2", "申万估值-年度缓存切片复用0请求",
+          len(v2) == 19 and fd.SWS_REQUEST_COUNT[0] == _n,   # 2024-06 实锚 19 交易日（6/10 端午休）
+          f"{len(v2)} 行")
+    c = fd.sw_index_components("801030")
+    ws = sum(x["weight"] or 0 for x in c)
+    check("L2", "申万成分-801030权重和",
+          len(c) >= 300 and 95 <= ws <= 105 and c[0]["weight"] > 0,
+          f"{len(c)} 只，权重和 {ws:.2f}%")
+
+
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
 def test_l2_smoke():
     # 在线首测强制真实抓取：覆盖沙箱里的离线密闭性合成种子（E1 端点真验证）
@@ -4472,12 +4788,13 @@ def main():
     print(f"fund-data {fd.__version__} 分层测试  offline_only={OFFLINE_ONLY}\n")
     test_l1_offline()
     test_csindex_offline()
+    test_sws_offline()
     test_sprint2_integration_offline()
     test_sprint3_integration_offline()
     if not OFFLINE_ONLY:
         # 逐函数隔离（冷跑教训：单函数 transient 逃逸曾连带跳过 L3/L4/L5/F 全部信号）；
         # 栈全文走 stdout（print_exc 走 stderr 会与 check 的 stdout 在管道下错序截断）
-        for fn in (test_l2_smoke, test_csindex_online, test_bench_spot_online,
+        for fn in (test_l2_smoke, test_csindex_online, test_sws_online, test_bench_spot_online,
                    test_l3_cross, test_l4_budget,
                    test_l5_degrade, test_f_guard_band, test_f_cache_band):
             try:
