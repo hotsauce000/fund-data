@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-fund-data V0.7.8 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层 + 基金报告）
+fund-data V0.8.0 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层 + 基金报告 + 中证全收益指数）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤3 请求（1×pingzhongdata + 0~1×lsjz + 0~1×主页面限额，V0.7.7 起快照含 purchase_limit）
@@ -62,7 +62,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.7.8"
+__version__ = "0.8.0"
 
 # ══════════════════════════════════════════════════════════════════
 # L1 前置层：限流入口 / 缓存目录 / 请求计数
@@ -95,7 +95,7 @@ _CBREAK_COOLDOWN = 600           # F2：熔断冷却 10 分钟
 _CBREAK_TRIP = 3                 # 连续 3 次风控信号触发熔断
 _cbreak_state = {"tt": [0, 0.0], "em": [0, 0.0], "cninfo": [0, 0.0],
                  "danjuan": [0, 0.0], "sina": [0, 0.0], "tencent": [0, 0.0],
-                 "cb": [0, 0.0]}   # [连击数, 上次信号时刻]；>5min 衰减归一（V0.7.5 腾讯/中债补镜像键）
+                 "cb": [0, 0.0], "csindex": [0, 0.0]}
 
 # Sprint 2/3：异常与缓存语义与 fund_data_core 统一（core 为硬依赖，与主模块同一套部署）。
 from fund_data_core import CachePolicy, CacheRepository, StaleDataError
@@ -121,7 +121,8 @@ _REQUEST_GATEWAY = None
 _CACHE_REPO = None     # Sprint 3：CacheRepository（FUND_CACHE_DIR 即缓存根，键=legacy 相对路径）
 _CORE_LINE_PROVIDER = {"tt": "eastmoney", "em": "eastmoney", "cninfo": "cninfo",
                        "danjuan": "danjuan", "tencent": "tencent", "sina": "sina",
-                       "chinabond": "chinabond", "cb": "chinabond"}
+                       "chinabond": "chinabond", "cb": "chinabond",
+                       "csindex": "csindex"}
 
 
 def _reset_request_coordination(clock=None, sleeper=None, policies=None):
@@ -165,6 +166,10 @@ def _reset_request_coordination(clock=None, sleeper=None, policies=None):
         "chinabond": ProviderPolicy(
             max_requests=120, window_seconds=300, min_interval=1.5, max_in_flight=2,
             lease_seconds=30, circuit_threshold=_CBREAK_TRIP,
+            open_seconds=_CBREAK_COOLDOWN),
+        "csindex": ProviderPolicy(
+            max_requests=120, window_seconds=300, min_interval=CSINDEX_MIN_INTERVAL,
+            max_in_flight=1, lease_seconds=180, circuit_threshold=_CBREAK_TRIP,
             open_seconds=_CBREAK_COOLDOWN),
     }
     for name, override in (policies or {}).items():
@@ -249,6 +254,10 @@ class UpstreamFormatError(RuntimeError):
     """上游响应结构不符合契约：不计成功、不触发网络降级。"""
 
 
+class UpstreamRequestError(UpstreamFormatError):
+    """请求信封/业务接口失败；供批量同步与单指数内容校验错误分流。"""
+
+
 def _throttle_file(line: str) -> Path:
     return FUND_CACHE_DIR / f".throttle_{line}"
 
@@ -288,7 +297,8 @@ def _cross_proc_throttle(line: str, min_interval: float):
 def _line_label(line: str) -> str:
     """熔断文案按实际 provider 标注，避免跨域备胎误报为东财。"""
     return {"cninfo": "巨潮", "danjuan": "蛋卷", "sina": "新浪",
-            "tencent": "腾讯", "chinabond": "中债", "cb": "中债"}.get(line, "东财")
+            "tencent": "腾讯", "chinabond": "中债", "cb": "中债",
+            "csindex": "中证指数"}.get(line, "东财")
 
 
 def _cbreak_check(line: str):
@@ -4394,7 +4404,609 @@ def fund_report_pdf(report, dest_dir=None, force_refresh: bool = False) -> str:
     return str(path)
 
 
+# ══════════════════════════════════════════════════════════════════
+# V0.8.0 中证官方全收益指数层：清单 / 官方映射 / 验证历史 / 可恢复同步
+# ══════════════════════════════════════════════════════════════════
+
+CSINDEX_MIN_INTERVAL = 1.0
+CSINDEX_BASE = "https://www.csindex.com.cn/csindex-home"
+CSINDEX_SESSION = requests.Session()
+CSINDEX_SESSION.trust_env = False
+CSINDEX_SESSION.headers.update({"User-Agent": UA})
+CSINDEX_REQUEST_COUNT = [0]
+_CSINDEX_CODE_RE = re.compile(r"[A-Z0-9]{6,20}")
+_CSINDEX_ALL_SERIES = ["1", "2", "3", "7", "4", "5", "6"]
+_CSINDEX_CURRENCY_MARKERS = (
+    "HKD", "USD", "EUR", "AUD", "TWD", "CHF", "SGD", "GBP", "CAD",
+    "港元", "美元", "欧元", "澳大利亚元", "台元", "瑞士法郎", "新加坡元", "英镑", "加元",
+)
+
+
+def _csindex_code(value) -> str:
+    code = str(value or "").strip().upper()
+    if not _CSINDEX_CODE_RE.fullmatch(code):
+        raise ValueError(f"中证指数代码须为 6~20 位字母数字，收到 {value!r}")
+    return code
+
+
+def _csindex_hit(url: str):
+    CSINDEX_REQUEST_COUNT[0] += 1
+
+
+def _csindex_request(path: str, params: Optional[dict] = None,
+                     payload: Optional[dict] = None, timeout: int = 30):
+    """中证官网统一请求：独立配额/熔断/账本；HTTP 200 不代表业务成功。"""
+    url = CSINDEX_BASE + path
+    headers = {"Referer": "https://www.csindex.com.cn/"}
+    if _REQUEST_GATEWAY is not None:
+        session = _SessionAdapter(CSINDEX_SESSION, _csindex_hit)
+        if payload is None:
+            resp = _REQUEST_GATEWAY.get(url, params=params, headers=headers,
+                                        timeout=timeout, retries=1, retry_statuses=(),
+                                        session=session)
+        else:
+            resp = _REQUEST_GATEWAY.post(url, json=payload, headers=headers,
+                                         timeout=timeout, retries=1, retry_statuses=(),
+                                         session=session)
+        _release_pending(resp, "csindex-passthrough")
+    else:
+        raise RuntimeError(
+            "中证请求禁止 legacy/teardown 直连：跨进程滑窗、单并发和共享风控必须保持激活；"
+            "请恢复 _reset_request_coordination() 后重试")
+    assert_not_risk_control(resp, "csindex", path)
+    resp.raise_for_status()
+    text = resp.content.decode("utf-8", errors="replace")
+    _assert_not_risk_content(text, "csindex", path)
+    try:
+        body = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise UpstreamRequestError(f"中证响应非 JSON（{path}）: {text[:100]!r}") from e
+    if not isinstance(body, dict) or str(body.get("code")) != "200":
+        raise UpstreamRequestError(
+            f"中证业务失败（{path}，code={body.get('code') if isinstance(body, dict) else None}，"
+            f"msg={body.get('msg') if isinstance(body, dict) else None}）")
+    if body.get("success") is False:
+        raise UpstreamRequestError(f"中证业务 success=false（{path}，msg={body.get('msg')}）")
+    return body
+
+
+def _csindex_universe_payload(page_num: int, page_size: int = 1000) -> dict:
+    return {
+        "sorter": {"sortField": "null", "sortOrder": None},
+        "pager": {"pageNum": page_num, "pageSize": page_size},
+        "indexFilter": {
+            "ifCustomized": None, "ifTracked": None, "ifWeightCapped": None,
+            "indexCompliance": None, "hotSpot": None, "indexClassify": None,
+            "currency": None, "region": None, "indexSeries": _CSINDEX_ALL_SERIES,
+            "undefined": None,
+        },
+    }
+
+
+def _csindex_universe_row(row: dict) -> dict:
+    code = _csindex_code(row.get("indexCode"))
+    name = str(row.get("indexName") or "").strip()
+    if not name:
+        raise UpstreamFormatError(f"中证指数清单缺名称（{code}）")
+    return {
+        "index_code": code, "index_name": name,
+        "index_name_en": row.get("indexNameEn"),
+        "index_series": row.get("indexSeries"),
+        "index_series_en": row.get("indexSeriesEn"),
+        "asset_class": row.get("assetsClassify"),
+        "asset_class_en": row.get("assetsClassifyEn"),
+        "hot_spot": row.get("hotSpot"), "region": row.get("region"),
+        "currency": row.get("currency"), "if_tracked": row.get("ifTracked"),
+        "index_classify": row.get("indexClassify"),
+        "if_customized": row.get("ifCustomized"),
+        "if_weight_capped": row.get("ifWeightCapped"),
+        "cons_number": row.get("consNumber"), "latest_close": row.get("latestClose"),
+        "monthly_return": row.get("monthlyReturn"),
+        "publish_date": row.get("publishDate"),
+    }
+
+
+def csindex_universe(index_series=None, asset_class=None, currency="人民币",
+                     force_refresh: bool = False) -> list[dict]:
+    """中证官网全部七个系列基础指数清单；筛选本地执行，完整性强校验。"""
+    rel = "csindex/universe.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=24)
+        if cached is not None:
+            rows = cached
+        else:
+            rows = None
+    else:
+        rows = None
+    if rows is None:
+        first = _csindex_request("/index-list/query-index-item",
+                                 payload=_csindex_universe_payload(1))
+        total, page_count = first.get("total"), first.get("size")
+        first_rows = first.get("data")
+        if (not isinstance(total, int) or total <= 0 or not isinstance(page_count, int)
+                or page_count < 1 or not isinstance(first_rows, list)):
+            raise UpstreamFormatError("中证指数清单响应缺 total/size/data 或数值非法")
+        raw = list(first_rows)
+        for page in range(2, page_count + 1):
+            body = _csindex_request(
+                "/index-list/query-index-item",
+                payload=_csindex_universe_payload(page))
+            if body.get("total") != total or body.get("size") != page_count:
+                raise UpstreamFormatError("中证指数清单分页期间 total/size 发生变化")
+            data = body.get("data")
+            if not isinstance(data, list):
+                raise UpstreamFormatError(f"中证指数清单第 {page} 页 data 非 list")
+            raw.extend(data)
+        if len(raw) != total:
+            raise UpstreamFormatError(f"中证指数清单不完整：total={total}，实收={len(raw)}")
+        rows = [_csindex_universe_row(x) for x in raw]
+        codes = [x["index_code"] for x in rows]
+        if len(set(codes)) != len(codes):
+            raise UpstreamFormatError("中证指数清单存在重复 indexCode")
+        _cbreak_success("csindex")
+        _cache_write(rel, rows)
+
+    def _values(value):
+        if value is None:
+            return None
+        return {str(x) for x in (value if isinstance(value, (list, tuple, set)) else [value])}
+
+    series, assets = _values(index_series), _values(asset_class)
+    currencies = _values(currency)
+    return [x for x in rows
+            if (series is None or x["index_series"] in series
+                or x["index_series_en"] in series)
+            and (assets is None or x["asset_class"] in assets
+                 or x["asset_class_en"] in assets)
+            and (currencies is None or x["currency"] in currencies)]
+
+
+def _csindex_basic_info(index_code, force_refresh: bool = False) -> dict:
+    code = _csindex_code(index_code)
+    rel = f"csindex/basic/{code}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=24 * 30)
+        if cached is not None:
+            return cached
+    body = _csindex_request(f"/indexInfo/index-basic-info/{code}")
+    data = body.get("data")
+    if not isinstance(data, dict) or data.get("indexCode") != code:
+        raise UpstreamFormatError(f"中证基本资料身份不符（请求 {code}）")
+    _cbreak_success("csindex")
+    _cache_write(rel, data)
+    return data
+
+
+def _csindex_names_indicate_total(cn: str, en: str) -> bool:
+    cn_text, en_text = str(cn or ""), str(en or "")
+    upper = en_text.upper().replace(" ", "")
+    if ("净收益" in cn_text or "无全收益" in cn_text or "(净)" in cn_text
+            or "NTRI" in upper or "NETTOTALRETURN" in upper):
+        return False
+    return ("全收益" in cn_text or "TOTALRETURN" in upper
+            or bool(re.search(r"(?:^|\W)TRI$", en_text.upper())))
+
+
+def _csindex_derivative_candidates(rows: list) -> list:
+    candidates = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            code = _csindex_code(row.get("indexCode"))
+        except ValueError:
+            continue
+        cn, en = str(row.get("indexNameCn") or ""), str(row.get("indexNameEn") or "")
+        upper = en.upper().replace(" ", "")
+        is_total = ("全收益" in cn or upper.endswith("TRI")
+                    or "TOTALRETURN" in upper)
+        is_net = "净收益" in cn or "(净)" in cn or "NTRI" in upper
+        is_foreign = any(marker in code[6:] or marker in cn or marker in en.upper()
+                         for marker in _CSINDEX_CURRENCY_MARKERS)
+        if is_total and not is_net and not is_foreign:
+            candidates.append({"index_code": code, "index_name_cn": cn, "index_name_en": en})
+    return candidates
+
+
+def _csindex_mapping_from_info(base_code: str, info: dict, status: str) -> dict:
+    currency = "CNY" if info.get("currencyCn") == "人民币" else info.get("currencyCn")
+    return {
+        "base_index_code": base_code,
+        "total_return_code": info["indexCode"],
+        "index_name": info.get("indexFullNameCn") or info.get("indexShortNameCn"),
+        "index_name_en": info.get("indexFullNameEn") or info.get("indexShortNameEn"),
+        "currency": currency, "return_type": "total_return", "status": status,
+        "basic_date": info.get("basicDate"), "basic_index": info.get("basicIndex"),
+        "source": "csindex/basic-info" if status == "already_total"
+                  else "csindex/derivative+basic-info",
+    }
+
+
+def csindex_resolve_total_return(index_code, force_refresh: bool = False) -> dict:
+    """基础/全收益代码 → 官方映射；不猜代码，歧义与未知口径显式返回。"""
+    code = _csindex_code(index_code)
+    rel = f"csindex/mappings/{code}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=24 * 30)
+        if cached is not None:
+            return cached
+    info = _csindex_basic_info(code, force_refresh=force_refresh)
+    if _csindex_names_indicate_total(info.get("indexFullNameCn"), info.get("indexFullNameEn")):
+        if info.get("currencyCn") != "人民币":
+            raise UpstreamFormatError(f"全收益指数 {code} 非人民币口径：{info.get('currencyCn')}")
+        out = _csindex_mapping_from_info(code, info, "already_total")
+        _cache_write(rel, out)
+        return out
+    body = _csindex_request("/perf/get-derivative-index", params={"indexCode": code})
+    data = body.get("data")
+    if not isinstance(data, list):
+        raise UpstreamFormatError(f"中证衍生指数响应 data 非 list（{code}）")
+    candidates = _csindex_derivative_candidates(data)
+    if len(candidates) > 1:
+        out = {"base_index_code": code, "total_return_code": None,
+               "return_type": "unknown", "status": "ambiguous",
+               "candidates": candidates, "source": "csindex/derivative"}
+    elif not candidates:
+        status = "no_total_return" if info.get("indexType") == "stock" else "return_type_unknown"
+        out = {"base_index_code": code, "total_return_code": None,
+               "return_type": "total_return" if status == "no_total_return" else "unknown",
+               "status": status, "source": "csindex/derivative+basic-info"}
+    else:
+        candidate = candidates[0]
+        tr_info = _csindex_basic_info(candidate["index_code"], force_refresh=force_refresh)
+        if not _csindex_names_indicate_total(
+                tr_info.get("indexFullNameCn"), tr_info.get("indexFullNameEn")):
+            raise UpstreamFormatError(
+                f"衍生候选 {candidate['index_code']} 的基本资料未确认全收益口径")
+        if tr_info.get("currencyCn") != "人民币":
+            raise UpstreamFormatError(
+                f"衍生候选 {candidate['index_code']} 非人民币口径：{tr_info.get('currencyCn')}")
+        out = _csindex_mapping_from_info(code, tr_info, "mapped")
+    _cbreak_success("csindex")
+    _cache_write(rel, out)
+    return out
+
+
+def _csindex_date(value, field: str = "date") -> str:
+    text = str(value or "").strip()
+    try:
+        parsed = datetime.strptime(text, "%Y%m%d" if re.fullmatch(r"\d{8}", text) else "%Y-%m-%d")
+    except ValueError as e:
+        raise ValueError(f"{field} 须为 YYYYMMDD 或 YYYY-MM-DD，收到 {value!r}") from e
+    return parsed.date().isoformat()
+
+
+def _csindex_trade_dates(index_code: str, force_refresh: bool = False) -> list[str]:
+    code = _csindex_code(index_code)
+    rel = f"csindex/trade_dates/{code}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=20)
+        if cached is not None:
+            return cached
+    body = _csindex_request("/perf/index-perf-tradeDate", params={"indexCode": code})
+    data = body.get("data")
+    if not isinstance(data, list):
+        raise UpstreamFormatError(f"中证有效日期 data 非 list（{code}）")
+    dates = [_csindex_date(x, "tradeDate") for x in data]
+    if dates != sorted(dates) or len(set(dates)) != len(dates):
+        raise UpstreamFormatError(f"中证有效日期非升序或存在重复（{code}）")
+    _cbreak_success("csindex")
+    _cache_write(rel, dates)
+    return dates
+
+
+def _csindex_float(row: dict, field: str):
+    value = row.get(field)
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as e:
+        raise UpstreamFormatError(f"中证行情字段 {field} 非数值：{value!r}") from e
+    if not math.isfinite(number):
+        raise UpstreamFormatError(f"中证行情字段 {field} 非有限数值")
+    return number
+
+
+def _csindex_perf_rows(raw: list, mapping: dict, valid_dates: set,
+                       start: str, end: str) -> tuple[list, list]:
+    code = mapping["total_return_code"]
+    rows, numeric_warnings = [], []
+    seen = set()
+    previous = None
+    for item in raw:
+        if not isinstance(item, dict) or item.get("indexCode") != code:
+            raise UpstreamFormatError(f"中证行情身份或行结构异常（期望 {code}）")
+        if not _csindex_names_indicate_total(
+                item.get("indexNameCnAll"), item.get("indexNameEnAll")):
+            raise UpstreamFormatError(f"中证行情未确认全收益口径（{code}）")
+        day = _csindex_date(item.get("tradeDate"), "tradeDate")
+        if day in seen:
+            raise UpstreamFormatError(f"中证行情存在重复日期（{code} {day}）")
+        seen.add(day)
+        if day not in valid_dates:
+            continue
+        if not start <= day <= end:
+            continue
+        close = _csindex_float(item, "close")
+        if close is None or close <= 0:
+            raise UpstreamFormatError(f"中证行情收盘价非法（{code} {day}: {close}）")
+        row = {
+            "date": day, "close": close, "index_code": code,
+            "base_index_code": mapping["base_index_code"],
+            "index_name": item.get("indexNameCnAll") or mapping.get("index_name"),
+            "return_type": "total_return", "currency": mapping.get("currency") or "CNY",
+            "source": "csindex", "change": _csindex_float(item, "change"),
+            "change_pct": _csindex_float(item, "changePct"),
+            "trading_vol": _csindex_float(item, "tradingVol"),
+            "trading_value": _csindex_float(item, "tradingValue"),
+            "cons_number": _csindex_float(item, "consNumber"),
+            "pe_ttm": _csindex_float(item, "peg"),
+        }
+        for field in ("trading_vol", "trading_value", "cons_number"):
+            if row[field] is not None and row[field] < 0:
+                raise UpstreamFormatError(f"中证行情 {field} 为负（{code} {day}）")
+        if previous is not None:
+            change = row["close"] - previous["close"]
+            returns = (row["close"] / previous["close"] - 1) * 100
+            if row["change"] is not None and abs(change - row["change"]) > 0.06:
+                numeric_warnings.append(f"{day}:change")
+            if row["change_pct"] is not None and abs(returns - row["change_pct"]) > 0.06:
+                numeric_warnings.append(f"{day}:changePct")
+        rows.append(row)
+        previous = row
+    dates = [x["date"] for x in rows]
+    if dates != sorted(dates):
+        raise UpstreamFormatError(f"中证行情日期非升序（{code}）")
+    return rows, numeric_warnings
+
+
+def _csindex_sequence_warnings(rows: list) -> list:
+    """对最终拼接序列复核，覆盖分年边界和增量缝合点。"""
+    warnings = []
+    for previous, row in zip(rows, rows[1:]):
+        change = row["close"] - previous["close"]
+        returns = (row["close"] / previous["close"] - 1) * 100
+        if row.get("change") is not None and abs(change - row["change"]) > 0.06:
+            warnings.append(f"{row['date']}:change")
+        if row.get("change_pct") is not None and abs(returns - row["change_pct"]) > 0.06:
+            warnings.append(f"{row['date']}:changePct")
+    return warnings
+
+
+def _csindex_cache_valid(rows, code: str) -> bool:
+    if not isinstance(rows, list) or not rows:
+        return False
+    dates = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("index_code") != code:
+            return False
+        close = row.get("close")
+        if isinstance(close, bool) or not isinstance(close, (int, float)) \
+                or not math.isfinite(close) or close <= 0:
+            return False
+        day = row.get("date")
+        if not isinstance(day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            return False
+        try:
+            datetime.strptime(day, "%Y-%m-%d")
+        except ValueError:
+            return False
+        dates.append(day)
+    return dates == sorted(dates) and len(set(dates)) == len(dates)
+
+
+def _csindex_download_history(mapping: dict, start: str, end: str,
+                              force_refresh: bool = False, seed_rows=None,
+                              coverage_start=None) -> tuple[list, dict]:
+    code = mapping["total_return_code"]
+    coverage_start = coverage_start or start
+    valid = set(_csindex_trade_dates(code, force_refresh=force_refresh))
+    expected = sorted(day for day in valid if coverage_start <= day <= end)
+
+    def _fetch(s, e):
+        body = _csindex_request("/perf/index-perf", params={
+            "indexCode": code, "startDate": s.replace("-", ""),
+            "endDate": e.replace("-", "")}, timeout=60)
+        data = body.get("data")
+        if not isinstance(data, list):
+            raise UpstreamFormatError(f"中证行情 data 非 list（{code}）")
+        return _csindex_perf_rows(data, mapping, valid, s, e)
+
+    rows, warnings = _fetch(start, end)
+    if seed_rows:
+        rows = [x for x in seed_rows
+                if coverage_start <= x["date"] < start and x["date"] in valid] + rows
+    dates = {x["date"] for x in rows}
+    missing = [day for day in expected if day not in dates]
+    chunked = False
+    if missing:
+        chunked = True
+        rows, warnings = [], []
+        for year in range(int(coverage_start[:4]), int(end[:4]) + 1):
+            s = max(coverage_start, f"{year}-01-01")
+            e = min(end, f"{year}-12-31")
+            part, part_warnings = _fetch(s, e)
+            rows.extend(part)
+            warnings.extend(part_warnings)
+        dates = {x["date"] for x in rows}
+        missing = [day for day in expected if day not in dates]
+        if missing:
+            raise UpstreamFormatError(
+                f"中证行情按年重取后仍缺 {len(missing)} 个有效日期（{code}，"
+                f"示例 {missing[:5]}）")
+    if len(rows) != len(dates):
+        raise UpstreamFormatError(f"中证行情拼接后存在重复日期（{code}）")
+    extra = sorted(dates - set(expected))
+    if extra:
+        raise UpstreamFormatError(
+            f"中证行情含非官方有效日期（{code}，{len(extra)} 处，示例 {extra[:5]}）")
+    warnings = sorted(set(warnings + _csindex_sequence_warnings(rows)))
+    fatal_warnings = [x for x in warnings if x.endswith(":changePct")]
+    if fatal_warnings:
+        raise UpstreamFormatError(
+            f"中证行情收盘与涨跌幅矛盾（{code}，{len(fatal_warnings)} 处，"
+            f"示例 {fatal_warnings[:5]}）；全部数值警告 {warnings[:10]}")
+    _cbreak_success("csindex")
+    report = {"index_code": code, "expected_dates": len(expected),
+              "actual_dates": len(rows), "missing_dates": missing,
+              "numeric_warnings": warnings, "chunked": chunked,
+              "incremental": bool(seed_rows), "coverage_start": coverage_start,
+              "first_date": rows[0]["date"] if rows else None,
+              "last_date": rows[-1]["date"] if rows else None}
+    return rows, report
+
+
+def csindex_total_return_daily(index_code, start_date="", end_date="",
+                               force_refresh: bool = False) -> list[dict]:
+    """官方人民币全收益指数日线；官方日期过滤、完整性和数值校验通过才缓存。"""
+    mapping = csindex_resolve_total_return(index_code, force_refresh=force_refresh)
+    if mapping.get("status") not in ("mapped", "already_total"):
+        raise ValueError(f"指数 {index_code!r} 无已验证人民币全收益映射：{mapping.get('status')}")
+    today = datetime.now(_BJ_TZ).date().isoformat()
+    basic = mapping.get("basic_date")
+    if not basic:
+        raise UpstreamFormatError(f"全收益指数 {mapping['total_return_code']} 缺 basicDate")
+    start = _csindex_date(start_date, "start_date") if start_date else _csindex_date(basic, "basicDate")
+    end = _csindex_date(end_date, "end_date") if end_date else today
+    if end > today:
+        raise ValueError(f"end_date 不可超过今天 {today}，收到 {end}")
+    if start > end:
+        raise ValueError(f"start_date {start} 晚于 end_date {end}")
+    code = mapping["total_return_code"]
+    current_year = int(today[:4])
+
+    stale_current = None
+    if not force_refresh:
+        combined, complete = [], True
+        for year in range(int(start[:4]), int(end[:4]) + 1):
+            rel = f"csindex/daily/{code}_{year}.json"
+            cached = _cache_read(rel, max_age_hours=20 if year == current_year else None)
+            if cached is not None and not _csindex_cache_valid(cached, code):
+                cached = None
+            if cached is None:
+                if year == current_year:
+                    stale = _cache_read(rel, max_age_hours=None)
+                    if _csindex_cache_valid(stale, code):
+                        stale_current = stale
+                complete = False
+                break
+            combined.extend(cached)
+        if complete:
+            return [x for x in combined if start <= x["date"] <= end]
+
+    seed_rows, coverage_start = None, None
+    if not force_refresh and int(start[:4]) == current_year == int(end[:4]):
+        coverage_start = f"{current_year}-01-01"
+        fetch_start = stale_current[-1]["date"] if stale_current else coverage_start
+        seed_rows = stale_current
+    else:
+        fetch_start = _csindex_date(basic, "basicDate")
+    rows, report = _csindex_download_history(
+        mapping, fetch_start, today, force_refresh=force_refresh,
+        seed_rows=seed_rows, coverage_start=coverage_start)
+    report["fetched_at"] = datetime.now(_BJ_TZ).isoformat()
+    report["requested_start"] = start
+    report["requested_end"] = end
+    by_year = defaultdict(list)
+    for row in rows:
+        by_year[int(row["date"][:4])].append(row)
+    for year, year_rows in by_year.items():
+        _cache_write(f"csindex/daily/{code}_{year}.json", year_rows)
+    _cache_write(f"csindex/reports/{code}_latest.json", report)
+    return [x for x in rows if start <= x["date"] <= end]
+
+
+def csindex_sync_total_return(codes=None, all_indices: bool = False,
+                              start_date="", end_date="", resume: bool = True) -> dict:
+    """显式批量同步；风险/连续三次上游故障停止，单指数数据问题可续跑。"""
+    if bool(codes) == bool(all_indices):
+        raise ValueError("codes 与 all_indices=True 必须二选一，且不能同时省略")
+    start_date = _csindex_date(start_date, "start_date") if start_date else ""
+    end_date = _csindex_date(end_date, "end_date") if end_date else ""
+    today = datetime.now(_BJ_TZ).date().isoformat()
+    effective_end = end_date or today
+    if start_date and start_date > effective_end:
+        raise ValueError(
+            f"start_date {start_date} 晚于有效结束日 {effective_end}；零网络拒绝同步")
+    if end_date > today:
+        raise ValueError(f"end_date 不可超过今天 {today}；零网络拒绝同步")
+    if all_indices:
+        selected = [x["index_code"] for x in csindex_universe()]
+    else:
+        selected = list(dict.fromkeys(_csindex_code(x) for x in codes))
+    if not selected:
+        raise ValueError("同步代码清单为空")
+    rel = "csindex/sync_manifest.json"
+    manifest = _cache_read(rel, max_age_hours=None) if resume else None
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("jobs"), dict):
+        manifest = {"jobs": {}}
+    jobs = manifest["jobs"]
+    now = time.time()
+    upstream_failures = 0
+    summary = {"total": len(selected), "ok": 0, "no_data": 0,
+               "no_total_return": 0, "return_type_unknown": 0,
+               "ambiguous": 0, "error": 0, "skipped": 0,
+               "request_count_start": CSINDEX_REQUEST_COUNT[0]}
+    for code in selected:
+        previous = jobs.get(code) or {}
+        same_window = (previous.get("start_date", "") == start_date
+                       and previous.get("end_date", "") == end_date)
+        if resume and same_window and previous.get("status") == "ok":
+            try:
+                fetched_ts = datetime.fromisoformat(previous["fetched_at"]).timestamp()
+            except (KeyError, ValueError, TypeError):
+                fetched_ts = 0
+            if now - fetched_ts < 20 * 3600:
+                summary["ok"] += 1
+                summary["skipped"] += 1
+                continue
+        job = {"base_index_code": code, "start_date": start_date, "end_date": end_date,
+               "fetched_at": datetime.now(_BJ_TZ).isoformat()}
+        try:
+            mapping = csindex_resolve_total_return(code)
+            if mapping.get("status") not in ("mapped", "already_total"):
+                status = mapping["status"]
+                job.update(status=status, mapping=mapping)
+            else:
+                rows = csindex_total_return_daily(code, start_date=start_date, end_date=end_date)
+                status = "ok" if rows else "no_data"
+                job.update(status=status, mapping=mapping, rows=len(rows),
+                           first_date=rows[0]["date"] if rows else None,
+                           last_date=rows[-1]["date"] if rows else None)
+        except (RiskControlError, CircuitOpenError):
+            job.update(status="error", error="风险熔断，未继续后续指数")
+            jobs[code] = job
+            manifest["updated_at"] = datetime.now(_BJ_TZ).isoformat()
+            _cache_write(rel, manifest)
+            raise
+        except Exception as e:
+            status = "error"
+            job.update(status=status, error=f"{type(e).__name__}: {str(e)[:300]}")
+            if isinstance(e, (requests.RequestException, UpstreamRequestError)):
+                upstream_failures += 1
+                if upstream_failures >= 3:
+                    jobs[code] = job
+                    manifest["updated_at"] = datetime.now(_BJ_TZ).isoformat()
+                    _cache_write(rel, manifest)
+                    raise RuntimeError(
+                        "中证同步连续 3 次上游传输/接口失败，已停止后续指数；"
+                        "请排查上游后使用 resume=True 恢复") from e
+            else:
+                upstream_failures = 0
+        else:
+            upstream_failures = 0
+        jobs[code] = job
+        summary[status] = summary.get(status, 0) + 1
+        manifest["updated_at"] = datetime.now(_BJ_TZ).isoformat()
+        _cache_write(rel, manifest)
+    summary["requests"] = CSINDEX_REQUEST_COUNT[0] - summary.pop("request_count_start")
+    summary["manifest"] = rel
+    summary["jobs"] = [jobs[code] for code in selected if code in jobs]
+    return summary
+
+
 # ── Sprint 2 默认激活：跨进程请求协调（真实时钟；测试可随时重建）────────
-# 放在模块末尾确保策略引用的全部常量（TT/CNINFO 间隔等）已定义。import 副作用
+# 放在模块末尾确保策略引用的全部常量（TT/CNINFO/CSINDEX 间隔等）已定义。import 副作用
 # 仅构建协调器与网关对象，首个网络请求才落盘状态（~/.fund_data_cache/coordinator）。
 _reset_request_coordination()

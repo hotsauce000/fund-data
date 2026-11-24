@@ -33,7 +33,7 @@ fd.FUND_CACHE_DIR = Path(_TEST_CACHE_TMP.name)
 # 测试期的配额/熔断状态绝不写进 ~/.fund_data_cache/coordinator。间隔归零：
 # 滑窗/间隔语义由 fund_data_core 单测钉死，集成回归不为节流真睡 1.5s。
 _ZERO_POLICY = {line: {"min_interval": 0} for line in
-                ("eastmoney", "cninfo", "danjuan", "tencent", "sina", "chinabond")}
+                ("eastmoney", "cninfo", "danjuan", "tencent", "sina", "chinabond", "csindex")}
 
 
 def _fresh_coordination():
@@ -1166,8 +1166,8 @@ def test_l1_offline():
     _thin = (_repo / "SKILL.md").read_text(encoding="utf-8")
     _ref = (_repo / "reference.md").read_text(encoding="utf-8")
     _thin_b = len(_thin.encode("utf-8"))
-    check("L1", "架构-瘦SKILL体积上限", _thin_b < 13400,
-          f"{_thin_b}B/上限13400（含平台必填市场元数据~0.5KB；超重=往路由层塞长文，移 reference.md）")
+    check("L1", "架构-瘦SKILL体积上限", _thin_b < 14500,
+          f"{_thin_b}B/上限14500（V0.8.0 四个全收益入口纳入；长文仍移 reference.md）")
     _pub = [n.name for n in _ast.parse((_repo / "fund_data.py").read_text(encoding="utf-8")).body
             if isinstance(n, _ast.FunctionDef) and not n.name.startswith("_")]
     check("L1", "架构-签名速查全覆盖", len(_pub) >= 32 and all(f"| `{n}(" in _thin for n in _pub),
@@ -2959,6 +2959,374 @@ def test_l1_offline():
         _fresh_coordination()
 
 
+# ════════════════════ V0.8.0 中证全收益指数层（固定样本零网络）════════════
+def test_csindex_offline():
+    check("L1", "中证-代码归一与安全字符",
+          fd._csindex_code(" h00300 ") == "H00300"
+          and fd._csindex_code("932000cny010") == "932000CNY010")
+    expect_raise("L1", "中证-非法代码拒绝", lambda: fd._csindex_code("../H00300"), "代码")
+    _cs_policy = fd._COORDINATOR.policy("csindex")
+    check("L1", "中证防封-独立配额单并发与慢请求租约",
+          _cs_policy.max_requests == 120 and _cs_policy.window_seconds == 300
+          and _cs_policy.max_in_flight == 1 and _cs_policy.lease_seconds > 120)
+    _deriv = [
+        {"indexCode": "H00300", "indexNameCn": "300收益", "indexNameEn": "CSI 300 TRI"},
+        {"indexCode": "N00300", "indexNameCn": "沪深300净收益", "indexNameEn": "CSI 300 NTRI"},
+        {"indexCode": "000300HKD01", "indexNameCn": "沪深300(全)HKD",
+         "indexNameEn": "CSI 300 TRI(HKD)"},
+    ]
+    _cands = fd._csindex_derivative_candidates(_deriv)
+    check("L1", "中证-TRI候选排除净收益与外币",
+          len(_cands) == 1 and _cands[0]["index_code"] == "H00300")
+
+    def _info(code, name, en, asset="stock"):
+        return {"indexCode": code, "indexFullNameCn": name, "indexFullNameEn": en,
+                "indexShortNameCn": name, "indexShortNameEn": en,
+                "currencyCn": "人民币", "basicDate": "2004-12-31",
+                "basicIndex": 1000.0, "indexType": asset}
+
+    _orig_request = fd._csindex_request
+    try:
+        _calls = []
+
+        def _universe_fake(path, params=None, payload=None, timeout=30):
+            _calls.append(payload["pager"]["pageNum"])
+            page = payload["pager"]["pageNum"]
+            raw = [
+                {"indexCode": "000300", "indexName": "沪深300", "indexSeries": "中证系列指数",
+                 "assetsClassify": "股票", "currency": "人民币"},
+                {"indexCode": "H30269", "indexName": "红利低波", "indexSeries": "中证系列指数",
+                 "assetsClassify": "股票", "currency": "人民币"},
+                {"indexCode": "930001", "indexName": "样本债指", "indexSeries": "中证系列指数",
+                 "assetsClassify": "固定收益", "currency": "人民币"},
+            ]
+            data = raw[:2] if page == 1 else raw[2:]
+            return {"code": "200", "success": True, "total": 3, "size": 2, "data": data}
+
+        fd._csindex_request = _universe_fake
+        _uni = fd.csindex_universe(force_refresh=True)
+        check("L1", "中证清单-分页完整性",
+              len(_uni) == 3 and _calls == [1, 2]
+              and _uni[0]["index_code"] == "000300")
+        _n_calls = len(_calls)
+        _stock = fd.csindex_universe(asset_class="股票")
+        check("L1", "中证清单-缓存与本地筛选",
+              len(_stock) == 2 and len(_calls) == _n_calls)
+
+        def _mapping_fake(path, params=None, payload=None, timeout=30):
+            if path.startswith("/indexInfo/index-basic-info/"):
+                code = path.rsplit("/", 1)[-1]
+                infos = {
+                    "000300": _info(code, "沪深300指数", "CSI 300 Index"),
+                    "H00300": _info(code, "沪深300全收益指数", "CSI 300 Total Return Index"),
+                    "H30269": _info(code, "中证红利低波动指数", "CSI Dividend Low Volatility Index"),
+                    "H20269": _info(code, "中证红利低波动全收益指数", "CSI Dividend Low Volatility TRI"),
+                    "932000": _info(code, "中证2000指数", "CSI 2000 Index"),
+                    "932000CNY010": _info(code, "中证2000全收益指数", "CSI 2000 TRI"),
+                    "932047": _info(code, "中证REITs全收益指数", "CSI REITs Total Return Index"),
+                    "930001": _info(code, "样本债券指数", "CSI Sample Bond Index", "bond"),
+                    "930002": _info(code, "无全收益股票指数", "CSI No TRI Index"),
+                    "930003": _info(code, "歧义股票指数", "CSI Ambiguous Index"),
+                }
+                return {"code": "200", "success": True, "data": infos[code]}
+            if path == "/perf/get-derivative-index":
+                code = params["indexCode"]
+                rows = {
+                    "000300": [_deriv[0], _deriv[1], _deriv[2]],
+                    "H30269": [{"indexCode": "H20269", "indexNameCn": "红利低波全收益",
+                                "indexNameEn": "CSI Dividend Low VolatilityTRI"}],
+                    "932000": [{"indexCode": "932000CNY010", "indexNameCn": "中证2000全收益",
+                                "indexNameEn": "CSI 2000 TRI"}],
+                    "930001": [], "930002": [],
+                    "930003": [_deriv[0], {"indexCode": "H20269", "indexNameCn": "另一全收益",
+                                           "indexNameEn": "Other TRI"}],
+                }[code]
+                return {"code": "200", "success": True, "data": rows}
+            raise AssertionError(path)
+
+        fd._csindex_request = _mapping_fake
+        _m300 = fd.csindex_resolve_total_return("000300", force_refresh=True)
+        _mlv = fd.csindex_resolve_total_return("H30269", force_refresh=True)
+        _m2000 = fd.csindex_resolve_total_return("932000", force_refresh=True)
+        check("L1", "中证映射-三类官方特殊代码",
+              _m300["total_return_code"] == "H00300"
+              and _mlv["total_return_code"] == "H20269"
+              and _m2000["total_return_code"] == "932000CNY010"
+              and all(x["status"] == "mapped" for x in (_m300, _mlv, _m2000)))
+        check("L1", "中证映射-本身即全收益",
+              fd.csindex_resolve_total_return("932047", force_refresh=True)["status"] == "already_total")
+        check("L1", "中证映射-无TRI与未知口径分离",
+              fd.csindex_resolve_total_return("930002", force_refresh=True)["status"] == "no_total_return"
+              and fd.csindex_resolve_total_return("930001", force_refresh=True)["status"] == "return_type_unknown")
+        check("L1", "中证映射-多候选不猜",
+              fd.csindex_resolve_total_return("930003", force_refresh=True)["status"] == "ambiguous")
+
+        _valid = ["20240102", "20240103", "20240104"]
+
+        def _perf_row(day, close, change=None, pct=None):
+            return {"tradeDate": day, "indexCode": "H00300",
+                    "indexNameCnAll": "沪深300全收益指数",
+                    "indexNameEnAll": "CSI 300 Total Return Index",
+                    "close": close, "change": change, "changePct": pct,
+                    "tradingVol": 100, "tradingValue": 20.5, "consNumber": 300, "peg": 10.57}
+
+        def _history_fake(path, params=None, payload=None, timeout=30):
+            if path == "/perf/index-perf-tradeDate":
+                return {"code": "200", "success": True, "data": _valid}
+            if path == "/perf/index-perf":
+                rows = [_perf_row("20240101", 100, 0, 0),
+                        _perf_row("20240102", 100, 0, 0),
+                        _perf_row("20240103", 101, 1, 1),
+                        _perf_row("20240104", 99.99, -1.01, -1)]
+                return {"code": "200", "success": True, "data": rows}
+            return _mapping_fake(path, params, payload, timeout)
+
+        fd._csindex_request = _history_fake
+        _hist = fd.csindex_total_return_daily("000300", "20240101", "20240110",
+                                               force_refresh=True)
+        check("L1", "中证历史-占位日清洗与字段归一",
+              len(_hist) == 3 and _hist[0]["date"] == "2024-01-02"
+              and _hist[-1]["date"] == "2024-01-04"
+              and _hist[0]["pe_ttm"] == 10.57
+              and _hist[0]["return_type"] == "total_return")
+        _before = fd.CSINDEX_REQUEST_COUNT[0]
+        _hist2 = fd.csindex_total_return_daily("000300", "20240102", "20240103")
+        check("L1", "中证历史-年度缓存二次零请求",
+              len(_hist2) == 2 and fd.CSINDEX_REQUEST_COUNT[0] == _before)
+
+        _mapping = _m300
+
+        _missing_calls = [0]
+
+        def _missing_fake(path, params=None, payload=None, timeout=30):
+            if path == "/perf/index-perf-tradeDate":
+                return {"code": "200", "success": True, "data": _valid}
+            if path == "/perf/index-perf":
+                _missing_calls[0] += 1
+                rows = [_perf_row("20240102", 100, 0, 0),
+                        _perf_row("20240103", 101, 1, 1),
+                        _perf_row("20240104", 99.99, -1.01, -1)]
+                if _missing_calls[0] == 1:
+                    rows.pop(1)
+                return {"code": "200", "success": True, "data": rows}
+            raise AssertionError(path)
+
+        fd._csindex_request = _missing_fake
+        _filled, _report = fd._csindex_download_history(
+            _mapping, "2024-01-01", "2024-01-10", force_refresh=True)
+        check("L1", "中证历史-缺失自动按年重取",
+              len(_filled) == 3 and _report["chunked"] and not _report["missing_dates"])
+
+        def _bad_numeric(path, params=None, payload=None, timeout=30):
+            if path == "/perf/index-perf-tradeDate":
+                return {"code": "200", "success": True, "data": _valid[:2]}
+            rows = [_perf_row("20240102", 100, 0, 0), _perf_row("20240103", 101, 9, 9)]
+            return {"code": "200", "success": True, "data": rows}
+
+        fd._csindex_request = _bad_numeric
+        expect_raise("L1", "中证历史-数值矛盾拒绝缓存",
+                     lambda: fd._csindex_download_history(
+                         _mapping, "2024-01-01", "2024-01-03", force_refresh=True),
+                     "矛盾")
+
+        fd._csindex_request = _history_fake
+        expect_raise("L1", "中证同步-全量必须显式",
+                     lambda: fd.csindex_sync_total_return(), "二选一")
+        _sync = fd.csindex_sync_total_return(codes=["000300"], start_date="20240101",
+                                             end_date="20240110", resume=False)
+        check("L1", "中证同步-限定代码与报告",
+              _sync["total"] == 1 and _sync["ok"] == 1 and _sync["requests"] == 0)
+        _sync2 = fd.csindex_sync_total_return(codes=["000300"], start_date="20240101",
+                                              end_date="20240110", resume=True)
+        check("L1", "中证同步-新鲜成功记录跳过",
+              _sync2["skipped"] == 1 and _sync2["requests"] == 0)
+
+        def _cross_year_fake(path, params=None, payload=None, timeout=30):
+            if path == "/perf/index-perf-tradeDate":
+                return {"code": "200", "success": True, "data": ["20231229", "20240102"]}
+            if params["startDate"].startswith("2023"):
+                rows = [_perf_row("20231229", 100, 0, 0)]
+            else:
+                rows = [_perf_row("20240102", 101, 1, 9)]
+            if params["startDate"] == "20231229" and params["endDate"] == "20240110":
+                rows = rows[:0]
+            return {"code": "200", "success": True, "data": rows}
+
+        fd._csindex_request = _cross_year_fake
+        expect_raise("L1", "中证历史-分年边界首日仍验数值",
+                     lambda: fd._csindex_download_history(
+                         _mapping, "2023-12-01", "2024-01-10", force_refresh=True),
+                     "矛盾")
+
+        _year = date.today().year
+        (fd.FUND_CACHE_DIR / "csindex/trade_dates/H00300.json").unlink(missing_ok=True)
+        _current_rel = f"csindex/daily/H00300_{_year}.json"
+        _seed = dict(_hist[0], date=f"{_year}-01-02")
+        _removed_seed = dict(_hist[0], date=f"{_year}-01-01")
+        fd._cache_write(_current_rel, [_removed_seed, _seed])
+        _current_path = fd.FUND_CACHE_DIR / _current_rel
+        _old_mtime = time.time() - 21 * 3600
+        os.utime(_current_path, (_old_mtime, _old_mtime))
+        _increment_params = []
+
+        def _increment_fake(path, params=None, payload=None, timeout=30):
+            if path == "/perf/index-perf-tradeDate":
+                return {"code": "200", "success": True,
+                        "data": [f"{_year}0102", f"{_year}0105"]}
+            if path == "/perf/index-perf":
+                _increment_params.append(params)
+                return {"code": "200", "success": True, "data": [
+                    _perf_row(f"{_year}0102", 100, 0, 0),
+                    _perf_row(f"{_year}0105", 101, 1, 1)]}
+            return _mapping_fake(path, params, payload, timeout)
+
+        fd._csindex_request = _increment_fake
+        _current = fd.csindex_total_return_daily("000300", f"{_year}0101")
+        _current_report = fd._cache_read(f"csindex/reports/H00300_latest.json", None)
+        check("L1", "中证历史-当前年过期后末日增量缝合",
+              len(_current) == 2 and _increment_params[0]["startDate"] == f"{_year}0102"
+              and _current_report["incremental"] and _current[-1]["date"] == f"{_year}-01-05",
+              f"rows={[(x['date'], x['close']) for x in _current]} params={_increment_params} report={_current_report}")
+
+        _orig_resolve_sync, _orig_daily_sync = (fd.csindex_resolve_total_return,
+                                                fd.csindex_total_return_daily)
+        try:
+            _sync_calls = []
+
+            def _sync_resolve(code):
+                return {"base_index_code": code, "total_return_code": code,
+                        "status": "mapped", "currency": "CNY", "basic_date": "2024-01-01"}
+
+            def _sync_daily(code, **kwargs):
+                _sync_calls.append(code)
+                if code == "SYNC01":
+                    raise RuntimeError("普通失败")
+                return [dict(_hist[0], index_code=code, base_index_code=code)]
+
+            fd.csindex_resolve_total_return = _sync_resolve
+            fd.csindex_total_return_daily = _sync_daily
+            _sync3 = fd.csindex_sync_total_return(codes=["SYNC01", "SYNC02"], resume=False)
+            check("L1", "中证同步-普通失败后续跑冷路径",
+                  _sync_calls == ["SYNC01", "SYNC02"]
+                  and _sync3["error"] == 1 and _sync3["ok"] == 1)
+
+            _risk_calls = []
+
+            def _sync_risk(code, **kwargs):
+                _risk_calls.append(code)
+                raise fd.RiskControlError("mock 风控停止")
+
+            fd.csindex_total_return_daily = _sync_risk
+            expect_raise("L1", "中证同步-风控写清单并停止后续",
+                         lambda: fd.csindex_sync_total_return(
+                             codes=["RISK01", "RISK02"], resume=False), "风控")
+            _risk_manifest = fd._cache_read("csindex/sync_manifest.json", None)
+            check("L1", "中证同步-风控零第二项且已落盘",
+                  _risk_calls == ["RISK01"]
+                  and _risk_manifest["jobs"]["RISK01"]["status"] == "error"
+                  and "RISK02" not in _risk_manifest["jobs"])
+
+            _sync_calls[:] = []
+            expect_raise("L1", "中证同步-非法日期零业务调用",
+                         lambda: fd.csindex_sync_total_return(
+                             codes=["SYNC01"], start_date="20241231", end_date="20240101"),
+                         "零网络")
+            check("L1", "中证同步-非法日期不进入指数循环", not _sync_calls)
+            expect_raise("L1", "中证同步-未来起始日默认终点也零网络",
+                         lambda: fd.csindex_sync_total_return(
+                             codes=["SYNC01"], start_date="20990101"), "有效结束日")
+            check("L1", "中证同步-未来起始日仍不进入循环", not _sync_calls)
+
+            _upstream_calls = []
+
+            def _sync_upstream_down(code, **kwargs):
+                _upstream_calls.append(code)
+                raise fd.requests.RequestException("mock 持续断网")
+
+            fd.csindex_total_return_daily = _sync_upstream_down
+            expect_raise("L1", "中证同步-连续上游三败停止",
+                         lambda: fd.csindex_sync_total_return(
+                             codes=["UP0001", "UP0002", "UP0003", "UP0004"], resume=False),
+                         "连续 3 次")
+            _upstream_manifest = fd._cache_read("csindex/sync_manifest.json", None)
+            check("L1", "中证同步-上游三败零第四项且落盘",
+                  _upstream_calls == ["UP0001", "UP0002", "UP0003"]
+                  and _upstream_manifest["jobs"]["UP0003"]["status"] == "error"
+                  and "UP0004" not in _upstream_manifest["jobs"])
+
+            _data_calls = []
+
+            def _sync_data_errors(code, **kwargs):
+                _data_calls.append(code)
+                if code != "DA0004":
+                    raise fd.UpstreamFormatError("单指数内容校验失败")
+                return [dict(_hist[0], index_code=code, base_index_code=code)]
+
+            fd.csindex_total_return_daily = _sync_data_errors
+            _data_sync = fd.csindex_sync_total_return(
+                codes=["DA0001", "DA0002", "DA0003", "DA0004"], resume=False)
+            check("L1", "中证同步-单指数内容错误不误停",
+                  _data_calls == ["DA0001", "DA0002", "DA0003", "DA0004"]
+                  and _data_sync["error"] == 3 and _data_sync["ok"] == 1)
+
+            _mixed_calls = []
+
+            def _sync_mixed_errors(code, **kwargs):
+                _mixed_calls.append(code)
+                if code.startswith("UP"):
+                    raise fd.requests.RequestException("上游失败")
+                raise fd.UpstreamFormatError("本地内容失败")
+
+            fd.csindex_total_return_daily = _sync_mixed_errors
+            _mixed = fd.csindex_sync_total_return(
+                codes=["UP1001", "LO0001", "UP1002", "UP1003"], resume=False)
+            check("L1", "中证同步-本地错误重置上游连击",
+                  len(_mixed_calls) == 4 and _mixed["error"] == 4)
+        finally:
+            fd.csindex_resolve_total_return = _orig_resolve_sync
+            fd.csindex_total_return_daily = _orig_daily_sync
+    finally:
+        fd._csindex_request = _orig_request
+        _fresh_coordination()
+
+    class _CSIResponse:
+        def __init__(self, status, body):
+            self.status_code = status
+            self.content = json.dumps(body).encode("utf-8")
+
+        def raise_for_status(self):
+            return None
+
+    _orig_get = fd.CSINDEX_SESSION.get
+    try:
+        fd.CSINDEX_SESSION.get = lambda *a, **k: _CSIResponse(
+            200, {"code": "400", "msg": "Parameter Errors", "success": False})
+        expect_raise("L1", "中证请求-HTTP200业务400拒绝",
+                     lambda: fd._csindex_request("/perf/index-perf", timeout=1),
+                     "业务")
+        _fresh_coordination()
+        fd.CSINDEX_SESSION.get = lambda *a, **k: _CSIResponse(403, {})
+        expect_raise("L1", "中证请求-403风控分流",
+                     lambda: fd._csindex_request("/perf/index-perf", timeout=1),
+                     "403")
+        _fresh_coordination()
+        _legacy_transport = [0]
+
+        def _legacy_forbidden(*args, **kwargs):
+            _legacy_transport[0] += 1
+            raise AssertionError("legacy 不得发中证请求")
+
+        fd.CSINDEX_SESSION.get = _legacy_forbidden
+        fd._teardown_request_coordination()
+        expect_raise("L1", "中证防封-teardown直连fail-closed",
+                     lambda: fd._csindex_request("/perf/index-perf", timeout=1),
+                     "禁止 legacy")
+        check("L1", "中证防封-teardown零transport", _legacy_transport == [0])
+    finally:
+        fd.CSINDEX_SESSION.get = _orig_get
+        _fresh_coordination()
+
+
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
 def test_l2_smoke():
     # 在线首测强制真实抓取：覆盖沙箱里的离线密闭性合成种子（E1 端点真验证）
@@ -3851,16 +4219,55 @@ def test_sprint3_integration_offline():
             tmp.cleanup()
 
 
+def test_csindex_online():
+    uni = fd.csindex_universe()
+    uni_all = fd.csindex_universe(currency=None)
+    check("L2", "中证清单-全系列真实覆盖",
+          len(uni) >= 2700 and len(uni_all) >= 3000
+          and len({x["index_series"] for x in uni_all}) == 7,
+          f"人民币 {len(uni)} 个，全币种 {len(uni_all)} 个")
+    expected = {"000300": "H00300", "H30269": "H20269", "932000": "932000CNY010"}
+    for base, tr_code in expected.items():
+        mapping = fd.csindex_resolve_total_return(base)
+        check("L2", f"中证映射-{base}", mapping.get("total_return_code") == tr_code
+              and mapping.get("status") == "mapped")
+        sample = fd.csindex_total_return_daily(base, "20240101", "20240110")
+        check("L2", f"中证历史-{base}真实样本",
+              len(sample) == 7 and sample[0]["index_code"] == tr_code
+              and sample[0]["date"] == "2024-01-02" and sample[-1]["date"] == "2024-01-10")
+    rows = fd.csindex_total_return_daily("000300", "20240101", "20241231")
+    check("L2", "中证历史-沪深300全收益2024完整区间",
+          len(rows) == 242 and rows[0]["date"] == "2024-01-02"
+          and rows[-1]["date"] == "2024-12-31"
+          and rows[0]["index_code"] == "H00300"
+          and all(x["date"] != "2024-01-01" for x in rows),
+          f"{len(rows)} 行，{rows[0]['date']}→{rows[-1]['date']}")
+    annual_return = rows[-1]["close"] / rows[0]["close"] - 1
+    check("L3", "中证历史-沪深300全收益年度锚点",
+          abs(rows[0]["close"] - 4709.92) < 1e-9
+          and abs(rows[-1]["close"] - 5642.60) < 1e-9
+          and abs(annual_return - 0.198025) < 0.00001,
+          f"收益 {annual_return * 100:.4f}%")
+    before = fd.CSINDEX_REQUEST_COUNT[0]
+    fd.csindex_total_return_daily("000300", "20240102", "20240630")
+    check("L4", "中证历史-缓存切片零请求", fd.CSINDEX_REQUEST_COUNT[0] == before)
+    sync = fd.csindex_sync_total_return(codes=["000300"], start_date="20240101",
+                                        end_date="20241231", resume=False)
+    check("L4", "中证同步-真实限定样本复用缓存",
+          sync["ok"] == 1 and sync["requests"] == 0, f"{sync['rows'] if 'rows' in sync else 'ok'}")
+
+
 def main():
     print(f"fund-data {fd.__version__} 分层测试  offline_only={OFFLINE_ONLY}\n")
     test_l1_offline()
+    test_csindex_offline()
     test_sprint2_integration_offline()
     test_sprint3_integration_offline()
     if not OFFLINE_ONLY:
         # 逐函数隔离（冷跑教训：单函数 transient 逃逸曾连带跳过 L3/L4/L5/F 全部信号）；
         # 栈全文走 stdout（print_exc 走 stderr 会与 check 的 stdout 在管道下错序截断）
-        for fn in (test_l2_smoke, test_l3_cross, test_l4_budget, test_l5_degrade,
-                   test_f_guard_band, test_f_cache_band):
+        for fn in (test_l2_smoke, test_csindex_online, test_l3_cross, test_l4_budget,
+                   test_l5_degrade, test_f_guard_band, test_f_cache_band):
             try:
                 fn()
             except Exception:

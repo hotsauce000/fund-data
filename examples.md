@@ -1,6 +1,6 @@
-# fund-data 复制即用示例（examples.md · 按需读取层）V0.7.8
+# fund-data 复制即用示例（examples.md · 按需读取层）V0.8.0
 
-本文件解决两个问题：**「具体怎么调用」**（13 个高频场景菜谱，复制即跑）与
+本文件解决两个问题：**「具体怎么调用」**（14 个高频场景菜谱，复制即跑）与
 **「出问题了怎么办」**（FAQ 按现象直达解法）。每条菜谱 = 意图 + 完整代码 +
 预期输出形态 + 一行坑提醒。实现细节/坑区全档 → `reference.md`；
 场景路由总表 → `SKILL.md`。
@@ -225,6 +225,37 @@ other）；`fund_report_pdf` 返回本地路径 str（文件名 {code}_{date}_{k
 页 tab）；PDF 通道有腾讯 EdgeOne 反爬——**勿裸 requests 直链**，必须走
 `fund_report_pdf`（需系统 node，同巨潮 enckey 依赖）；场外基金全覆盖
 （巨潮仅上市基金，P32）。
+
+---
+
+## 场景 14 · 中证官方全收益指数（清单 / 映射 / 历史 / 同步）
+
+```python
+# 全部人民币基础指数；currency=None 可查看全部币种
+universe = fund_data.csindex_universe()
+print(len(universe), universe[0]["index_code"], universe[0]["index_name"])
+
+# 基础代码或全收益代码均可；官方映射不是 H+后五位猜测
+mapping = fund_data.csindex_resolve_total_return("000300")
+print(mapping)                                   # total_return_code=H00300
+
+rows = fund_data.csindex_total_return_daily("000300", "20240101", "20241231")
+print(len(rows), rows[0]["date"], rows[-1]["close"])
+
+# 批量必须显式指定 codes 或 all_indices=True；逐指数写同步清单
+report = fund_data.csindex_sync_total_return(
+    codes=["000300", "H30269", "932000"], start_date="20240101")
+print({k: v for k, v in report.items() if k != "jobs"})
+```
+
+输出形态：历史行 `{date, close, index_code, base_index_code, return_type,
+currency, source, change, change_pct, trading_vol, trading_value, cons_number,
+pe_ttm}`；日期已按官方有效日期清单清洗，非交易日占位行不会入库。
+坑提醒：全收益代码来自官方衍生指数+基本资料双重验证；`no_total_return`、
+`return_type_unknown`、`ambiguous` 都不是可下载成功。全量任务需显式
+`all_indices=True`，单并发且可恢复；不要用价格指数静默替代失败的全收益数据。
+审计报告在 `~/.fund_data_cache/csindex/reports/`，同步清单在同目录
+`sync_manifest.json`。→ P33
 
 ---
 

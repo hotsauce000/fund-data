@@ -43,6 +43,8 @@ DEFAULT_POLICIES = {
     # 新浪（V0.7.5 备胎通道）：hq.sinajs.cn 对高频爬虫有封禁前科——核心基线
     # 保守 120/300s·0.5s·单并发，主模块在其上 replace 覆盖为同值（单一来源两处一致）
     "sina": ProviderPolicy(max_requests=120, min_interval=0.5, max_in_flight=1),
+    "csindex": ProviderPolicy(max_requests=120, min_interval=1.0, max_in_flight=1,
+                              lease_seconds=180),
 }
 
 _PROVIDER_ALIASES = {
@@ -50,7 +52,7 @@ _PROVIDER_ALIASES = {
     "ttfund": "eastmoney", "push2": "eastmoney", "push2his": "eastmoney",
     "cninfo": "cninfo", "chinabond": "chinabond", "cb": "chinabond",
     "danjuan": "danjuan", "dj": "danjuan", "tencent": "tencent", "tx": "tencent",
-    "sina": "sina", "sinahq": "sina",
+    "sina": "sina", "sinahq": "sina", "csindex": "csindex", "csi": "csindex",
 }
 
 _HOST_PROVIDERS = {
@@ -63,6 +65,7 @@ _HOST_PROVIDERS = {
     "gu.qq.com": "tencent",
     "sinajs.cn": "sina",
     "sina.com.cn": "sina",
+    "csindex.com.cn": "csindex",
     # dfcfw.com 是东方财富自有 CDN 域（pdf.=基金报告 PDF，j5.=静态 JS）——
     # V0.7.8 起 pdf.dfcfw.com 承载报告直链，归入 eastmoney 线同账限流
     "dfcfw.com": "eastmoney",

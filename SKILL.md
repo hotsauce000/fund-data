@@ -4,15 +4,15 @@ slug: fund-data
 displayName: 基金数据底座 FundBase
 display_name: 基金数据底座 FundBase
 display_name_en: FundBase · The Data Foundation for China Funds
-description: 写代码实际获取基金领域底层数据时使用——零key零登录，八层能力：【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:净值全史/规模史/持有人/经理/重仓股债/仓位史/基准三曲线/申赎/费率/申购限额)、区间净值+申赎状态、批量实时净值、季度前十大、蛋卷备胎，快照挂自动降级；【本地计算】复权/回撤/波动/夏普/卡玛/费率标注、定投XIRR、仓位解读(加减仓)、同类百分位(一年前对照)、相对表现(vs沪深300/同类平均)；【持仓穿透】腾讯行情×板块归属→主题聚合→白酒约86%白话地图；【宏观利率】中债曲线族40+条、信用利差、国债/SHIBOR/基准利率史、GC007、国债盘中；【全市场】24792只排行底座(过滤排序全本地)、新发基金全量、公司画像、抱团度(巨潮)、19门类行业配置；【经理与专项】经理画像(在管清单/任期/回报)、排行、持续性矩阵、固收+画像、费率全表(管理/托管/赎回阶梯)、单基金规模(ENDNAV)、规模全历史(53期含申赎流量)、QDII溢价、重仓探测、定期报告清单/PDF下载(f10/JJGG+pdf直链,场外上市全覆盖)；【基准指数】指数/行业板块/股票日线(宽基+风格+东财行业板块共119指数,十年全史,1请求)。请求预算制防封(铁律见下)。仅在需要调用数据接口取数时使用：基金概念解释、投资观点讨论等无需取数的话题不要加载本skill。
+description: 写代码实际获取基金领域底层数据时使用——零key零登录，九层能力：【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:净值全史/规模史/持有人/经理/重仓股债/仓位史/基准三曲线/申赎/费率/申购限额)、区间净值+申赎状态、批量实时净值、季度前十大、蛋卷备胎，快照挂自动降级；【本地计算】复权/回撤/波动/夏普/卡玛/费率标注、定投XIRR、仓位解读(加减仓)、同类百分位(一年前对照)、相对表现(vs沪深300/同类平均)；【持仓穿透】腾讯行情×板块归属→主题聚合→白酒约86%白话地图；【宏观利率】中债曲线族40+条、信用利差、国债/SHIBOR/基准利率史、GC007、国债盘中；【全市场】24792只排行底座(过滤排序全本地)、新发基金全量、公司画像、抱团度(巨潮)、19门类行业配置；【经理与专项】经理画像(在管清单/任期/回报)、排行、持续性矩阵、固收+画像、费率全表(管理/托管/赎回阶梯)、单基金规模(ENDNAV)、规模全历史(53期含申赎流量)、QDII溢价、重仓探测、定期报告清单/PDF下载(f10/JJGG+pdf直链,场外上市全覆盖)；【基准指数】指数/行业板块/股票日线(宽基+风格+东财行业板块共119指数,十年全史,1请求)；【全收益指数】中证全系列清单+官方TRI映射+验证全史+按年缓存+可恢复同步。请求预算制防封(铁律见下)。仅在需要调用数据接口取数时使用：基金概念解释、投资观点讨论等无需取数的话题不要加载本skill。
 description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集、白话持仓穿透地图、24792 只全市场排行、经理画像与抱团度、十年指数日线与 53 期规模全史——零 key 零登录，请求预算制防封，分层断言全绿。为一切基金应用打地基。
 description_en: Full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), holdings maps, 24,792-fund rankings, manager profiles, 10-year klines, 53-period scale history, report PDFs. Zero keys/login, budget-guarded, assertions green.
 author: hotsauce000
 origin: custom
-version: 0.7.8
+version: 0.8.0
 ---
 
-# fund-data 路由层 V0.7.8
+# fund-data 路由层 V0.8.0
 
 本文件是**路由层**（≈4K token，激活只加载本文件）。坑区/内嵌代码→**reference.md**、菜谱/FAQ→**examples.md**（均按需读取）；`fund_data.py` import 用勿通读：
 
@@ -52,6 +52,8 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | 规模·全史/费率/溢价/重仓探测 | `fund_scale`·`fund_scale_history`·`fund_fees`·`qdii_premium`·`nav_divergence` | 各1·2·冷启≤12 |
 | 经理画像/排行 | `fund_manager(基金码或经理ID)` · `manager_rank(pages)`（仅姓名序） | 0~1·50/页 |
 | 指数日线 | `kline_daily("沪深300")`（指数名/板块名/股票码） | 1（缓存0） |
+| 全收益指数 | `csindex_resolve_total_return`→`csindex_total_return_daily` | 冷启≤4/缓存0 |
+| 全收益批量同步 | `csindex_sync_total_return(codes=[...])`；全量须 `all_indices=True` | 显式任务 |
 | 债基利率敏感度 | `cb_yield_curve` + `credit_spread` / `treasury_yield_daily` | 1~2 |
 | 重仓股深度 | `holding_map` → **a-stock-data skill** | 0 |
 
@@ -63,11 +65,12 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | 历史净值兜底 | E3 lsjz 逐页（TotalCount 强校验） | **跨域无备胎（P17 三候选全死）** |
 | 个股行情 | 腾讯通道（不封 IP；挂→`sina_quote` 互备，sh/sz 前缀必带） | — |
 | 利率曲线 | 中债 curl 通道（TLS 指纹墙 P11） | 东财 datacenter 互证 |
+| 全收益缺失/失败 | 缺失自动按年重取；仍缺/失败进报告 | **绝不用价格指数静默替代** |
 | rankhandler 被拦 | 200+「无访问权限」（**无 403**）→ `RiskControlError`+熔断（P19） | 查 Referer 头 |
 | cninfo 451/token null | enckey 时效**非风控**，刷新重试一次（P20） | 仍拒=时钟漂移 |
 | 403/429 | `RiskControlError` 上抛+熔断10min（不触发降级） | 冷却期零网络，等勿重试 |
 
-## 函数速查（53 个，构建时自动生成勿手改）
+## 函数速查（57 个，构建时自动生成勿手改）
 
 | 函数 | 说明 |
 |---|---|
@@ -124,14 +127,18 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | `fund_fees(query, force_refresh=False)` | 基金费率全表（F10 购买信息 jjfl 页，1 请求 |
 | `fund_reports(query, category='periodic', limit=20, force_refresh=False)` | 基金公告/定期报告清单（f10/JJGG，1 请求，当 |
 | `fund_report_pdf(report, dest_dir=None, force_refresh=False)` | 下载单份基金报告 PDF（1~2 请求；本地同名文件已 |
+| `csindex_universe(index_series=None, asset_class=None, currency='人民币', force_refresh=False)` | 中证官网全部七个系列基础指数清单；筛选本地执行，完整性 |
+| `csindex_resolve_total_return(index_code, force_refresh=False)` | 基础/全收益代码 → 官方映射；不猜代码，歧义与未知口 |
+| `csindex_total_return_daily(index_code, start_date='', end_date='', force_refresh=False)` | 官方人民币全收益指数日线；官方日期过滤、完整性和数值校 |
+| `csindex_sync_total_return(codes=None, all_indices=False, start_date='', end_date='', resume=True)` | 显式批量同步；风险/连续三次上游故障停止，单指数数据问 |
 
 ## When to Activate
 
-基金净值/复权/回撤/夏普、诊断评测、穿透地图、定投回测、档案、批量净值、利率。关键词：基金净值、复权、回撤、定投、持仓穿透、白话地图、利差、全市场排行、抱团度、公司画像、新发基金、经理画像、持续性、固收+、溢价、重仓探测、指数日线、规模全史。
+基金净值/复权/回撤/夏普、诊断评测、穿透地图、定投回测、档案、批量净值、利率、中证全收益指数。关键词：基金净值、复权、回撤、定投、持仓穿透、白话地图、利差、全市场排行、抱团度、公司画像、新发基金、经理画像、持续性、固收+、溢价、重仓探测、指数日线、全收益指数、规模全史。
 
 ## 深读与边界（按需）
 
-- 复制即用示例（12 场景菜谱）+ 按现象查 FAQ → 同目录 `examples.md`（写调用代码/排错前读）
-- 实现细节/坑区 P1~P31/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
+- 复制即用示例（14 场景菜谱）+ FAQ → 同目录 `examples.md`
+- 实现细节/坑区 P1~P33/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
 - 不覆盖：账户持仓/交易下单（ttskill）、盘中实时估值、货基万份收益、单基金行业史（E2停供）、语义选基、FOF底层明细与经理姓名索引（P23/P24）
 - 个股深度 → a-stock-data；holding_map() 是官方桥

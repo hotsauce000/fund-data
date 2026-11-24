@@ -111,6 +111,7 @@ class ProviderTests(unittest.TestCase):
             "https://qt.gtimg.cn/q=sh600000": "tencent",
             "https://web.ifzq.gtimg.cn/appstock": "tencent",
             "https://gu.qq.com/sh600000": "tencent",
+            "https://www.csindex.com.cn/csindex-home/perf/index-perf": "csindex",
         }
         for url, expected in cases.items():
             with self.subTest(url=url):
