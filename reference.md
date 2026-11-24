@@ -1,13 +1,21 @@
-# fund-data 完整参考（reference.md · 按需读取层）V0.8.0
+# fund-data 完整参考（reference.md · 按需读取层）V0.8.1
 
 > 本文件按需读取：调试 / 扩展 / 排查坑时才打开，勿随 skill 激活预加载。
 > 路由与签名速查见 SKILL.md；本文件内嵌代码与 fund_data.py 同源直拼（构建时生成）。
 
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 
-# fund-data 基金底层数据工具包 V0.8.0 模块全档
+# fund-data 基金底层数据工具包 V0.8.1 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数：368/368 离线断言通过**（L1 单元 332 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条。在线全量须显式 `--online`），覆盖 30 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复：381/381 离线断言通过**（L1 单元 345 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 93 条。在线全量须显式 `--online`），覆盖 30 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.8.1 审查修复批（V0.8.0 全收益层双路独立审查产出：1×P1 + 5×P2 + 11×P3）：**
+- 🔴 **P1 映射语义**：`csindex_resolve_total_return` 无 TRI 衍生分支误标 `return_type:"total_return"`——如实改 `price_return`（无 TR 衍生的股票指数是价格指数）；30 天旧错值 mapping 缓存读取时自愈重取；测试补锁 return_type/total_return_code
+- 🟠 **元数据串台**：日线缓存按 TR 代码共享，经不同基础代码查询（000300 vs H00300）曾带回首查方的 base_index_code——出库/落盘前按本次调用方重写（行情数值本就同源无误）；损坏年度缓存（close 非数值）补回归测试锁定既有 miss-重取行为；盘前落盘的当年文件 mtime 回拨 18h（≈2h 后过期增量补当日行，不占满 20h TTL）
+- 🟠 **盘前同步不炸**：当日 tradeDate 清单先行含今天而 perf 未发布 → 不计缺失不整史重取（V0.8.0 形态是按年重取后仍 UpstreamFormatError），`pending_today` 如实入报告
+- 🟠 **并发与超时**：sync manifest 落盘 file_lock 重读-合并-写回 + 只保留本次窗口 job（清单有界）；gateway curl runner 超时 +10s 余量（TimeoutExpired 非 OSError 非 RuntimeError 会击穿调用方分层）；`_cb_request` 网关分支补 TimeoutExpired 分流与 `_release_pending`（LeaseError 对称）
+- 🟠 **重试口径**：`_tencent_kline_page` 有状态码失败（HTTPError 是 OSError 子类）不再当瞬态重试多烧一发——V0.7.5 tencent_quote 口径补齐
+- 🟡 P3 批：新浪干净空体（无 var 行）不计风控连击；sina_quote 非 str 输入先归一；中债降级值过 (0,15) 值域守卫防驻留 300s；EdgeOne cookie 剥 `; path=/` 属性段；备胎成功但短史文案如实（不再误称「备胎失败」）；净收益排除补全角（净）；pe_ttm 在线锚点（上游 peg 改名预警）；BENCH_SECID 行业映射在线抽查 3 个；纵深防御/policies 注释澄清；core 默认表↔主模块覆盖双向锁测试
 
 **V0.8.0 中证官方全收益指数（清单 + 官方映射 + 验证全史 + 可恢复同步）：**
 - 🟢 **全系列主键表 `csindex_universe()`**：官网七个系列一次建表，分页 total/实收强校验；默认人民币，资产/系列/币种筛选本地执行
@@ -243,7 +251,7 @@
 | P30 新浪行情通道（V0.7.5） | hq.sinajs.cn 无 Referer 即拒（实测空响应）；高频爬虫有封禁前科；银行间信用债无公开实时端点（货币网现券板仅利率债活跃券） | `sina_quote` 内置 Referer + provider=sina 独立分账 120/300s·0.5s·单并发 + 403/429 计熔断 + 空体计信号；定位=腾讯互备低频兜底，银行间实时须 QB 等权限源 |
 | P31 申购限额唯一来源（V0.7.7） | E2/E3/E6 探针实测均无完整限额（E3 SGZT 仅「限大额」短文本无金额）——唯一来源是主页面 `{code}.html` 交易状态栏，且无批量接口（N 只 N 请求）；金额与「限大额」分属不同层级 text node（嵌套 span），简单 regex 必截断（000369 实测）；外币折算是静态近似汇率非实时牌价 | `fund_purchase_limit`：`_StaticCellParser` 嵌套感知全文拼接 + `parse_purchase_limit` 纯函数（kind 四态；限大额无金额诚实 limit_cny=None 不虚报 0）；已并入快照 `purchase_limit` 数据集（失败进 missing 不炸快照）；rankhandler ft=qdii 仅 363 只混合/股票类（联接/LOF 归「指数型-海外股票」不在内） |
 | P32 基金报告双通道（V0.7.8） | ①JJGG 必须带 fundf10 Referer——裸 UA 是 200+ErrCode-999+Data=""「假成功」；type=页面 tab（0 全部/1 发行运作/2 分红送配/3 定期报告/4 人事调整/5 基金销售/6 其他），部分基金加披 Q2/Q4 季报（交银趋势实测 6 期/年）②PDF 直链 `H2_{ID}_1.pdf` 的 _1 附件号不可省（少了拿到挑战壳）③pdf.dfcfw.com 腾讯 EdgeOne 反爬：200+Content-Type 伪装 pdf 但 body 是 988B 静态 `<script>` 挑战；巨潮 column=fund 仅上市基金，场外不在其体系 | `fund_reports`：Referer 必带+Data 非 list 显式报错+无 ID 行跳过+total>0 解析空拒绝；`fund_report_pdf`：_edgeone_solve node vm 沙箱（无 require/fs/net+timeout）解 `__tst_status`/`EO_Bot_Ssid` 重放一次，仍非 PDF/残包(<1KB)显式报错；挑战 cookie 进程级复用；dfcfw.com 归 eastmoney 线同账限流 |
-| P33 中证全收益（V0.8.0） | 非交易日起始日会生成与下一交易日相同的占位行；全收益代码存在 H00300/H20269/932000CNY010 等无统一规律形态；HTTP 200 可携带业务400；个别历史行 change 与收盘差有上游口径差 | 官方 tradeDate 过滤+缺失按年重取；衍生指数+基本资料+行情三验身份；业务 code 强校验；change 异常写审计警告，changePct 与收盘明显矛盾拒绝入库；不降级价格指数 |
+| P33 中证全收益（V0.8.0） | 非交易日起始日会生成与下一交易日相同的占位行；全收益代码存在 H00300/H20269/932000CNY010 等无统一规律形态；HTTP 200 可携带业务400；个别历史行 change 与收盘差有上游口径差；当日 tradeDate 清单先行含今天而行情盘后才发布 | 官方 tradeDate 过滤+缺失按年重取；衍生指数+基本资料+行情三验身份；业务 code 强校验；change 异常写审计警告，changePct 与收盘明显矛盾拒绝入库；不降级价格指数；当日未发布不计缺失（pending_today 入报告，V0.8.1 盘前同步不炸） |
 
 ## Prerequisites
 
@@ -260,7 +268,7 @@ pip install requests
 ```python
 # -*- coding: utf-8 -*-
 """
-fund-data V0.8.0 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层 + 基金报告 + 中证全收益指数）
+fund-data V0.8.1 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层 + 基金报告 + 中证全收益指数）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤3 请求（1×pingzhongdata + 0~1×lsjz + 0~1×主页面限额，V0.7.7 起快照含 purchase_limit）
@@ -322,7 +330,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 
 FUND_CACHE_DIR = Path.home() / ".fund_data_cache"
@@ -2337,9 +2345,12 @@ def sina_quote(codes: list[str]) -> dict[str, dict]:
     超过 50 只自动按 50 分块串行请求（分块间隔由 provider 配额节流，不静默丢码）。"""
     if not codes:
         return {}
+    codes = [str(c).strip() for c in codes]           # 非 str 输入（int 等）先归一（V0.8.1：
+                                                      # 原 len(c) 对非 str 先抛 TypeError，
+                                                      # else 分支的 str(c) 兜底永远走不到）
     codes = [c[:2].lower() + c[2:] if (len(c) == 8 and c[:2].lower() in ("sh", "sz"))
-             else str(c).strip()
-             for c in codes]                          # 先归一前缀大小写
+             else c
+             for c in codes]                          # 再归一前缀大小写
     codes = list(dict.fromkeys(codes))                # 归一后去重（SH/sh 不双发）
     bad = [c for c in codes if not (len(c) == 8 and c[:2] in ("sh", "sz"))]
     if bad:
@@ -2350,16 +2361,24 @@ def sina_quote(codes: list[str]) -> dict[str, dict]:
     for i in range(0, len(codes), 50):
         chunk = codes[i:i + 50]
         url = "https://hq.sinajs.cn/list=" + ",".join(chunk)
-        parsed = _parse_sina_body(_sina_raw(url).decode("gbk", errors="replace"))
+        raw_text = _sina_raw(url).decode("gbk", errors="replace")
+        parsed = _parse_sina_body(raw_text)
         if not parsed:
             # 软封锁守卫（V0.7.5）：新浪真实封禁形态 = HTTP 200 + 非空体 + 全空
             # var 行（hq_str_xx="";）——绕过空体守卫与 403 分流，漏判即烧 IP。
-            # 与「chunk 内代码全无效」协议层不可分：宁可误伤（信号 5min 衰减、
-            # 连续 3 次才熔断，单次笔误不致停摆）不漏判——封禁前科通道的取舍。
-            _cbreak_signal("sina", "sina-all-miss-chunk")
+            # V0.8.1 收敛误伤：体含空 var 行才计风控信号——chunk 内代码全无效/
+            # 退市时新浪回「无 var 行」的干净空体，属正常未命中不计连击；两种
+            # 形态仍不可完全区分（全无效码也可能带回空 var 行），保留少量误伤
+            # 面不漏判封禁（信号 5min 衰减、连续 3 次才熔断）。
+            if re.search(r'hq_str_\w+="";', raw_text):
+                _cbreak_signal("sina", "sina-all-miss-chunk")
+                raise RuntimeError(
+                    f"新浪行情 chunk 全未命中（{len(chunk)} 码 0 行，含空 var 行）——"
+                    "软封锁嫌疑，已计入 sina 熔断（连续 3 次冷却 10 分钟）；"
+                    "腾讯通道是主源互备对象")
             raise RuntimeError(
-                f"新浪行情 chunk 全未命中（{len(chunk)} 码 0 行）——软封锁嫌疑或代码"
-                "无效，已计入 sina 熔断（连续 3 次冷却 10 分钟）；腾讯通道是主源互备对象")
+                f"新浪行情 chunk 全未命中（{len(chunk)} 码 0 行，无 var 行）——"
+                "代码无效或已退市，不计风控连击；请核对 sh/sz 前缀与代码有效性")
         result.update(parsed)
         # 结构性成功即清零 sina 连击（parsed 非空由上方守卫保证；sina 只回请求码的行，
         # 不存在"非空但全非本批码"形态——原 any() 条件恒真，按审查意见改为无条件）
@@ -2563,6 +2582,7 @@ def _cb_request(path: str, params: Optional[dict] = None, method: str = "GET",
     前误用东财 TT_MIN_INTERVAL）+ F2 熔断镜像 + 空体信号。ycDefId 入 URL
     前过白名单校验（上游不变）；list 参数无 shell 注入面。"""
     from urllib.parse import urlencode
+    import subprocess
     url = f"{CB_BASE}{path}"
     if params:
         url += "?" + urlencode(params)
@@ -2575,24 +2595,23 @@ def _cb_request(path: str, params: Optional[dict] = None, method: str = "GET",
                              "Accept": "*/*"})
             except (RiskControlError, CircuitOpenError):
                 raise                                  # 风险型/熔断期：不重试不降级
-            except OSError as e:
+            except (OSError, subprocess.TimeoutExpired) as e:
+                # V0.8.1 补 TimeoutExpired 分流：网关侧 runner 已留 +10s 余量，仅
+                # curl 挂死超余量时到达——与 legacy 分支同口径包装重试/报错
                 if attempt == 2:
                     raise RuntimeError(f"中债 curl 传输失败: {e}") from e
                 time.sleep(1.5)
                 continue
-            permit = getattr(resp, "permit", None)
             if resp.status_code >= 400:                 # 非风控终态（403/429 已在网关层转 RiskControlError 上抛）
+                _release_pending(resp, f"cb-http-{resp.status_code}")   # V0.8.1：终态先结算挂起许可
                 raise RuntimeError(f"中债 HTTP {resp.status_code}: {url[:90]}")
             if not resp.content:
-                if permit is not None:                  # 先中性结算再信号（与 _sina_raw 同序，防挂起许可占坑至租约到期）
-                    permit.failure(reason="cb-empty-body", response_received=True)
+                _release_pending(resp, "cb-empty-body")  # 先中性结算再信号（与 _sina_raw 同序，防挂起许可占坑至租约到期）
                 _cbreak_signal("cb", "cb-empty-body")
                 raise RuntimeError("中债响应空体（疑似限流），拒绝静默空")
-            if permit is not None:                      # 中性结算：业务裁决归 cb_* 调用方
-                permit.failure(reason="cb-passthrough", response_received=True)
+            _release_pending(resp, "cb-passthrough")    # 中性结算：业务裁决归 cb_* 调用方（LeaseError 静默=已中性清理）
             return resp.content
         raise RuntimeError("unreachable")
-    import subprocess
     for attempt in (1, 2):                              # curl 也有瞬态，重试一次
         _cbreak_check("cb")
         _cross_proc_throttle("cb", CB_MIN_INTERVAL)    # F1：独立常量（V0.7.5 前误用东财 TT_MIN_INTERVAL）
@@ -2974,7 +2993,11 @@ def cn_treasury_realtime() -> dict:
         for term in ("2y", "5y", "10y", "30y"):
             if term not in by_term:
                 raise RuntimeError(f"中债降级缺 {term} 期限（{last_date}）") from e
-            out[term] = {"yield_pct": by_term[term]["yield_pct"],
+            y = by_term[term]["yield_pct"]
+            if not (isinstance(y, (int, float)) and not isinstance(y, bool) and 0 < y < 15):
+                # V0.8.1：降级值过同款值域守卫——中债脏值不得借降级键驻留 300s
+                raise RuntimeError(f"中债降级 {term} 收益率异常 {y!r}，拒绝写降级缓存") from e
+            out[term] = {"yield_pct": y,
                          "change": None, "change_pct": None}
         out["source"] = f"chinabond/收盘降级（push2 冷却: {str(e)[:40]}）"
         out["as_of"] = f"中债最新收盘(降级,{last_date})"
@@ -3500,6 +3523,10 @@ def _tencent_kline_page(pre: str, end_date: Optional[str] = None,
         try:
             raw = _tencent_raw(url, headers={"Referer": "https://gu.qq.com/"}).decode("utf-8")
             break
+        except urllib.error.HTTPError:
+            raise                                 # 有状态码的失败不属瞬态重试（V0.7.5
+                                                 # tencent_quote 同口径）；HTTPError 是
+                                                 # OSError 子类，须先于其捕获防误重试
         except OSError as e:
             if attempt == 2:
                 raise RuntimeError(f"腾讯日K请求失败({pre}): {e}") from e
@@ -4303,7 +4330,8 @@ def _edgeone_solve(script_html: str) -> dict:
     pairs = {}
     try:
         for c in json.loads(out.stdout.strip().splitlines()[-1]):
-            c = c.rstrip(";")
+            c = c.split(";")[0].strip()               # V0.8.1：剥「; path=/」等属性段
+                                                      # （防上游挑战带属性时 Cookie 头掺垃圾对）
             if "=" in c:
                 k, v = c.split("=", 1)
                 pairs[k.strip()] = v
@@ -4628,6 +4656,7 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
             fb_note = "备胎不可用（该指数无腾讯代码：市场2中证公司发布/东财板块指数）"
         else:
             fb_note = "备胎失败"
+            fb_failed = True                    # V0.8.1 复审：布尔承载成败分支，文案改动不失效
             kept = rows
             rows = []                                  # 重置防两源日期/复权基线混拼
             try:
@@ -4641,6 +4670,11 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
                                # re-raise 无损且错误归因更准
             except Exception as e:
                 fb_note = f"备胎失败（{str(e)[:40]}）"
+            else:
+                fb_failed = False
+            if len(rows) < need and not fb_failed:
+                fb_note = f"备胎短史（实收 {len(rows)} 根）"   # V0.8.1：成功但不足
+                                                              # 如实归因，不再误称「失败」
             if len(rows) < need:                       # 备胎也不够 → 回用 EM 有效行（诚实留痕）
                 rows = kept
     rows.sort(key=lambda x: x["date"])
@@ -4708,6 +4742,8 @@ def _csindex_request(path: str, params: Optional[dict] = None,
         raise RuntimeError(
             "中证请求禁止 legacy/teardown 直连：跨进程滑窗、单并发和共享风控必须保持激活；"
             "请恢复 _reset_request_coordination() 后重试")
+    # 纵深防御双保险（gateway 已在返回前对 403/429/风控正文抛 RiskControlError，
+    # 见 fund_data_core/gateway.py 的 _send）——保留以覆盖网关实现回归，非主防线
     assert_not_risk_control(resp, "csindex", path)
     resp.raise_for_status()
     text = resp.content.decode("utf-8", errors="replace")
@@ -4836,6 +4872,7 @@ def _csindex_names_indicate_total(cn: str, en: str) -> bool:
     cn_text, en_text = str(cn or ""), str(en or "")
     upper = en_text.upper().replace(" ", "")
     if ("净收益" in cn_text or "无全收益" in cn_text or "(净)" in cn_text
+            or "（净）" in cn_text
             or "NTRI" in upper or "NETTOTALRETURN" in upper):
         return False
     return ("全收益" in cn_text or "TOTALRETURN" in upper
@@ -4855,7 +4892,7 @@ def _csindex_derivative_candidates(rows: list) -> list:
         upper = en.upper().replace(" ", "")
         is_total = ("全收益" in cn or upper.endswith("TRI")
                     or "TOTALRETURN" in upper)
-        is_net = "净收益" in cn or "(净)" in cn or "NTRI" in upper
+        is_net = "净收益" in cn or "(净)" in cn or "（净）" in cn or "NTRI" in upper
         is_foreign = any(marker in code[6:] or marker in cn or marker in en.upper()
                          for marker in _CSINDEX_CURRENCY_MARKERS)
         if is_total and not is_net and not is_foreign:
@@ -4883,8 +4920,11 @@ def csindex_resolve_total_return(index_code, force_refresh: bool = False) -> dic
     rel = f"csindex/mappings/{code}.json"
     if not force_refresh:
         cached = _cache_read(rel, max_age_hours=24 * 30)
-        if cached is not None:
+        if cached is not None and not (cached.get("status") == "no_total_return"
+                                       and cached.get("return_type") == "total_return"):
             return cached
+        # V0.8.0 落盘的旧错值（no_total_return 却标 total_return）视为 miss
+        # 重取自愈——mapping 缓存 30 天，版本 bump 不清洗本目录
     info = _csindex_basic_info(code, force_refresh=force_refresh)
     if _csindex_names_indicate_total(info.get("indexFullNameCn"), info.get("indexFullNameEn")):
         if info.get("currencyCn") != "人民币":
@@ -4903,8 +4943,10 @@ def csindex_resolve_total_return(index_code, force_refresh: bool = False) -> dic
                "candidates": candidates, "source": "csindex/derivative"}
     elif not candidates:
         status = "no_total_return" if info.get("indexType") == "stock" else "return_type_unknown"
+        # V0.8.1 修：无 TR 衍生的股票指数本身是价格指数——return_type 如实标
+        # price_return（V0.8.0 误标 total_return，消费方按该字段分流会拿错口径）
         out = {"base_index_code": code, "total_return_code": None,
-               "return_type": "total_return" if status == "no_total_return" else "unknown",
+               "return_type": "price_return" if status == "no_total_return" else "unknown",
                "status": status, "source": "csindex/derivative+basic-info"}
     else:
         candidate = candidates[0]
@@ -5059,6 +5101,17 @@ def _csindex_download_history(mapping: dict, start: str, end: str,
     valid = set(_csindex_trade_dates(code, force_refresh=force_refresh))
     expected = sorted(day for day in valid if coverage_start <= day <= end)
 
+    def _missing_of(dates):
+        # V0.8.1：fetch 边界日（=当天）行情盘后延迟发布——tradeDate 清单先行含
+        # 今天而 perf 未回时不计缺失（盘前/盘中同步不炸，V0.8.0 会整史重取后仍
+        # 报 UpstreamFormatError）；行内若已带回则自然入库，完整性断言只对已发布
+        # 日执行，pending_today 如实入报告。豁免仅在 end=当天时生效（复审补充：
+        # 防未来直呼本私有函数传历史 end 时静默豁免真实缺行）
+        miss = [day for day in expected if day not in dates]
+        pending = (end if (end == datetime.now(_BJ_TZ).date().isoformat()
+                           and end in valid and end not in dates) else None)
+        return [d for d in miss if d != pending], pending
+
     def _fetch(s, e):
         body = _csindex_request("/perf/index-perf", params={
             "indexCode": code, "startDate": s.replace("-", ""),
@@ -5073,7 +5126,7 @@ def _csindex_download_history(mapping: dict, start: str, end: str,
         rows = [x for x in seed_rows
                 if coverage_start <= x["date"] < start and x["date"] in valid] + rows
     dates = {x["date"] for x in rows}
-    missing = [day for day in expected if day not in dates]
+    missing, pending_today = _missing_of(dates)
     chunked = False
     if missing:
         chunked = True
@@ -5085,7 +5138,7 @@ def _csindex_download_history(mapping: dict, start: str, end: str,
             rows.extend(part)
             warnings.extend(part_warnings)
         dates = {x["date"] for x in rows}
-        missing = [day for day in expected if day not in dates]
+        missing, pending_today = _missing_of(dates)
         if missing:
             raise UpstreamFormatError(
                 f"中证行情按年重取后仍缺 {len(missing)} 个有效日期（{code}，"
@@ -5105,11 +5158,21 @@ def _csindex_download_history(mapping: dict, start: str, end: str,
     _cbreak_success("csindex")
     report = {"index_code": code, "expected_dates": len(expected),
               "actual_dates": len(rows), "missing_dates": missing,
+              "pending_today": pending_today,
               "numeric_warnings": warnings, "chunked": chunked,
               "incremental": bool(seed_rows), "coverage_start": coverage_start,
               "first_date": rows[0]["date"] if rows else None,
               "last_date": rows[-1]["date"] if rows else None}
     return rows, report
+
+
+def _csindex_rebase_base_code(rows: list, base_code: str) -> list:
+    """日线缓存按 TR 代码共享——同一全收益序列经不同基础代码查询（如 000300 与
+    H00300）共用一份文件；出库与落盘前按本次调用方视角重写 base_index_code
+    （V0.8.1 修串台：行情数值同源无误，仅该元数据字段曾随首查基础码漂移）。"""
+    for x in rows:
+        x["base_index_code"] = base_code
+    return rows
 
 
 def csindex_total_return_daily(index_code, start_date="", end_date="",
@@ -5148,7 +5211,8 @@ def csindex_total_return_daily(index_code, start_date="", end_date="",
                 break
             combined.extend(cached)
         if complete:
-            return [x for x in combined if start <= x["date"] <= end]
+            return [x for x in _csindex_rebase_base_code(combined, mapping["base_index_code"])
+                    if start <= x["date"] <= end]
 
     seed_rows, coverage_start = None, None
     if not force_refresh and int(start[:4]) == current_year == int(end[:4]):
@@ -5163,18 +5227,30 @@ def csindex_total_return_daily(index_code, start_date="", end_date="",
     report["fetched_at"] = datetime.now(_BJ_TZ).isoformat()
     report["requested_start"] = start
     report["requested_end"] = end
+    _csindex_rebase_base_code(rows, mapping["base_index_code"])   # 落盘前归一到本次基础码
     by_year = defaultdict(list)
     for row in rows:
         by_year[int(row["date"][:4])].append(row)
     for year, year_rows in by_year.items():
         _cache_write(f"csindex/daily/{code}_{year}.json", year_rows)
     _cache_write(f"csindex/reports/{code}_latest.json", report)
+    if report.get("pending_today") and current_year in by_year:
+        # 收口审查建议：盘前/盘中落盘的当年文件缺当日行——mtime 回拨 18h（≈2h 后
+        # 过期走补齐当日行），否则已发布的当日行最长 20h 拿不到；未发布期间每次
+        # 过期仅一发补齐请求（当年窗口为增量、跨年窗口为全史区间，csindex 线预算内）
+        back = time.time() - 18 * 3600
+        os.utime(FUND_CACHE_DIR / f"csindex/daily/{code}_{current_year}.json",
+                 (back, back))
     return [x for x in rows if start <= x["date"] <= end]
 
 
 def csindex_sync_total_return(codes=None, all_indices: bool = False,
                               start_date="", end_date="", resume: bool = True) -> dict:
-    """显式批量同步；风险/连续三次上游故障停止，单指数数据问题可续跑。"""
+    """显式批量同步；风险/连续三次上游故障停止，单指数数据问题可续跑。
+
+    V0.8.1：manifest 落盘走 file_lock 重读-合并-写回——双进程并发同步不再整文件
+    互相覆盖（丢 job 即丢 resume 语义）；清单只保留本次窗口的 job（有界，不随
+    历史窗口累积），异窗口并发以后写窗口为准（resume 判等本就按窗口）。"""
     if bool(codes) == bool(all_indices):
         raise ValueError("codes 与 all_indices=True 必须二选一，且不能同时省略")
     start_date = _csindex_date(start_date, "start_date") if start_date else ""
@@ -5197,6 +5273,19 @@ def csindex_sync_total_return(codes=None, all_indices: bool = False,
     if not isinstance(manifest, dict) or not isinstance(manifest.get("jobs"), dict):
         manifest = {"jobs": {}}
     jobs = manifest["jobs"]
+
+    def _manifest_write(job_code, job):
+        with file_lock(FUND_CACHE_DIR / ".csindex_sync_manifest.lock"):
+            disk = _cache_read(rel, max_age_hours=None)
+            if not isinstance(disk, dict) or not isinstance(disk.get("jobs"), dict):
+                disk = {"jobs": {}}
+            disk["jobs"][job_code] = job
+            disk["jobs"] = {k: v for k, v in disk["jobs"].items()
+                            if (v.get("start_date", ""), v.get("end_date", ""))
+                            == (start_date, end_date)}
+            disk["updated_at"] = datetime.now(_BJ_TZ).isoformat()
+            _cache_write(rel, disk)
+
     now = time.time()
     upstream_failures = 0
     summary = {"total": len(selected), "ok": 0, "no_data": 0,
@@ -5232,8 +5321,7 @@ def csindex_sync_total_return(codes=None, all_indices: bool = False,
         except (RiskControlError, CircuitOpenError):
             job.update(status="error", error="风险熔断，未继续后续指数")
             jobs[code] = job
-            manifest["updated_at"] = datetime.now(_BJ_TZ).isoformat()
-            _cache_write(rel, manifest)
+            _manifest_write(code, job)
             raise
         except Exception as e:
             status = "error"
@@ -5242,8 +5330,7 @@ def csindex_sync_total_return(codes=None, all_indices: bool = False,
                 upstream_failures += 1
                 if upstream_failures >= 3:
                     jobs[code] = job
-                    manifest["updated_at"] = datetime.now(_BJ_TZ).isoformat()
-                    _cache_write(rel, manifest)
+                    _manifest_write(code, job)
                     raise RuntimeError(
                         "中证同步连续 3 次上游传输/接口失败，已停止后续指数；"
                         "请排查上游后使用 resume=True 恢复") from e
@@ -5253,8 +5340,7 @@ def csindex_sync_total_return(codes=None, all_indices: bool = False,
             upstream_failures = 0
         jobs[code] = job
         summary[status] = summary.get(status, 0) + 1
-        manifest["updated_at"] = datetime.now(_BJ_TZ).isoformat()
-        _cache_write(rel, manifest)
+        _manifest_write(code, job)
     summary["requests"] = CSINDEX_REQUEST_COUNT[0] - summary.pop("request_count_start")
     summary["manifest"] = rel
     summary["jobs"] = [jobs[code] for code in selected if code in jobs]

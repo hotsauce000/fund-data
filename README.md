@@ -4,7 +4,7 @@
 >
 > A 股域有 [a-stock-data](https://github.com/simonlin1212/a-stock-data)，**基金域有 fund-data**——形态对标、纪律同源。
 
-基金领域底层数据工具包 V0.8.0（**基金数据底座 FundBase**）：零 key、零登录、零第三方封装，为基金诊断 / 评测 / 定投回测 / 持仓穿透 / 宏观利率 / 全市场初筛 / 经理画像 / 中证全收益指数提供底层数据原语。**Linux / macOS / Windows 三平台同等支持（V0.7.2 锁抽象层，能力检测无平台分支）；368/368 离线断言通过（Sprint 1 错误语义加固 + Sprint 2 跨进程协调 + Sprint 3 缓存核心接入 + V0.8.0 中证全收益指数；`fund_data_core` 独立测试 92 条含锁契约；在线全量须显式 `--online`）**，覆盖 30 个上游接口，57 个公开函数。
+基金领域底层数据工具包 V0.8.1（**基金数据底座 FundBase**）：零 key、零登录、零第三方封装，为基金诊断 / 评测 / 定投回测 / 持仓穿透 / 宏观利率 / 全市场初筛 / 经理画像 / 中证全收益指数提供底层数据原语。**Linux / macOS / Windows 三平台同等支持（V0.7.2 锁抽象层，能力检测无平台分支）；381/381 离线断言通过（Sprint 1 错误语义加固 + Sprint 2 跨进程协调 + Sprint 3 缓存核心接入 + V0.8.0 中证全收益指数 + V0.8.1 审查修复；`fund_data_core` 独立测试 93 条含锁契约；在线全量须显式 `--online`）**，覆盖 30 个上游接口，57 个公开函数。
 
 **核心立场：请求预算是稀缺资源**——所有端点内置跨进程限流、风控分流、熔断器三层防封结构；所有上游坑（33 个实测）内嵌防线；宁可显式报错，绝不静默空。
 
@@ -375,12 +375,12 @@ fund_scale_history("000312")                   # 规模全历史 53 期（含期
 ```bash
 python3 -m unittest test_locks test_no_platform_hardcoding \
   test_cache test_cache_policies test_coordinator test_gateway   # core 六套（含锁契约）
-python3 test_fund_data.py                  # 默认离线：368 条断言（L1 332 + S2 21 + S3 15），零网络，秒级
+python3 test_fund_data.py                  # 默认离线：381 条断言（L1 345 + S2 21 + S3 15），零网络，秒级
 python3 test_fund_data.py --offline-only   # 显式离线（同上）
-python3 test_fund_data.py --online         # 全链路 455 条（真数据；368 离线 + 87 在线）
+python3 test_fund_data.py --online         # 全链路 472 条（真数据；381 离线 + 91 在线）
 ```
 
-- **分层结构**：L1 单元 332 · S2 协调器集成 21 · S3 缓存集成 15 · core 包 92（锁契约 14 + 平台硬编码守卫 2 + cache 12 + 策略 10 + 协调器 33 + 网关 21）· L2 端点 smoke 57 · L3 三源交叉验证 6 · L4 请求预算审计 5 · L5 降级演练 8 · 防封专项 F×11
+- **分层结构**：L1 单元 345 · S2 协调器集成 21 · S3 缓存集成 15 · core 包 93（锁契约 14 + 平台硬编码守卫 2 + cache 12 + 策略 10 + 协调器 33 + 网关 22）· L2 端点 smoke 61 · L3 三源交叉验证 6 · L4 请求预算审计 5 · L5 降级演练 8 · 防封专项 F×11（行业基准抽查 3 条在 push2 连接级熔断期以 SKIP 层零网络跳过——辅助溯源检查不判死，RiskControlError 不豁免）
 - **CI 矩阵**：Linux / macOS / Windows × Python 3.12 / 3.13，覆盖声明的最低版本与当前版本
 - **交叉验证**（L3）：E2↔E3↔E6 净值互证、E2↔E4a 持仓交集、本地复权收益 vs 官方 `syl_1n` 容差 0.6pct、中债↔东财↔push2 十年期国债三源、沪深300全收益 2024 官方收盘锚点
 - **预算审计**（L4）：打印基金域东财/股票域东财/腾讯/巨潮账本；中证独立 `CSINDEX_REQUEST_COUNT` 在专项测试审计
@@ -390,8 +390,9 @@ python3 test_fund_data.py --online         # 全链路 455 条（真数据；368
 
 ## 版本历史
 
-> 注：各条目末尾的通过数为**该版本发布时点**的口径（后续版本在相同套件上只增不减），与文首"368/368"当前值并行不悖。
+> 注：各条目末尾的通过数为**该版本发布时点**的口径（后续版本在相同套件上只增不减），与文首"381/381"当前值并行不悖。
 
+- **V0.8.1（2026-11-24）审查修复批**：对 V0.7.4→V0.8.0 六笔 ~4900 行做双路独立审查（V0.8.0 深审 + 网络层审），全量修复产出——①**P1 映射语义**：`csindex_resolve_total_return` 无 TRI 衍生分支误标 `return_type:"total_return"`，如实改 `price_return`（无 TR 衍生的股票指数是价格指数），30 天旧错值 mapping 缓存读取时自愈重取；②**元数据串台**：日线缓存按 TR 代码共享，经不同基础代码查询（000300 vs H00300）曾带回首查方 base_index_code——出库/落盘前按本次调用方重写；损坏年度缓存补回归测试锁定既有 miss-重取行为；盘前落盘的当年文件 mtime 回拨 18h（≈2h 后过期增量补当日行）；③**盘前同步不炸**：当日 tradeDate 清单先行含今天而行情未发布 → 不计缺失（V0.8.0 会整史重取后仍报错），pending_today 入报告；④**并发与超时**：sync manifest file_lock 重读-合并-写回 + 异窗口旧 job 清理；gateway curl runner 超时 +10s 余量（TimeoutExpired 击穿 OSError 分层）+ `_cb_request` 网关分支补分流与 `_release_pending`；⑤**重试口径**：`_tencent_kline_page` 有状态码失败不再瞬态重试多烧一发；⑥P3 批 11 项（新浪干净空体不计连击/sina 非 str 归一/中债降级值域守卫/EO cookie 剥属性段/备胎短史文案/全角（净）/pe_ttm 在线锚点/BENCH_SECID 在线抽查/注释澄清/策略双向锁）。离线回归 381/381（+13），core 93 全绿（网关 21→22）
 - **V0.8.0（2026-11-24）中证官方全收益指数**：①新增 `csindex_universe` 全七系列主键表（实测人民币 2767、全币种 3016）；②`csindex_resolve_total_return` 通过衍生指数+基本资料双验官方映射（H00300/H20269/932000CNY010），无映射/未知/歧义显式分列；③`csindex_total_return_daily` 从 basicDate 拉全史，官方有效日期清洗、缺失按年重取、数值审计、按年缓存与当前年增量；④`csindex_sync_total_return` 显式批量、manifest 断点续传、独立 csindex 限流/熔断/账本；⑤沪深300全收益 2024 实测 242 行、收益 19.8025%，红利低波与中证2000特殊代码历史样本通过；P33 记录占位日、业务400及官方 change 口径差。离线回归 368/368，core 92 全绿
 - **V0.7.8（2026-11-18）基金报告**：①**报告清单 `fund_reports(q, category, limit)`**——f10/JJGG 七类目（periodic 默认=定期报告/all/issuing/dividend/staff/sales/other，type=页面 tab 实测钉死），行含 {report_id,title,date,year,kind(Q1~Q4/interim/annual/other),pdf_url}，新→旧；固定抓满 pageSize=100 本地切片（缓存与 limit 解耦），1 请求当日缓存；②**PDF 下载 `fund_report_pdf(row|url, dest_dir)`**——直链规律 `pdf.dfcfw.com/pdf/H2_{清单ID}_1.pdf`（_1 附件号不可省），已存在同名文件 0 请求直返，文件名 {code}_{date}_{kind}_{ID尾6}.pdf（防年报/摘要同日撞名）；③**EdgeOne 反爬自动解（P32）**——裸请求 200+Content-Type 伪装 pdf 但 body 是 988B 静态 `<script>` 挑战，node vm 沙箱 eval（无 require/fs/net+timeout）捕获 `__tst_status`/`EO_Bot_Ssid` 重放即真 PDF，挑战按会话计费解一次复用；④**场外覆盖实证**——巨潮 column=fund 仅上市基金（交银趋势 519702 三路全零），东财清单+直链是全量唯一解（636KB 真卷实证）；JJGG 裸 UA 是 200+ErrCode-999 假成功形态必须带 fundf10 Referer；dfcfw.com 归入 eastmoney 线同账限流；审查加固：node argv `--` 分隔防选项注入、vm codeGeneration 禁二次 eval、挑战体 option 形不进宿主、subprocess 超时/OS 异常显式报错。离线回归 334/334
 - **V0.7.7（2026-11-18）申购限额**：①**限额/交易状态入快照**——`fund_snapshot` 新增 `purchase_limit` 数据集（kind 四态 limited/suspended/unlimited/unknown + limit_cny 折算金额 + not_for_sale 不代销），快照 1→2 请求（E2+主页面），失败进 missing_datasets 不炸快照（E2 成果不陪葬）；`fund_purchase_limit(码)` 可单独调用（当日缓存），`parse_purchase_limit` 纯函数导出可单测；②**唯一来源探针证据（P31）**——E2/E3/E6 实测均无完整限额（E3 SGZT 仅「限大额」短文本无金额），唯一来源是主页面交易状态栏且**无批量接口**（N 只 N 请求，tt 线 1.5s 节流 400 只约 10 分钟）；③**嵌套 span 解析**——金额与「限大额」分属不同层级 text node（000369 实测），`_StaticCellParser` depth 嵌套感知全文拼接，简单 regex 必截断；④语义修正——「限大额但金额未识别」诚实返回 limit_cny=None（外部监控脚本硬给 0 会虚报不可买）；外币按静态近似汇率折 CNY（fx 参数可覆盖），精确额度看 limit_raw 原文；⑤口径勘误——rankhandler ft=qdii 363 只仅混合/股票类，QDII 联接/LOF 归「指数型-海外股票」类型不在其中。离线回归 312/312
@@ -434,7 +435,7 @@ python3 test_fund_data.py --online         # 全链路 455 条（真数据；368
 ```
 fund_data.py        # 核心模块（可直接 import；57 个公开函数）
 fund_data_core/     # 跨进程请求协调核心（Gateway/Coordinator/Cache/Policies；import 即默认激活）
-test_fund_data.py   # 455 条分层回归测试（默认 368 条离线；--online 跑全量 455）
+test_fund_data.py   # 472 条分层回归测试（默认 381 条离线；--online 跑全量 472）
 build_skill_md.py   # 从模块自动组装三层文档（内嵌代码与源码同源直拼）
 SKILL.md            # Agent skill 路由层（build 产物·≈4K token）：铁律/场景路由/失效路由/签名速查
 reference.md        # 全量参考（按需读取层）：完整内嵌代码/P1~P33 坑区/端点路由/使用示例/版本记录

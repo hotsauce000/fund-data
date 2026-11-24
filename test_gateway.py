@@ -243,6 +243,17 @@ class GatewayTests(unittest.TestCase):
         response.permit.success()
         self.assertEqual(coordinator.snapshot("eastmoney")["responses"], 1)
 
+    def test_curl_runner_timeout_leaves_margin_over_max_time(self):
+        # V0.8.1：subprocess 侧超时须晚于 curl 自身 --max-time 到点——
+        # TimeoutExpired 非 OSError 非 RuntimeError，会击穿调用方的分层处理
+        runner = FakeCurlRunner([{"body": b"ok", "stdout": b"200"}])
+        coordinator = self.coordinator()
+        Gateway(coordinator, curl_runner=runner).get(
+            self.url, transport="curl", timeout=30)
+        argv, kwargs = runner.calls[0]
+        max_time = int(argv[argv.index("--max-time") + 1])
+        self.assertEqual(kwargs["timeout"], max_time + 10)
+
     def test_curl_process_failure_retries_with_new_permit(self):
         runner = FakeCurlRunner([
             {"returncode": 7, "stdout": b"000", "stderr": b"connect"},

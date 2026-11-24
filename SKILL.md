@@ -9,10 +9,10 @@ description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集�
 description_en: Full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), holdings maps, 24,792-fund rankings, manager profiles, 10-year klines, 53-period scale history, report PDFs. Zero keys/login, budget-guarded, assertions green.
 author: hotsauce000
 origin: custom
-version: 0.8.0
+version: 0.8.1
 ---
 
-# fund-data 路由层 V0.8.0
+# fund-data 路由层 V0.8.1
 
 本文件是**路由层**（≈4K token，激活只加载本文件）。坑区/内嵌代码→**reference.md**、菜谱/FAQ→**examples.md**（均按需读取）；`fund_data.py` import 用勿通读：
 
@@ -52,7 +52,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | 规模·全史/费率/溢价/重仓探测 | `fund_scale`·`fund_scale_history`·`fund_fees`·`qdii_premium`·`nav_divergence` | 各1·2·冷启≤12 |
 | 经理画像/排行 | `fund_manager(基金码或经理ID)` · `manager_rank(pages)`（仅姓名序） | 0~1·50/页 |
 | 指数日线 | `kline_daily("沪深300")`（指数名/板块名/股票码） | 1（缓存0） |
-| 全收益指数 | `csindex_resolve_total_return`→`csindex_total_return_daily` | 冷启≤4/缓存0 |
+| 全收益指数 | `csindex_resolve_total_return`→`csindex_total_return_daily` | 冷启≤5/缓存0 |
 | 全收益批量同步 | `csindex_sync_total_return(codes=[...])`；全量须 `all_indices=True` | 显式任务 |
 | 债基利率敏感度 | `cb_yield_curve` + `credit_spread` / `treasury_yield_daily` | 1~2 |
 | 重仓股深度 | `holding_map` → **a-stock-data skill** | 0 |

@@ -43,6 +43,10 @@ DEFAULT_POLICIES = {
     # 新浪（V0.7.5 备胎通道）：hq.sinajs.cn 对高频爬虫有封禁前科——核心基线
     # 保守 120/300s·0.5s·单并发，主模块在其上 replace 覆盖为同值（单一来源两处一致）
     "sina": ProviderPolicy(max_requests=120, min_interval=0.5, max_in_flight=1),
+    # 中证官网（V0.8.0 全收益指数层）：与主模块 _reset_request_coordination 的
+    # replace 覆盖值逐字段一致（120/300s·1.0s·单并发，测试双向锁）。lease 180s
+    # 特意大于其他线（30s）——perf 全史请求 timeout=60 且单并发，短租约会让慢
+    # 请求进行中第二进程穿透并发约束
     "csindex": ProviderPolicy(max_requests=120, min_interval=1.0, max_in_flight=1,
                               lease_seconds=180),
 }

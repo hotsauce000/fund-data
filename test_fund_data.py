@@ -362,6 +362,11 @@ def test_l1_offline():
         check("L1", "报告-option形挑战体应抛未抛", False)
     except RuntimeError:
         check("L1", "报告-option形挑战体不进宿主进程", True)
+    _eo_attrs = fd._edgeone_solve(
+        '<script>document.cookie="__tst_status=7#; path=/;";'
+        'document.cookie="EO_Bot_Ssid=42; Path=/; HttpOnly;";</script>')
+    check("L1", "报告-EdgeOne cookie属性段剥离",
+          _eo_attrs == {"__tst_status": "7#", "EO_Bot_Ssid": "42"}, str(_eo_attrs))
 
     _orig_tt8, _orig_cr8, _orig_cw8 = fd.ttfund_get, fd._cache_read, fd._cache_write
     _orig_fl8, _orig_eoc8 = fd.fund_list, list(fd._EO_COOKIE_CACHE)
@@ -540,6 +545,8 @@ def test_l1_offline():
                 raise _ue.URLError("connection reset")
             if self._mode == "softblock":
                 return _io.BytesIO('var hq_str_sh118078="";'.encode("gbk"))
+            if self._mode == "cleanmiss":               # V0.8.1：非空体但无 var 行
+                return _io.BytesIO(b"\n")
             return _io.BytesIO('v_sh600519="1~名~600519~1";'.encode("gbk"))
 
     _orig_bo2 = fd.urllib.request.build_opener
@@ -553,6 +560,16 @@ def test_l1_offline():
         except RuntimeError as e:
             check("L1", "新浪-软封锁全空var计信号抛错",
                   "全未命中" in str(e) and fd._cbreak_state["sina"][0] >= 1)
+        # V0.8.1：无 var 行的干净空体（代码全无效/退市）→ 报错但不计风控连击
+        fd.urllib.request.build_opener = lambda h=None: _StubOpener2("cleanmiss")
+        _fresh_coordination()
+        _sina_strikes = fd._cbreak_state["sina"][0]
+        try:
+            fd.sina_quote(["sh999999"])
+            check("L1", "新浪-干净空体应抛未抛", False)
+        except RuntimeError as e:
+            check("L1", "新浪-干净空体不计风控连击",
+                  "无 var 行" in str(e) and fd._cbreak_state["sina"][0] == _sina_strikes)
         # sina 连接级熔断：2 连败写停机标记，第 3 次零网络直拒；期满自动复位
         _ctr = [0]
         fd.urllib.request.build_opener = lambda h=None: _StubOpener2("conn", _ctr)
@@ -595,6 +612,23 @@ def test_l1_offline():
         except fd.RiskControlError as e:
             check("L1", "腾讯-403计风控抛RiskControlError",
                   "腾讯" in str(e) and fd._cbreak_state["tencent"][0] >= 1)
+        # V0.8.1：_tencent_kline_page 有状态码失败不瞬态重试（HTTPError 是 OSError
+        # 子类须先捕获——V0.7.5 tencent_quote 同口径，V0.7.6 新函数漏沿用）
+        _kline404_ctr = [0]
+
+        class _Kline404Opener:
+            def open(self, req, timeout=None):
+                _kline404_ctr[0] += 1
+                raise _ue.HTTPError(req.full_url, 404, "Not Found", None, None)
+
+        fd.urllib.request.build_opener = lambda h=None: _Kline404Opener()
+        _fresh_coordination()
+        try:
+            fd._tencent_kline_page("sh000300")
+            check("L1", "腾讯日K-HTTPError应抛未抛", False)
+        except _ue.HTTPError:
+            check("L1", "腾讯日K-有状态码失败不瞬态重试",
+                  _kline404_ctr[0] == 1, f"实际请求 {_kline404_ctr[0]} 次")
     finally:
         fd.urllib.request.build_opener = _orig_bo2
         fd._sina_conn_file().unlink(missing_ok=True)
@@ -1546,6 +1580,22 @@ def test_l1_offline():
         check("L1", "国债实时-风险路径零降级请求", not _rt_cb_calls, str(_rt_cb_calls))
     finally:
         fd._push2_get, fd.cb_yield_curve, fd._cache_read = _orig_rt_parts
+
+    # V0.8.1：中债降级值同过 (0,15) 值域守卫——脏值不得借降级键驻留 300s
+    _orig_rt_parts = (fd._push2_get, fd.cb_yield_curve, fd._cache_read, fd._cache_write)
+    _deg_writes = []
+    try:
+        fd._cache_read = lambda *a, **k: None
+        fd._cache_write = lambda rel, payload: _deg_writes.append(rel)
+        fd._push2_get = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("push2 桶空"))
+        fd.cb_yield_curve = lambda *a, **k: {"points": [
+            {"date": "2026-11-21", "term": t, "yield_pct": 20.0 if t == "10y" else 2.0}
+            for t in ("2y", "5y", "10y", "30y")]}
+        expect_raise("L1", "国债实时-降级脏值拒绝静默",
+                     lambda: fd.cn_treasury_realtime(), "收益率异常")
+        check("L1", "国债实时-降级守卫零缓存写入", not _deg_writes, str(_deg_writes))
+    finally:
+        fd._push2_get, fd.cb_yield_curve, fd._cache_read, fd._cache_write = _orig_rt_parts
 
     # cninfo 451 刷新重试（P20：钥匙时效非风控，不计熔断）
     class _CJ:
@@ -2969,6 +3019,18 @@ def test_csindex_offline():
     check("L1", "中证防封-独立配额单并发与慢请求租约",
           _cs_policy.max_requests == 120 and _cs_policy.window_seconds == 300
           and _cs_policy.max_in_flight == 1 and _cs_policy.lease_seconds > 120)
+    fd._reset_request_coordination()               # 真实策略解析（沙箱可能处于零间隔态）
+    _cs_real = fd._COORDINATOR.policy("csindex")
+    _fresh_coordination()                          # 复位零间隔——后续 fake 流程不节流
+    from fund_data_core.policies import DEFAULT_POLICIES as _DP
+    _cs_default = _DP["csindex"]                   # V0.8.1：core 默认表↔主模块覆盖双向锁
+    check("L1", "中证防封-core默认表与主模块覆盖一致",
+          (_cs_default.max_requests, _cs_default.window_seconds, _cs_default.min_interval,
+           _cs_default.max_in_flight, _cs_default.lease_seconds)
+          == (_cs_real.max_requests, _cs_real.window_seconds, _cs_real.min_interval,
+              _cs_real.max_in_flight, _cs_real.lease_seconds)
+          == (120, 300, fd.CSINDEX_MIN_INTERVAL, 1, 180),
+          "单一来源两处一致（V0.8.1 双向锁）")
     _deriv = [
         {"indexCode": "H00300", "indexNameCn": "300收益", "indexNameEn": "CSI 300 TRI"},
         {"indexCode": "N00300", "indexNameCn": "沪深300净收益", "indexNameEn": "CSI 300 NTRI"},
@@ -3055,9 +3117,23 @@ def test_csindex_offline():
               and all(x["status"] == "mapped" for x in (_m300, _mlv, _m2000)))
         check("L1", "中证映射-本身即全收益",
               fd.csindex_resolve_total_return("932047", force_refresh=True)["status"] == "already_total")
+        _no_tri = fd.csindex_resolve_total_return("930002", force_refresh=True)
+        _no_rt = fd.csindex_resolve_total_return("930001", force_refresh=True)
         check("L1", "中证映射-无TRI与未知口径分离",
-              fd.csindex_resolve_total_return("930002", force_refresh=True)["status"] == "no_total_return"
-              and fd.csindex_resolve_total_return("930001", force_refresh=True)["status"] == "return_type_unknown")
+              _no_tri["status"] == "no_total_return"
+              and _no_rt["status"] == "return_type_unknown"
+              and _no_tri["return_type"] == "price_return"   # V0.8.1 修：无 TR 衍生的股票
+              and _no_rt["return_type"] == "unknown"         # 指数是价格指数，V0.8.0 误标
+              and _no_tri["total_return_code"] is None)      # total_return 会误导消费方
+        # V0.8.1：V0.8.0 落盘的旧错值缓存（no_total_return+total_return）视为 miss 自愈
+        fd._cache_write("csindex/mappings/930002.json",
+                        {"base_index_code": "930002", "total_return_code": None,
+                         "return_type": "total_return", "status": "no_total_return",
+                         "source": "csindex/derivative+basic-info"})
+        _healed = fd.csindex_resolve_total_return("930002")
+        check("L1", "中证映射-V0.8.0旧错值缓存自愈",
+              _healed["return_type"] == "price_return"
+              and _healed["status"] == "no_total_return")
         check("L1", "中证映射-多候选不猜",
               fd.csindex_resolve_total_return("930003", force_refresh=True)["status"] == "ambiguous")
 
@@ -3093,6 +3169,30 @@ def test_csindex_offline():
         _hist2 = fd.csindex_total_return_daily("000300", "20240102", "20240103")
         check("L1", "中证历史-年度缓存二次零请求",
               len(_hist2) == 2 and fd.CSINDEX_REQUEST_COUNT[0] == _before)
+        # V0.8.1：共享日线缓存按调用方视角重写 base_index_code（修串台元数据）
+        _tr_view = fd.csindex_total_return_daily("H00300", "20240101", "20240110")
+        check("L1", "中证历史-共享缓存按调用方重写base",
+              len(_tr_view) == 3 and all(x["base_index_code"] == "H00300" for x in _tr_view)
+              and _tr_view[0]["index_code"] == "H00300",
+              str([(x["date"], x["base_index_code"]) for x in _tr_view]))
+        # V0.8.1：损坏年度缓存（close 非数值）视为 miss 重取修复，不静默复用
+        fd._cache_write("csindex/daily/H00300_2024.json",
+                        [{"date": "2024-01-02", "close": "坏值", "index_code": "H00300"}])
+        _corrupt_calls = [0]
+
+        def _corrupt_fake(path, params=None, payload=None, timeout=30):
+            if path in ("/perf/index-perf-tradeDate", "/perf/index-perf"):
+                _corrupt_calls[0] += 1
+            return _history_fake(path, params, payload, timeout)
+
+        fd._csindex_request = _corrupt_fake
+        _repaired = fd.csindex_total_return_daily("000300", "20240101", "20240110")
+        check("L1", "中证历史-损坏年度缓存视为miss重取",
+              len(_repaired) == 3 and _corrupt_calls[0] >= 1
+              and _repaired[0]["close"] == 100.0
+              and all(x["base_index_code"] == "000300" for x in _repaired),
+              f"calls={_corrupt_calls[0]} rows={len(_repaired)}")
+        fd._csindex_request = _history_fake
 
         _mapping = _m300
 
@@ -3116,6 +3216,29 @@ def test_csindex_offline():
             _mapping, "2024-01-01", "2024-01-10", force_refresh=True)
         check("L1", "中证历史-缺失自动按年重取",
               len(_filled) == 3 and _report["chunked"] and not _report["missing_dates"])
+
+        # V0.8.1：当日行情盘后延迟发布（tradeDate 清单先行含今天）→ 不计缺失不炸，
+        # pending_today 如实入报告；行内已带回时自然入库
+        _today_iso = fd.datetime.now(fd._BJ_TZ).date().isoformat()
+        _today_compact = _today_iso.replace("-", "")
+
+        def _premarket_fake(path, params=None, payload=None, timeout=30):
+            if path == "/perf/index-perf-tradeDate":
+                return {"code": "200", "success": True,
+                        "data": ["20240102", "20240103", _today_compact]}
+            if path == "/perf/index-perf":
+                return {"code": "200", "success": True, "data": [
+                    _perf_row("20240102", 100, 0, 0),
+                    _perf_row("20240103", 101, 1, 1)]}    # 当日 perf 未发布
+            raise AssertionError(path)
+
+        fd._csindex_request = _premarket_fake
+        _pm_rows, _pm_report = fd._csindex_download_history(
+            _mapping, "2024-01-01", _today_iso, force_refresh=True)
+        check("L1", "中证历史-当日未发布不计缺失",
+              len(_pm_rows) == 2 and _pm_report["pending_today"] == _today_iso
+              and not _pm_report["missing_dates"] and not _pm_report["chunked"],
+              str(_pm_report))
 
         def _bad_numeric(path, params=None, payload=None, timeout=30):
             if path == "/perf/index-perf-tradeDate":
@@ -3187,6 +3310,35 @@ def test_csindex_offline():
               len(_current) == 2 and _increment_params[0]["startDate"] == f"{_year}0102"
               and _current_report["incremental"] and _current[-1]["date"] == f"{_year}-01-05",
               f"rows={[(x['date'], x['close']) for x in _current]} params={_increment_params} report={_current_report}")
+
+        # V0.8.1 收口审查：盘前落盘的当年文件缺当日行 → mtime 回拨 18h（≈2h 后
+        # 过期走增量补当日行），不占满 20h TTL
+        _pm_today = fd.datetime.now(fd._BJ_TZ).date().isoformat()
+        _pm_compact = _pm_today.replace("-", "")
+
+        def _pm_daily_fake(path, params=None, payload=None, timeout=30):
+            if path == "/perf/index-perf-tradeDate":
+                return {"code": "200", "success": True,
+                        "data": [f"{_year}0102", _pm_compact]}
+            if path == "/perf/index-perf":
+                return {"code": "200", "success": True,
+                        "data": [_perf_row(f"{_year}0102", 100, 0, 0)]}   # 缺当日
+            return _mapping_fake(path, params, payload, timeout)
+
+        os.utime(_current_path, (_old_mtime, _old_mtime))  # 当年文件回到过期态
+        fd._cache_write(f"csindex/trade_dates/H00300.json",
+                        [f"{_year}-01-02", _pm_today])     # 有效日期含今天（ISO——
+        # 缓存命中路径原样返回，生产写入即 ISO；写紧凑格式会令 valid 集与行日期
+        # 永不匹配、expected 静默为空——本测试首版即踩此坑，留注防回归）
+        fd._csindex_request = _pm_daily_fake
+        _pm_daily = fd.csindex_total_return_daily("000300", f"{_year}0101")
+        _pm_mtime = os.path.getmtime(fd.FUND_CACHE_DIR / f"csindex/daily/H00300_{_year}.json")
+        check("L1", "中证历史-盘前落盘当年文件mtime回拨",
+              len(_pm_daily) == 1 and _pm_daily[0]["date"] == f"{_year}-01-02"
+              and _pm_mtime < time.time() - 17 * 3600
+              and fd._cache_read(f"csindex/reports/H00300_latest.json", None)["pending_today"]
+              == _pm_today,
+              f"rows={len(_pm_daily)} mtime 距今 {(time.time() - _pm_mtime) / 3600:.1f}h")
 
         _orig_resolve_sync, _orig_daily_sync = (fd.csindex_resolve_total_return,
                                                 fd.csindex_total_return_daily)
@@ -3282,6 +3434,17 @@ def test_csindex_offline():
                 codes=["UP1001", "LO0001", "UP1002", "UP1003"], resume=False)
             check("L1", "中证同步-本地错误重置上游连击",
                   len(_mixed_calls) == 4 and _mixed["error"] == 4)
+            # V0.8.1：manifest 落盘锁 + 异窗口旧 job 清理（清单有界）
+            fd.csindex_total_return_daily = _sync_daily   # 上面 mixed mock 对 SYNC02 全败，重指 ok mock
+            fd._cache_write("csindex/sync_manifest.json",
+                            {"jobs": {"OLD01": {"status": "ok", "start_date": "20200101",
+                                                "end_date": "20201231",
+                                                "fetched_at": "2020-01-01T00:00:00+08:00"}}})
+            fd.csindex_sync_total_return(codes=["SYNC02"], resume=False)
+            _pruned = fd._cache_read("csindex/sync_manifest.json", None)
+            check("L1", "中证同步-清单异窗口旧job清理",
+                  "OLD01" not in _pruned["jobs"] and "SYNC02" in _pruned["jobs"]
+                  and _pruned["jobs"]["SYNC02"]["status"] == "ok")
         finally:
             fd.csindex_resolve_total_return = _orig_resolve_sync
             fd.csindex_total_return_daily = _orig_daily_sync
@@ -3325,6 +3488,23 @@ def test_csindex_offline():
     finally:
         fd.CSINDEX_SESSION.get = _orig_get
         _fresh_coordination()
+
+    # mock 数据不入真缓存（V0.8.1 修：沙箱内也不留——在线层 test_csindex_online
+    # 同进程读同一沙箱 FUND_CACHE_DIR，24h TTL 的 mock 清单/日线/映射会让在线
+    # 断言读到 3 行假数据；沿「mock 不入真缓存」既有惯例，整个 csindex 子树清除）
+    import shutil as _sh_cs
+    _sh_cs.rmtree(fd.FUND_CACHE_DIR / "csindex", ignore_errors=True)
+
+    # V0.8.1 复审：BENCH 抽查的 SKIP 豁免不得吞 RiskControlError（其是
+    # RuntimeError 子类——在线函数先分流再豁免；此断言锁死该分流防回归）
+    _orig_p2g_bench = fd._push2_get
+    try:
+        fd._push2_get = lambda *a, **k: (_ for _ in ()).throw(
+            fd.RiskControlError("HTTP 403（push2）：疑似风控信号"))
+        expect_raise("L1", "行业抽查-风控信号不被SKIP豁免",
+                     test_bench_spot_online, "风控")
+    finally:
+        fd._push2_get = _orig_p2g_bench
 
 
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
@@ -4242,6 +4422,9 @@ def test_csindex_online():
           and rows[0]["index_code"] == "H00300"
           and all(x["date"] != "2024-01-01" for x in rows),
           f"{len(rows)} 行，{rows[0]['date']}→{rows[-1]['date']}")
+    check("L2", "中证历史-pe_ttm在线锚点",          # V0.8.1：上游 peg 字段改名预警
+          any(r.get("pe_ttm") is not None for r in rows),
+          f"全列 pe_ttm=None（共 {len(rows)} 行）——上游字段漂移嫌疑")
     annual_return = rows[-1]["close"] / rows[0]["close"] - 1
     check("L3", "中证历史-沪深300全收益年度锚点",
           abs(rows[0]["close"] - 4709.92) < 1e-9
@@ -4257,6 +4440,34 @@ def test_csindex_online():
           sync["ok"] == 1 and sync["requests"] == 0, f"{sync['rows'] if 'rows' in sync else 'ok'}")
 
 
+def test_bench_spot_online():
+    """V0.8.1：BENCH_SECID 100 个 BK 行业映射在线抽查（P3 审查项）。
+
+    映射主体单源于 clist 快照（仅 BK0475/BK1036 双样本验证过）——用 kline 接口
+    回读 name 交叉验证抽查 3 个（每映射 1 请求，em 线预算内；映射错=静默拿错
+    行业基准的数值风险）。"""
+    for name, secid in (("银行Ⅱ", "90.BK0475"), ("半导体", "90.BK1036"),
+                        ("房地产开发", "90.BK0451")):
+        try:
+            d = (fd._push2_get("https://push2his.eastmoney.com/api/qt/stock/kline/get",
+                               {"secid": secid, "klt": 101, "fqt": 1, "lmt": 5,
+                                "end": "20500101", "fields1": "f1,f2,f3",
+                                "fields2": "f51,f53"}, f"行业基准抽查 {secid}")
+                 .get("data") or {})
+        except fd.RiskControlError:
+            raise                                 # 风控信号绝不 SKIP 豁免（F6 纪律；
+                                                 # 注意其是 RuntimeError 子类，必须
+                                                 # 先于下方 except 分流——复审抓的坑）
+        except RuntimeError as e:
+            # 辅助溯源抽查不判死整套（P26 惩罚期桶空/连接级熔断时零网络跳过）
+            check("SKIP", f"行业基准映射抽查-{name}", True,
+                  f"push2 不可用跳过（{str(e)[:60]}）")
+            continue
+        check("L2", f"行业基准映射抽查-{name}",
+              (d.get("name") or "").strip() == name,
+              f"secid={secid} 实回 name={d.get('name')!r}")
+
+
 def main():
     print(f"fund-data {fd.__version__} 分层测试  offline_only={OFFLINE_ONLY}\n")
     test_l1_offline()
@@ -4266,7 +4477,8 @@ def main():
     if not OFFLINE_ONLY:
         # 逐函数隔离（冷跑教训：单函数 transient 逃逸曾连带跳过 L3/L4/L5/F 全部信号）；
         # 栈全文走 stdout（print_exc 走 stderr 会与 check 的 stdout 在管道下错序截断）
-        for fn in (test_l2_smoke, test_csindex_online, test_l3_cross, test_l4_budget,
+        for fn in (test_l2_smoke, test_csindex_online, test_bench_spot_online,
+                   test_l3_cross, test_l4_budget,
                    test_l5_degrade, test_f_guard_band, test_f_cache_band):
             try:
                 fn()

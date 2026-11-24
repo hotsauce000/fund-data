@@ -59,7 +59,7 @@ def _sig_rows() -> list:
     return rows
 
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 DESCRIPTION = (
     "写代码实际获取基金领域底层数据时使用——零key零登录，九层能力："
     "【主键与端点】2.8万只清单消歧(列出不猜)、单基金诊断快照(pingzhongdata 20+数据集:"
@@ -153,7 +153,7 @@ THIN.append("""## 场景路由（我想做 X → 调什么）
 | 规模·全史/费率/溢价/重仓探测 | `fund_scale`·`fund_scale_history`·`fund_fees`·`qdii_premium`·`nav_divergence` | 各1·2·冷启≤12 |
 | 经理画像/排行 | `fund_manager(基金码或经理ID)` · `manager_rank(pages)`（仅姓名序） | 0~1·50/页 |
 | 指数日线 | `kline_daily("沪深300")`（指数名/板块名/股票码） | 1（缓存0） |
-| 全收益指数 | `csindex_resolve_total_return`→`csindex_total_return_daily` | 冷启≤4/缓存0 |
+| 全收益指数 | `csindex_resolve_total_return`→`csindex_total_return_daily` | 冷启≤5/缓存0 |
 | 全收益批量同步 | `csindex_sync_total_return(codes=[...])`；全量须 `all_indices=True` | 显式任务 |
 | 债基利率敏感度 | `cb_yield_curve` + `credit_spread` / `treasury_yield_daily` | 1~2 |
 | 重仓股深度 | `holding_map` → **a-stock-data skill** | 0 |
@@ -204,9 +204,17 @@ REF.append(f"""# fund-data 完整参考（reference.md · 按需读取层）V{VE
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 """)
 
-REF.append(r"""# fund-data 基金底层数据工具包 V0.8.0 模块全档
+REF.append(r"""# fund-data 基金底层数据工具包 V0.8.1 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数：368/368 离线断言通过**（L1 单元 332 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 92 条。在线全量须显式 `--online`），覆盖 30 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复：381/381 离线断言通过**（L1 单元 345 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 93 条。在线全量须显式 `--online`），覆盖 30 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.8.1 审查修复批（V0.8.0 全收益层双路独立审查产出：1×P1 + 5×P2 + 11×P3）：**
+- 🔴 **P1 映射语义**：`csindex_resolve_total_return` 无 TRI 衍生分支误标 `return_type:"total_return"`——如实改 `price_return`（无 TR 衍生的股票指数是价格指数）；30 天旧错值 mapping 缓存读取时自愈重取；测试补锁 return_type/total_return_code
+- 🟠 **元数据串台**：日线缓存按 TR 代码共享，经不同基础代码查询（000300 vs H00300）曾带回首查方的 base_index_code——出库/落盘前按本次调用方重写（行情数值本就同源无误）；损坏年度缓存（close 非数值）补回归测试锁定既有 miss-重取行为；盘前落盘的当年文件 mtime 回拨 18h（≈2h 后过期增量补当日行，不占满 20h TTL）
+- 🟠 **盘前同步不炸**：当日 tradeDate 清单先行含今天而 perf 未发布 → 不计缺失不整史重取（V0.8.0 形态是按年重取后仍 UpstreamFormatError），`pending_today` 如实入报告
+- 🟠 **并发与超时**：sync manifest 落盘 file_lock 重读-合并-写回 + 只保留本次窗口 job（清单有界）；gateway curl runner 超时 +10s 余量（TimeoutExpired 非 OSError 非 RuntimeError 会击穿调用方分层）；`_cb_request` 网关分支补 TimeoutExpired 分流与 `_release_pending`（LeaseError 对称）
+- 🟠 **重试口径**：`_tencent_kline_page` 有状态码失败（HTTPError 是 OSError 子类）不再当瞬态重试多烧一发——V0.7.5 tencent_quote 口径补齐
+- 🟡 P3 批：新浪干净空体（无 var 行）不计风控连击；sina_quote 非 str 输入先归一；中债降级值过 (0,15) 值域守卫防驻留 300s；EdgeOne cookie 剥 `; path=/` 属性段；备胎成功但短史文案如实（不再误称「备胎失败」）；净收益排除补全角（净）；pe_ttm 在线锚点（上游 peg 改名预警）；BENCH_SECID 行业映射在线抽查 3 个；纵深防御/policies 注释澄清；core 默认表↔主模块覆盖双向锁测试
 
 **V0.8.0 中证官方全收益指数（清单 + 官方映射 + 验证全史 + 可恢复同步）：**
 - 🟢 **全系列主键表 `csindex_universe()`**：官网七个系列一次建表，分页 total/实收强校验；默认人民币，资产/系列/币种筛选本地执行
@@ -444,7 +452,7 @@ REF.append(r"""## 端点路由速查（按需定位，不必通读）
 | P30 新浪行情通道（V0.7.5） | hq.sinajs.cn 无 Referer 即拒（实测空响应）；高频爬虫有封禁前科；银行间信用债无公开实时端点（货币网现券板仅利率债活跃券） | `sina_quote` 内置 Referer + provider=sina 独立分账 120/300s·0.5s·单并发 + 403/429 计熔断 + 空体计信号；定位=腾讯互备低频兜底，银行间实时须 QB 等权限源 |
 | P31 申购限额唯一来源（V0.7.7） | E2/E3/E6 探针实测均无完整限额（E3 SGZT 仅「限大额」短文本无金额）——唯一来源是主页面 `{code}.html` 交易状态栏，且无批量接口（N 只 N 请求）；金额与「限大额」分属不同层级 text node（嵌套 span），简单 regex 必截断（000369 实测）；外币折算是静态近似汇率非实时牌价 | `fund_purchase_limit`：`_StaticCellParser` 嵌套感知全文拼接 + `parse_purchase_limit` 纯函数（kind 四态；限大额无金额诚实 limit_cny=None 不虚报 0）；已并入快照 `purchase_limit` 数据集（失败进 missing 不炸快照）；rankhandler ft=qdii 仅 363 只混合/股票类（联接/LOF 归「指数型-海外股票」不在内） |
 | P32 基金报告双通道（V0.7.8） | ①JJGG 必须带 fundf10 Referer——裸 UA 是 200+ErrCode-999+Data=""「假成功」；type=页面 tab（0 全部/1 发行运作/2 分红送配/3 定期报告/4 人事调整/5 基金销售/6 其他），部分基金加披 Q2/Q4 季报（交银趋势实测 6 期/年）②PDF 直链 `H2_{ID}_1.pdf` 的 _1 附件号不可省（少了拿到挑战壳）③pdf.dfcfw.com 腾讯 EdgeOne 反爬：200+Content-Type 伪装 pdf 但 body 是 988B 静态 `<script>` 挑战；巨潮 column=fund 仅上市基金，场外不在其体系 | `fund_reports`：Referer 必带+Data 非 list 显式报错+无 ID 行跳过+total>0 解析空拒绝；`fund_report_pdf`：_edgeone_solve node vm 沙箱（无 require/fs/net+timeout）解 `__tst_status`/`EO_Bot_Ssid` 重放一次，仍非 PDF/残包(<1KB)显式报错；挑战 cookie 进程级复用；dfcfw.com 归 eastmoney 线同账限流 |
-| P33 中证全收益（V0.8.0） | 非交易日起始日会生成与下一交易日相同的占位行；全收益代码存在 H00300/H20269/932000CNY010 等无统一规律形态；HTTP 200 可携带业务400；个别历史行 change 与收盘差有上游口径差 | 官方 tradeDate 过滤+缺失按年重取；衍生指数+基本资料+行情三验身份；业务 code 强校验；change 异常写审计警告，changePct 与收盘明显矛盾拒绝入库；不降级价格指数 |
+| P33 中证全收益（V0.8.0） | 非交易日起始日会生成与下一交易日相同的占位行；全收益代码存在 H00300/H20269/932000CNY010 等无统一规律形态；HTTP 200 可携带业务400；个别历史行 change 与收盘差有上游口径差；当日 tradeDate 清单先行含今天而行情盘后才发布 | 官方 tradeDate 过滤+缺失按年重取；衍生指数+基本资料+行情三验身份；业务 code 强校验；change 异常写审计警告，changePct 与收盘明显矛盾拒绝入库；不降级价格指数；当日未发布不计缺失（pending_today 入报告，V0.8.1 盘前同步不炸） |
 
 ## Prerequisites
 
@@ -591,6 +599,9 @@ assert "def csindex_universe(" in ref_text                                  # V0
 assert "def csindex_resolve_total_return(" in ref_text                      # V0.8.0 官方映射
 assert "def csindex_total_return_daily(" in ref_text                        # V0.8.0 验证历史
 assert "def csindex_sync_total_return(" in ref_text                         # V0.8.0 可恢复同步
+assert "def _csindex_rebase_base_code" in ref_text                          # V0.8.1 共享缓存 base 重写
+assert 'return_type": "price_return"' in ref_text                           # V0.8.1 无 TRI 语义修正
+assert "pending_today" in ref_text                                          # V0.8.1 盘前豁免入报告
 assert "P33" in ref_text                                                    # 中证实测坑入册
 
 # 产物三 examples.md（手工维护）：校验章节齐全后原样同步到 skill 目录

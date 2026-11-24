@@ -175,7 +175,11 @@ class Gateway:
                 else:
                     argv.extend(["--data-binary", str(data)])
             argv.append(target)
-            completed = runner(argv, timeout=timeout, capture_output=True, check=False)
+            # runner 侧超时留 10s 余量（V0.8.1）：让 curl 自身 --max-time 先到点——
+            # rc!=0 走 OSError 传输失败口径；subprocess.TimeoutExpired 会击穿调用方
+            # 的 OSError/except 分层（既非 OSError 也非 RuntimeError）
+            completed = runner(argv, timeout=None if timeout is None else timeout + 10,
+                               capture_output=True, check=False)
             stdout = getattr(completed, "stdout", b"")
             if isinstance(stdout, str):
                 stdout = stdout.encode("ascii", errors="replace")
