@@ -273,9 +273,12 @@ class MultiProcessContractTests(unittest.TestCase):
         while not os.path.exists(started) and time.monotonic() < deadline:
             time.sleep(0.05)
         crashed.join(10)
+        self.assertTrue(os.path.exists(started), "持锁子进程未报到")
+        self.assertFalse(crashed.is_alive())
+        self.assertEqual(crashed.exitcode, 0)
 
         # 持锁进程死亡后锁必须自动释放：父进程可直接取得
-        with file_lock(lock_path, timeout=15):
+        with file_lock(lock_path, timeout=5):
             pass
 
 

@@ -4,7 +4,7 @@
 >
 > A 股域有 [a-stock-data](https://github.com/simonlin1212/a-stock-data)，**基金域有 fund-data**——形态对标、纪律同源。
 
-基金领域底层数据工具包 V0.8.2（**基金数据底座 FundBase**）：零 key、零登录、零第三方封装，为基金诊断 / 评测 / 定投回测 / 持仓穿透 / 宏观利率 / 全市场初筛 / 经理画像 / 中证全收益指数 / 申万行业指数提供底层数据原语。**Linux / macOS / Windows 三平台同等支持（V0.7.2 锁抽象层，能力检测无平台分支）；412/412 离线断言通过（Sprint 1 错误语义加固 + Sprint 2 跨进程协调 + Sprint 3 缓存核心接入 + V0.8.0 中证全收益指数 + V0.8.1 审查修复 + V0.8.2 申万行业指数；`fund_data_core` 独立测试 93 条含锁契约；在线全量须显式 `--online`）**，覆盖 31 个上游接口，61 个公开函数。
+基金领域底层数据工具包 V0.8.3（**基金数据底座 FundBase**）：零 key、零登录、零第三方封装，为基金诊断 / 评测 / 定投回测 / 持仓穿透 / 宏观利率 / 全市场初筛 / 经理画像 / 中证全收益指数 / 申万行业指数提供底层数据原语。**Linux / macOS / Windows 三平台同等支持（V0.7.2 锁抽象层，能力检测无平台分支）；433/433 离线断言通过（Sprint 1 错误语义加固 + Sprint 2 跨进程协调 + Sprint 3 缓存核心接入 + V0.8.0 中证全收益指数 + V0.8.1 审查修复 + V0.8.2 申万行业指数 + V0.8.3 诊断修复；`fund_data_core` 独立测试 97 条含锁契约；在线全量须显式 `--online`）**，覆盖 31 个上游接口，61 个公开函数。
 
 **核心立场：请求预算是稀缺资源**——所有端点内置跨进程限流、风控分流、熔断器三层防封结构；所有上游坑（33 个实测）内嵌防线；宁可显式报错，绝不静默空。
 
@@ -269,7 +269,7 @@
 ## 快速上手
 
 ```bash
-pip install requests   # 唯一 Python 依赖（中债 curl 通道需系统 curl，巨潮线需系统 node——macOS/Linux 自带/常见自带）
+python -m pip install -r requirements.txt  # requests + certifi + pandas（中债另需系统 curl，巨潮线需系统 node）
 ```
 
 ```python
@@ -391,8 +391,9 @@ python3 test_fund_data.py --online         # 全链路 508 条（真数据；412
 
 ## 版本历史
 
-> 注：各条目末尾的通过数为**该版本发布时点**的口径（后续版本在相同套件上只增不减），与文首"412/412"当前值并行不悖。
+> 注：各条目末尾的通过数为**该版本发布时点**的口径（后续版本在相同套件上只增不减），与文首"433/433"当前值并行不悖。
 
+- **V0.8.3（2026-11-25）全项目诊断修复**：①**投资结论可信**——`penetrate` 新增 `degraded`，全失败不再假称持仓分散；`qdii_premium` 场内代码白名单（含 52 号段）阻断同名股票假溢价；`nav_divergence` 重仓收益归一，低覆盖度/低股票仓位仅给参考；E3 裸数值分红兼容（000001 除息日实锚）；②**通道语义**——腾讯业务成功才恢复熔断，中债 teardown 解析 HTTP 状态，Gateway 覆盖 BaseException 结算且租约过期不顶替原异常，股票 K 线风控类型透传；③**缓存额度**——申万跨年/空信封/全史起点与周末回拨守护，中证陈旧交易日清单刷新，K 线备胎参数隔离缓存；④**可靠性工程**——PDF 魔数+原子写、缓存 OSError fail-loud、经理排行 JSON 解析与去重、REIT/商品归桶、requirements、CI 超时和生成器 `--check`。离线回归 433/433，core 97 全绿；在线全量 528/528（3 项 push2 熔断 SKIP），P-a 排名方向、P-b 裸数值分红与 L5 8/8 复核通过
 - **V0.8.2（2026-11-24）申万行业指数层**：①**官方源直连**——申万宏源研究官网 swsresearch.com `/institute-sw/api/`（第一手，弃 AkShare 的乐咕聚合通道），独立 sws provider 线（120/300s·1.0s·单并发·lease180，与 core 两处同值双向锁）；②**四入口**——`sw_index_list`（官方清单五类 indextype，翻页 count 强校验，一级行业 31 锚）、`sw_index_valuation` ★（官方日度估值 PE/PB/股息率/换手率/流通市值亿元，单码区间查询、按年切片缓存、当前年 20h TTL+mtime 回拨 18h、当日未发布 pending_today 豁免、pe None 亏损期容错）、`sw_index_daily`（trend 一发全史 6497 行 1999-12-30 起，按年切片 day/week/month 键隔离）、`sw_index_components`（成分单发 413 只，权重和 95~105 窗口警告）；③**P34 TLS 坑**——站点漏发中间证书（GeoTrust G2 2022 CA1 效期 2032，负载均衡部分节点全漏、重试赌节点不可靠），自组 CA bundle（certifi+内置中间证书 PEM）保持完整链校验（拒绝 AkShare verify=False 方案），证书失败显式指引不计连接级熔断；④行业基金对标从「东财 BK 板块（无估值）」升级申万官方口径+估值，「申万走 a-stock-data」旧声明作废。探针实锚 4 发（信封/2003 回溯/全史/成分）。离线回归 412/412（+31），core 93 全绿，在线全量 508/508（sws 线 5 发预算内）
 - **V0.8.1（2026-11-24）审查修复批**：对 V0.7.4→V0.8.0 六笔 ~4900 行做双路独立审查（V0.8.0 深审 + 网络层审），全量修复产出——①**P1 映射语义**：`csindex_resolve_total_return` 无 TRI 衍生分支误标 `return_type:"total_return"`，如实改 `price_return`（无 TR 衍生的股票指数是价格指数），30 天旧错值 mapping 缓存读取时自愈重取；②**元数据串台**：日线缓存按 TR 代码共享，经不同基础代码查询（000300 vs H00300）曾带回首查方 base_index_code——出库/落盘前按本次调用方重写；损坏年度缓存补回归测试锁定既有 miss-重取行为；盘前落盘的当年文件 mtime 回拨 18h（≈2h 后过期增量补当日行）；③**盘前同步不炸**：当日 tradeDate 清单先行含今天而行情未发布 → 不计缺失（V0.8.0 会整史重取后仍报错），pending_today 入报告；④**并发与超时**：sync manifest file_lock 重读-合并-写回 + 异窗口旧 job 清理；gateway curl runner 超时 +10s 余量（TimeoutExpired 击穿 OSError 分层）+ `_cb_request` 网关分支补分流与 `_release_pending`；⑤**重试口径**：`_tencent_kline_page` 有状态码失败不再瞬态重试多烧一发；⑥P3 批 11 项（新浪干净空体不计连击/sina 非 str 归一/中债降级值域守卫/EO cookie 剥属性段/备胎短史文案/全角（净）/pe_ttm 在线锚点/BENCH_SECID 在线抽查/注释澄清/策略双向锁）。离线回归 381/381（+13），core 93 全绿（网关 21→22）
 - **V0.8.0（2026-11-24）中证官方全收益指数**：①新增 `csindex_universe` 全七系列主键表（实测人民币 2767、全币种 3016）；②`csindex_resolve_total_return` 通过衍生指数+基本资料双验官方映射（H00300/H20269/932000CNY010），无映射/未知/歧义显式分列；③`csindex_total_return_daily` 从 basicDate 拉全史，官方有效日期清洗、缺失按年重取、数值审计、按年缓存与当前年增量；④`csindex_sync_total_return` 显式批量、manifest 断点续传、独立 csindex 限流/熔断/账本；⑤沪深300全收益 2024 实测 242 行、收益 19.8025%，红利低波与中证2000特殊代码历史样本通过；P33 记录占位日、业务400及官方 change 口径差。离线回归 368/368，core 92 全绿

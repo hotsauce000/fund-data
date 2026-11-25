@@ -1,6 +1,6 @@
 name: ci
 
-# 三平台同等矩阵：离线全量（锁契约 + core 四套 + 主套件 334 条）。
+# 三平台同等矩阵：离线全量（锁契约 + core 四套 + 主套件）。
 # 平台差异已收敛到 locks 抽象层（能力检测），任何平台的红都是真红。
 # 运行时依赖：系统 node（V0.7.8 起 EdgeOne 挑战求解与巨潮 enckey 共用；
 # 三平台 GitHub runner 镜像均预装 node）。
@@ -16,6 +16,7 @@ jobs:
   offline:
     name: offline (${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -26,13 +27,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: 安装依赖（requests/pandas——core 包本身零依赖，主套件需要）
-        run: python -m pip install requests pandas
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt
+      - name: 生成物漂移检查
+        run: python build_skill_md.py --check
       - name: core suites（锁契约 + cache/策略/协调器/网关 + 平台硬编码守卫）
         run: python -m unittest test_locks test_no_platform_hardcoding test_cache test_cache_policies test_coordinator test_gateway
-      - name: 主套件离线 334 条（零网络）
+      - name: 主套件离线（零网络）
         run: python test_fund_data.py
-      - name: flake 压测（多进程冷启动 x5，锁与路径竞态回归）
+      - name: flake 压测（串行冷启动 x5，锁与路径竞态回归）
         run: |
           import subprocess, sys
           for round_index in range(5):

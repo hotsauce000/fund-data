@@ -37,7 +37,8 @@ class ProviderPolicy:
 DEFAULT_POLICIES = {
     "eastmoney": ProviderPolicy(),
     "cninfo": ProviderPolicy(max_requests=120, min_interval=1.0, max_in_flight=2),
-    "chinabond": ProviderPolicy(max_requests=120, min_interval=1.5, max_in_flight=2),
+    "chinabond": ProviderPolicy(max_requests=120, min_interval=1.5, max_in_flight=2,
+                                lease_seconds=70),
     "danjuan": ProviderPolicy(max_requests=120, min_interval=1.5, max_in_flight=2),
     "tencent": ProviderPolicy(max_requests=300, min_interval=0.2, max_in_flight=4),
     # 新浪（V0.7.5 备胎通道）：hq.sinajs.cn 对高频爬虫有封禁前科——核心基线

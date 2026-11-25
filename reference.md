@@ -1,13 +1,19 @@
-# fund-data 完整参考（reference.md · 按需读取层）V0.8.1
+# fund-data 完整参考（reference.md · 按需读取层）V0.8.3
 
 > 本文件按需读取：调试 / 扩展 / 排查坑时才打开，勿随 skill 激活预加载。
 > 路由与签名速查见 SKILL.md；本文件内嵌代码与 fund_data.py 同源直拼（构建时生成）。
 
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 
-# fund-data 基金底层数据工具包 V0.8.1 模块全档
+# fund-data 基金底层数据工具包 V0.8.3 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层 + 申万行业指数层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复 + V0.8.2 申万行业指数：412/412 离线断言通过**（L1 单元 376 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 93 条。在线全量须显式 `--online`），覆盖 31 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层 + 申万行业指数层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复 + V0.8.2 申万行业指数 + V0.8.3 诊断修复：433/433 离线断言通过**（L1 单元 397 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 97 条。在线全量须显式 `--online`），覆盖 31 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.8.3 全项目诊断修复：**
+- 🔴 **投资结论可信**：`penetrate` 新增 `degraded`，板块取数全失败不再谎称“持仓分散”；`qdii_premium` 强制场内代码白名单（含 52 号段），杜绝同名股票行情制造假溢价；`nav_divergence` 重仓收益按覆盖度归一，低覆盖度/低股票仓位只给参考数值；`_div_from_unit_money` 兼容 E3 裸数值分红（000001 除息日实锚）
+- 🟠 **通道与异常语义**：腾讯仅在业务解析成功后恢复熔断；中债 teardown curl 解析 HTTP 状态；Gateway 捕获 BaseException 结算许可，租约过期不再顶替业务异常；股票 K 线风控类型原样透传
+- 🟠 **缓存与额度**：申万日线缺当前年强制刷新，历史估值区间不连坐；估值冷缓存空信封 fail-loud，只有全史抓取可写 verified_earliest；周末不制造 2h 重拉；中证陈旧交易日清单主动刷新；K 线备胎参数入缓存键
+- 🟡 **可靠性工程**：PDF 魔数校验+原子写、缓存 OSError fail-loud、经理排行 JSON 解析+分页去重、REIT/商品归桶、requirements 与 CI 超时、生成器 `--check`/`--repo-only`
 
 **V0.8.2 申万行业指数层（官方源直连，行业基金对标升级）：**
 - 🟢 **`sw_index_list()`**：申万宏源官网官方清单四类 GET 轨（市场表征 9/一级行业 31/二级行业 124/风格指数 16，实测 2026-11-24），翻页拉全 count 强校验，24h 缓存；「大类风格指数/金创指数」属上游 POST 轨（backlog）
@@ -259,6 +265,7 @@
 | P31 申购限额唯一来源（V0.7.7） | E2/E3/E6 探针实测均无完整限额（E3 SGZT 仅「限大额」短文本无金额）——唯一来源是主页面 `{code}.html` 交易状态栏，且无批量接口（N 只 N 请求）；金额与「限大额」分属不同层级 text node（嵌套 span），简单 regex 必截断（000369 实测）；外币折算是静态近似汇率非实时牌价 | `fund_purchase_limit`：`_StaticCellParser` 嵌套感知全文拼接 + `parse_purchase_limit` 纯函数（kind 四态；限大额无金额诚实 limit_cny=None 不虚报 0）；已并入快照 `purchase_limit` 数据集（失败进 missing 不炸快照）；rankhandler ft=qdii 仅 363 只混合/股票类（联接/LOF 归「指数型-海外股票」不在内） |
 | P32 基金报告双通道（V0.7.8） | ①JJGG 必须带 fundf10 Referer——裸 UA 是 200+ErrCode-999+Data=""「假成功」；type=页面 tab（0 全部/1 发行运作/2 分红送配/3 定期报告/4 人事调整/5 基金销售/6 其他），部分基金加披 Q2/Q4 季报（交银趋势实测 6 期/年）②PDF 直链 `H2_{ID}_1.pdf` 的 _1 附件号不可省（少了拿到挑战壳）③pdf.dfcfw.com 腾讯 EdgeOne 反爬：200+Content-Type 伪装 pdf 但 body 是 988B 静态 `<script>` 挑战；巨潮 column=fund 仅上市基金，场外不在其体系 | `fund_reports`：Referer 必带+Data 非 list 显式报错+无 ID 行跳过+total>0 解析空拒绝；`fund_report_pdf`：_edgeone_solve node vm 沙箱（无 require/fs/net+timeout）解 `__tst_status`/`EO_Bot_Ssid` 重放一次，仍非 PDF/残包(<1KB)显式报错；挑战 cookie 进程级复用；dfcfw.com 归 eastmoney 线同账限流 |
 | P34 申万官网 TLS（V0.8.2） | swsresearch.com 漏发中间证书（GeoTrust G2 2022 CA1，效期 2032-12-14），负载均衡部分节点全漏——requests/curl 必报 `unable to get local issuer certificate`，重试赌节点不可靠；AkShare 以 verify=False 绕过（关校验不可接受） | 自组 CA bundle：内置中间证书 PEM 常量 + certifi 根库拼接（完整链校验保留）；证书失败（SSLCertVerificationError）显式报错更新指引、不计连接级熔断；provider 级 record_failure 照计数兜底；P34 诊断命令 `openssl s_client -connect … | grep verify` |
+| P35 按年切片缓存跨年（V0.8.3） | 只盘点磁盘现存年会在跨年后把旧年当永久完整缓存；当前年缺失、周末末行落后、短区间查询被误当全史起点会分别造成冻结、重复请求与静默短史 | 日线要求当前年存在；历史估值区间不强制当前年；周末不回拨；只有全史抓取可写 verified_earliest；中证交易日清单陈旧主动刷新并留痕 |
 | P33 中证全收益（V0.8.0） | 非交易日起始日会生成与下一交易日相同的占位行；全收益代码存在 H00300/H20269/932000CNY010 等无统一规律形态；HTTP 200 可携带业务400；个别历史行 change 与收盘差有上游口径差；当日 tradeDate 清单先行含今天而行情盘后才发布 | 官方 tradeDate 过滤+缺失按年重取；衍生指数+基本资料+行情三验身份；业务 code 强校验；change 异常写审计警告，changePct 与收盘明显矛盾拒绝入库；不降级价格指数；当日未发布不计缺失（pending_today 入报告，V0.8.1 盘前同步不炸） |
 
 ## Prerequisites
@@ -276,7 +283,7 @@ pip install requests
 ```python
 # -*- coding: utf-8 -*-
 """
-fund-data V0.8.2 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层 + 基金报告 + 中证全收益指数 + 申万行业指数）
+fund-data V0.8.3 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层 + 基金报告 + 中证全收益指数 + 申万行业指数）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤3 请求（1×pingzhongdata + 0~1×lsjz + 0~1×主页面限额，V0.7.7 起快照含 purchase_limit）
@@ -340,7 +347,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.8.2"
+__version__ = "0.8.3"
 
 
 FUND_CACHE_DIR = Path.home() / ".fund_data_cache"
@@ -438,9 +445,10 @@ def _reset_request_coordination(clock=None, sleeper=None, policies=None):
             open_seconds=_CBREAK_COOLDOWN),
         # 中债 curl 通道：V0.7.5 已由 _cb_request 的 Gateway curl transport 分支
         # 消费（分账/间隔/在途/熔断生效）；teardown 模式走 legacy F1 地板 + F2 镜像。
+        # lease 须覆盖 curl 30s 与 runner 额外 10s，并留慢调度余量，避免结算顶替业务异常。
         "chinabond": ProviderPolicy(
             max_requests=120, window_seconds=300, min_interval=1.5, max_in_flight=2,
-            lease_seconds=30, circuit_threshold=_CBREAK_TRIP,
+            lease_seconds=70, circuit_threshold=_CBREAK_TRIP,
             open_seconds=_CBREAK_COOLDOWN),
         "csindex": ProviderPolicy(
             max_requests=120, window_seconds=300, min_interval=CSINDEX_MIN_INTERVAL,
@@ -927,9 +935,13 @@ def _div_from_unit_money(unit_money) -> float:
     ⚠️ 坑P6（实测）：unitMoney 事件标记存在但金额常被上游剥离（"分红：每10份派现金元"），
     且"拆分：每份基金份额折算份"混在同一字段——拆分不是现金分红，恒返回 0。
     本函数仅作 adjusted_nav 的回退路径；主路径是链接官方 equityReturn。
-    支持"每10份派现金0.5元"（÷10）与"每份派现金0.0100元"（÷1）两种形态。
+    支持"每10份派现金0.5元"（÷10）、"每份派现金0.0100元"（÷1）及 E3 裸数值
+    （每份金额，2025-09-22 华夏成长 000001 实测 "0.01"）三种形态。
     """
-    s = str(unit_money or "")
+    s = str(unit_money or "").strip()
+    if re.fullmatch(r"(?:\d+(?:\.\d*)?|\.\d+)", s):
+        value = float(s)
+        return value if math.isfinite(value) and value >= 0 else 0.0
     if not s or "折算" in s or "拆分" in s:
         return 0.0                                    # 空 或 拆分/折算事件：无现金分红
     if "分红" not in s and "派" not in s:
@@ -1820,7 +1832,8 @@ def position_trend(snapshot: dict, recent: int = 4) -> dict:
 def peer_rank(snapshot: dict, lookback_days: int = 365) -> dict:
     """同类百分位解读（零网络，V0.4.0 B2）。输入 snapshot.peer_rank_history（日频）。
 
-    值 = 超越同类百分比（高=排名靠前）。输出最新值 + lookback 天前对照与变化。
+    值 = 超越同类百分比（高=排名靠前；官方主页定义与 95.06 实锚复核 2026-11-25）。
+    输出最新值 + lookback 天前对照与变化。
     """
     hist = [h for h in (snapshot.get("peer_rank_history") or [])
             if isinstance(h.get("percentile"), (int, float))]
@@ -2206,6 +2219,8 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
         raise RuntimeError(
             f"腾讯行情响应含 {_var_lines} 行但 0 行解析成功——疑似字段结构变更"
             f"（解析要求 ≥53 段），拒绝静默空；请核对 qt.gtimg.cn 返回格式")
+    if result:
+        _cbreak_success("tencent")
     return result
 
 
@@ -2536,17 +2551,22 @@ def penetrate(query: str, topn: int = 10) -> dict:
         "pe_median_profitable": pe_med,                # 仅盈利股（PE>0）
         "failed_stocks": failed_stocks,
         "unclassified_weight_pct": unclassified,
+        "degraded": bool(failed_stocks) and not top_themes,
     }
 
 
 def plain_text_map(p: dict) -> str:
     """穿透结果 → 白话地图文本（"这只基金主要是白酒约86%"）。"""
     top = p["themes"][0] if p["themes"] and p["themes"][0][1] >= 5 else None
+    degraded = p.get("degraded", False)
+    summary = (f"一句话：板块通道不可用（{len(p['failed_stocks'])}/{len(p['detail'])} "
+               "重仓股取数失败），未能聚合主题——结论不可用。" if degraded else
+               f"一句话：这只基金主要是{top[0]}（相关持仓权重约 {top[1]:.0f}%）。"
+               if top else "一句话：持仓分散，无明显单一主题。")
     lines = [
         f"《{p['fund']} 里装了什么》（{p['period']} 季报，前十大占净值 {p['topn_weight_pct']}%）",
         "",
-        f"一句话：这只基金主要是{top[0]}（相关持仓权重约 {top[1]:.0f}%）。"
-        if top else "一句话：持仓分散，无明显单一主题。",
+        summary,
         "",
         f"{'股票':<12}{'权重':>7}{'现价':>9}{'今日':>8}{'PE':>9}{'PB':>7}",
     ]
@@ -2634,7 +2654,7 @@ def _cb_request(path: str, params: Optional[dict] = None, method: str = "GET",
             TT_REQUEST_COUNT[1].get("yield.chinabond.com.cn", 0) + 1
         cmd = ["curl", "-sS", "--max-time", str(timeout), "-X", method,
                "-H", "User-Agent: Mozilla/5.0", "-H", f"Referer: {CB_REFERER}",
-               "-H", "Accept: */*", url]
+               "-H", "Accept: */*", "-w", "\\n%{http_code}", url]
         try:
             proc = subprocess.run(cmd, capture_output=True, timeout=timeout + 10)
         except FileNotFoundError:
@@ -2646,7 +2666,19 @@ def _cb_request(path: str, params: Optional[dict] = None, method: str = "GET",
             time.sleep(1.5)
             continue
         if proc.returncode == 0 and proc.stdout:
-            return proc.stdout
+            body, separator, tail = proc.stdout.rpartition(b"\n")
+            if not separator or not tail.strip().isdigit():
+                raise RuntimeError("中债 curl 响应缺 HTTP 状态行，拒绝按正文解析")
+            status = int(tail.strip())
+            if status in (403, 429):
+                _cbreak_signal("cb", f"HTTP {status}")
+                raise RiskControlError(f"中债 HTTP {status}（teardown），已计入熔断")
+            if not 200 <= status < 300:
+                raise RuntimeError(f"中债 HTTP {status}: {body[:60]!r}")
+            if body:
+                return body
+            _cbreak_signal("cb", "cb-empty-body")
+            raise RuntimeError("中债 curl 返回空体（疑似限流），拒绝静默空")
         if proc.returncode == 0 and not proc.stdout:
             _cbreak_signal("cb", "cb-empty-body")      # rc=0 空体：疑似限流，拒绝静默空
             raise RuntimeError("中债 curl 返回空体（疑似限流），拒绝静默空")
@@ -3165,9 +3197,10 @@ _RANK_SORT_KEY = {"ytd": "ret_ytd_pct", "1m": "ret_1m_pct", "3m": "ret_3m_pct",
                   "6m": "ret_6m_pct", "1y": "ret_1y_pct", "2y": "ret_2y_pct",
                   "3y": "ret_3y_pct", "since": "ret_since_pct"}
 # rankhandler 行不带类型 → 本地过滤用 E1 中文类型映射到类别桶
-# （REIT/货币归 zq 仅为七桶全覆盖；zq 初筛注意货基收益量级与债基完全不同）
+# （REIT/货币归 zq、商品归 zs 仅为七桶覆盖；跨类收益量级不可直接比较）
 _TYPE_BUCKETS = (("指数型", "zs"), ("QDII", "qdii"), ("FOF", "fof"), ("股票型", "gp"),
-                 ("混合型", "hh"), ("债券型", "zq"), ("REIT", "zq"), ("货币", "zq"))
+                 ("混合型", "hh"), ("债券型", "zq"), ("REIT", "zq"),
+                 ("Reits", "zq"), ("商品", "zs"), ("货币", "zq"))
 
 
 def _bucket_of(fund_type) -> Optional[str]:
@@ -3625,6 +3658,7 @@ def _tencent_kline_paginated(sym: str, lmt: int = 2600) -> list[dict]:
         raise RuntimeError(
             f"腾讯翻页{'锚停滞' if stalled else '页数阀耗尽'}（{sym} 已集 {len(rows)}/{lmt} 根）"
             "——疑似上游异常或超出安全阀容量，拒绝静默截断")
+    _cbreak_success("tencent")
     return rows[-lmt:]
 
 
@@ -3644,6 +3678,7 @@ def _tencent_kline(stock_code: str, bars: int = 90,
     out = _tencent_kline_page(pre, bars=bars)
     if len(out) < 2:
         raise RuntimeError(f"腾讯日K空返回({pre})")
+    _cbreak_success("tencent")
     _cache_write(rel, out)
     return out
 
@@ -3770,13 +3805,19 @@ def qdii_premium(codes: list) -> list[dict]:
     """QDII/ETF 场内溢价（N 只=2 请求）：腾讯市价 ÷ 最新净值 − 1。
 
     ⚠️ 口径：E6 净值为 T-1/T-2（坑P16 日历差），行情剧烈时段溢价会被高估——
-    结果必须连同 nav_date 一起解读。仅对场内可交易码有意义（5/16 开头）。
+    结果必须连同 nav_date 一起解读。仅对场内可交易码有意义；场外码直接拒绝，
+    防止 000001 等代码被股票路由到同名证券后生成假溢价。
     输入按首次出现顺序去重；返回按溢价降序，净值缺失的只标注 error 不中断。"""
     codes = list(dict.fromkeys(str(c).strip() for c in codes if str(c).strip()))
     if not codes:
         raise ValueError("codes 不能为空")
     if len(codes) > 50:
         raise ValueError(f"单次 ≤50 只（批量净值上限），收到 {len(codes)}")
+    listed_prefixes = {"50", "51", "52", "56", "58", "15", "16", "18"}
+    bad = [c for c in codes if not (len(c) == 6 and c.isdigit() and c[:2] in listed_prefixes)]
+    if bad:
+        raise ValueError(f"非场内基金码: {bad}；放行前缀为 {sorted(listed_prefixes)}，"
+                         "拒绝借用同名股票行情计算假溢价")
     q = tencent_quote(codes)
     e6 = {x["code"]: x for x in fund_realtime_nav(codes)}
     out = []
@@ -3804,7 +3845,8 @@ def nav_divergence(query: str, force_refresh: bool = False) -> dict:
     窗口 = 报告期当天或之前最后一个基金净值日 → 最新净值日；股票必须使用
     同一基点日期，缺共同基点则跳过，避免首个交易日被单边漏算造成虚假背离。
     重仓股走腾讯日K前复权；force_refresh 同时刷新快照、持仓和K线。
-    权重 = 占净值比不归一（coverage_pct 如实报告前十覆盖度）。
+    重仓收益按实际可用覆盖度归一；coverage<40% 或最新股票仓位<80% 时仅返回
+    参考数值，不给“持仓一致/疑似调仓”结论，避免把资产仓位差误判为调仓。
     预算：冷启 ≤12 请求（快照1+持仓1+K线≤10）；当日重跑 0~2。
     |背离|≤5pp 持仓一致 / ≤10pp 轻微背离（关注）/ >10pp 疑似调仓或风格漂移。
     仅支持 6 位 A 股重仓码（港股 5 位码跳过并在 skipped 标注）。
@@ -3846,20 +3888,32 @@ def nav_divergence(query: str, force_refresh: bool = False) -> dict:
         weighted += w * r_i
         coverage += w
         used += 1
-    if used == 0:
-        raise RuntimeError(f"重仓股无一可取K线（{snap.get('name')}）——拒绝静默返回")
-    div = fund_ret - weighted
-    verdict = ("持仓一致" if abs(div) <= 5
-               else "轻微背离（关注）" if abs(div) <= 10 else "疑似调仓/风格漂移")
+    if used == 0 or coverage <= 0:
+        raise RuntimeError(f"重仓股无一可取K线或有效权重（{snap.get('name')}）——拒绝静默返回")
+    implied = weighted / coverage
+    div = fund_ret - implied
+    positions = [x.get("position_pct") for x in (snap.get("stock_position_history") or [])
+                 if x.get("position_pct") is not None]
+    stock_position = positions[-1] if positions else None
+    if coverage < 0.40:
+        verdict = f"覆盖度不足（前十占净值 {coverage:.0%}），仅供参考"
+    elif stock_position is not None and stock_position < 80:
+        verdict = f"股票仓位不足（最新披露 {stock_position:.1f}%），仅供参考"
+    else:
+        verdict = ("持仓一致" if abs(div) <= 5
+                   else "轻微背离（关注）" if abs(div) <= 10 else "疑似调仓/风格漂移")
+    note = "季报披露天然滞后，背离≠一定调仓（持仓内涨跌分化同表象）；重仓收益已按覆盖度归一"
+    if stock_position is None:
+        note += "；股票仓位缺失，未做低仓位结论降级"
     return {"code": snap["_meta"]["code"], "name": snap.get("name"),
             "period": period, "window": {"start": base_date, "end": end_date,
                                          "days": days_span},
             "fund_return_pct": round(fund_ret, 2),
-            "holdings_weighted_return_pct": round(weighted, 2),
+            "holdings_weighted_return_pct": round(implied, 2),
             "divergence_pp": round(div, 2), "verdict": verdict,
             "coverage_pct": round(coverage * 100, 1), "stocks_used": used,
-            "skipped": skipped,
-            "note": "季报披露天然滞后，背离≠一定调仓（持仓内涨跌分化同表象）"}
+            "stock_position_pct": stock_position,
+            "skipped": skipped, "note": note}
 
 
 def _manager_page(mid: str) -> dict:
@@ -3956,10 +4010,7 @@ def manager_rank(pages: int = 1, force_refresh: bool = False) -> list[dict]:
         # 行形态 ["a","b",...]：组内引号成对出现，需精确匹配引号组序列（坑P23）
         raw_rows = re.findall(r'\[("[^"]*"(?:,"[^"]*")*)\]', text)
         for rr in raw_rows:
-            f = [x for x in rr.split('","')]
-            f[0] = f[0].lstrip('"')
-            if f and f[-1].endswith('"'):
-                f[-1] = f[-1].rstrip('"')
+            f = json.loads("[" + rr + "]")
             if len(f) < 12:
                 continue
             scale_yi = None
@@ -3977,6 +4028,9 @@ def manager_rank(pages: int = 1, force_refresh: bool = False) -> list[dict]:
     expected = min(50 * pages, record)
     if len(out) != expected:
         raise RuntimeError(f"经理排行校验失败 record={record} 实收 {len(out)}，应收 {expected}")
+    if len({x["manager_id"] for x in out}) != len(out):
+        raise UpstreamFormatError(f"经理排行存在重复 manager_id（record={record}，实收 {len(out)}），"
+                                  "疑似上游分页钳制或重复拼页，拒绝缓存")
     _cbreak_success("tt")
     _cache_write(rel, out)
     return out
@@ -4389,8 +4443,11 @@ def fund_report_pdf(report, dest_dir=None, force_refresh: bool = False) -> str:
     dest = Path.cwd() if dest_dir is None else Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
     path = dest / (stem + ".pdf")
-    if path.exists() and path.stat().st_size > 0 and not force_refresh:
-        return str(path)
+    if path.exists() and not force_refresh:
+        with path.open("rb") as existing:
+            magic = existing.read(4)
+        if path.stat().st_size >= 1000 and magic == b"%PDF":
+            return str(path)
     headers = {"Referer": "https://fundf10.eastmoney.com/"}
     if _EO_COOKIE_CACHE:
         headers["Cookie"] = "; ".join(_EO_COOKIE_CACHE)
@@ -4414,7 +4471,12 @@ def fund_report_pdf(report, dest_dir=None, force_refresh: bool = False) -> str:
                                f"{body[:60]!r}")
     if len(body) < 1000:                           # 真 PDF 200KB+；残包/空包拒绝落盘
         raise RuntimeError(f"报告 PDF 疑似不完整（{stem} 仅 {len(body)}B），未保存")
-    path.write_bytes(body)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.part")
+    try:
+        temporary.write_bytes(body)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
     _cbreak_success("tt")
     return str(path)
 ```
@@ -4627,6 +4689,8 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
                 f"P25）——更长窗口请用指数名或 secid 形态（EM 主源支持更大 lmt），收到 {lmt}")
         try:
             rows = _tencent_kline(ident, bars=lmt, force_refresh=force_refresh)
+        except (RiskControlError, CircuitOpenError):
+            raise
         except RuntimeError as e:
             hints = [c for c in ("0." + ident[-6:], "1." + ident[-6:])
                      if c in BENCH_SECID.values()]
@@ -4637,7 +4701,8 @@ def kline_daily(query: str, lmt: int = 2600, use_tencent_fallback: bool = True,
             raise RuntimeError(f"kline_daily 股票日K不足（{ident} 需≥{min(lmt, 60)} 实收 {len(rows)}）")
         return rows
     # 指数路径
-    rel = f"kline/idx_{ident.replace('.', '_')}_lmt{lmt}.json"
+    fallback_key = "" if use_tencent_fallback else "_nofb"
+    rel = f"kline/idx_{ident.replace('.', '_')}_lmt{lmt}{fallback_key}.json"
     if not force_refresh:
         cached = _cache_read(rel, max_age_hours=20)
         if cached is not None:
@@ -4993,12 +5058,20 @@ def _csindex_trade_dates(index_code: str, force_refresh: bool = False) -> list[s
     if not force_refresh:
         cached = _cache_read(rel, max_age_hours=20)
         if cached is not None:
-            return cached
+            try:
+                cached_dates = [_csindex_date(x, "tradeDate") for x in cached]
+            except (TypeError, ValueError):
+                cached_dates = []
+            if cached_dates and cached_dates == sorted(cached_dates) \
+                    and len(set(cached_dates)) == len(cached_dates):
+                return cached_dates
     body = _csindex_request("/perf/index-perf-tradeDate", params={"indexCode": code})
     data = body.get("data")
     if not isinstance(data, list):
         raise UpstreamFormatError(f"中证有效日期 data 非 list（{code}）")
     dates = [_csindex_date(x, "tradeDate") for x in data]
+    if not dates:
+        raise UpstreamFormatError(f"中证有效日期空返回（{code}），拒绝把行情全部过滤为空")
     if dates != sorted(dates) or len(set(dates)) != len(dates):
         raise UpstreamFormatError(f"中证有效日期非升序或存在重复（{code}）")
     _cbreak_success("csindex")
@@ -5112,7 +5185,14 @@ def _csindex_download_history(mapping: dict, start: str, end: str,
                               coverage_start=None) -> tuple[list, dict]:
     code = mapping["total_return_code"]
     coverage_start = coverage_start or start
-    valid = set(_csindex_trade_dates(code, force_refresh=force_refresh))
+    today = datetime.now(_BJ_TZ).date().isoformat()
+    trade_dates = _csindex_trade_dates(code, force_refresh=force_refresh)
+    if end == today and datetime.now(_BJ_TZ).weekday() < 5 and trade_dates[-1] < today \
+            and not force_refresh:
+        trade_dates = _csindex_trade_dates(code, force_refresh=True)
+    trade_dates_stale = (end == today and datetime.now(_BJ_TZ).weekday() < 5
+                         and trade_dates[-1] < today)
+    valid = set(trade_dates)
     expected = sorted(day for day in valid if coverage_start <= day <= end)
 
     def _missing_of(dates):
@@ -5175,6 +5255,7 @@ def _csindex_download_history(mapping: dict, start: str, end: str,
               "pending_today": pending_today,
               "numeric_warnings": warnings, "chunked": chunked,
               "incremental": bool(seed_rows), "coverage_start": coverage_start,
+              "trade_dates_stale": trade_dates_stale,
               "first_date": rows[0]["date"] if rows else None,
               "last_date": rows[-1]["date"] if rows else None}
     return rows, report
@@ -5248,10 +5329,9 @@ def csindex_total_return_daily(index_code, start_date="", end_date="",
     for year, year_rows in by_year.items():
         _cache_write(f"csindex/daily/{code}_{year}.json", year_rows)
     _cache_write(f"csindex/reports/{code}_latest.json", report)
-    if report.get("pending_today") and current_year in by_year:
-        # 收口审查建议：盘前/盘中落盘的当年文件缺当日行——mtime 回拨 18h（≈2h 后
-        # 过期走补齐当日行），否则已发布的当日行最长 20h 拿不到；未发布期间每次
-        # 过期仅一发补齐请求（当年窗口为增量、跨年窗口为全史区间，csindex 线预算内）
+    if (report.get("pending_today") or report.get("trade_dates_stale")) and current_year in by_year:
+        # 当日行情未发布或交易日清单未纳入当天：当年文件回拨到约 2h 后过期，
+        # 避免已发布行情被旧清单过滤后再固化 20h。
         back = time.time() - 18 * 3600
         os.utime(FUND_CACHE_DIR / f"csindex/daily/{code}_{current_year}.json",
                  (back, back))
@@ -5557,6 +5637,7 @@ def _sws_request(path: str, params: Optional[dict] = None, timeout: int = 30):
         raise UpstreamRequestError(
             f"申万业务失败（{path}，code={body.get('code') if isinstance(body, dict) else None}，"
             f"msg={body.get('message') if isinstance(body, dict) else None}）")
+    _sws_conn_fails[0] = 0
     _cbreak_success("sws")
     return body
 
@@ -5638,8 +5719,9 @@ def sw_index_list(indextype: str = "一级行业", force_refresh: bool = False) 
 
 
 def _sws_year_rows(rel_prefix: str, code: str, current_year: int,
-                   stale_current: Optional[list] = None) -> tuple[list, bool]:
-    """按年缓存拼接通用段：历史年永久缓存、当前年 20h TTL；返回 (拼接行, 是否完整)。"""
+                   stale_current: Optional[list] = None,
+                   require_current: bool = False) -> tuple[list, bool]:
+    """按年缓存拼接；日线可要求当前年存在，历史估值区间不强制当前年。"""
     import glob as _glob
     combined, complete, years = [], True, []
     for path in sorted(_glob.glob(str(FUND_CACHE_DIR / f"{rel_prefix}_*.json"))):
@@ -5650,6 +5732,8 @@ def _sws_year_rows(rel_prefix: str, code: str, current_year: int,
             continue                               # 非年文件（防御）
     if not years:
         return [], False
+    if require_current and current_year not in years:
+        complete = False
     for year in years:
         rel = f"{rel_prefix}_{year}.json"
         cached = _cache_read(rel, max_age_hours=20 if year == current_year else None)
@@ -5703,7 +5787,8 @@ def sw_index_daily(index_code, period: str = "day",
     rel_prefix = f"sws/daily/{code}_{period}"
 
     if not force_refresh:
-        combined, complete = _sws_year_rows(rel_prefix, code, current_year)
+        combined, complete = _sws_year_rows(rel_prefix, code, current_year,
+                                            require_current=True)
         if complete and combined:
             return combined
         # 当前年过期/缺失（complete=False）→ trend 一发全史重拉覆盖（无日期参数，
@@ -5746,7 +5831,8 @@ def sw_index_daily(index_code, period: str = "day",
         by_year[int(row["date"][:4])].append(row)
     for year, year_rows in by_year.items():
         _cache_write(f"{rel_prefix}_{year}.json", year_rows)
-    if rows[-1]["date"] < today:                   # 盘后未发布：当年 mtime 回拨 18h
+    if rows[-1]["date"] < today and datetime.now(_BJ_TZ).weekday() < 5:
+        # 仅工作日盘后回拨；周末的周五末行是正常最新数据，不制造 2h 重拉循环。
         current_path = FUND_CACHE_DIR / f"{rel_prefix}_{current_year}.json"
         if current_year in by_year and current_path.exists():
             back = time.time() - 18 * 3600
@@ -5818,13 +5904,22 @@ def sw_index_valuation(index_code, start_date: str = "", end_date: str = "",
         return rows
 
     need_fetch, fetch_start = True, None
+    report_rel = f"sws/reports/{code}_val_latest.json"
+    previous_report = _cache_read(report_rel, max_age_hours=None) or {}
     if not force_refresh:
         combined, complete = _sws_year_rows(rel_prefix, code, current_year,
                                             stale_current or [])
         # P1（审查实测复现）：complete 只盘点磁盘现存年——请求了未缓存年份
         # （如先查 2025 再查 2024、或默认全史）会静默返回空/短史。complete
         # 须对照请求区间年份集合，缺年显式取数（绝不静默空）
-        want_years = set(range(int(start[:4]), int(min(end, today)[:4]) + 1))
+        lower_year = int(start[:4])
+        verified_earliest = previous_report.get("verified_earliest")
+        if isinstance(verified_earliest, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", verified_earliest):
+            lower_year = max(lower_year, int(verified_earliest[:4]))
+        end_year = int(min(end, today)[:4])
+        if lower_year > end_year:
+            return []
+        want_years = set(range(lower_year, end_year + 1))
         have_years = {int(x["date"][:4]) for x in combined}
         if complete and not want_years.issubset(have_years):
             complete = False
@@ -5863,23 +5958,30 @@ def sw_index_valuation(index_code, start_date: str = "", end_date: str = "",
     if total and len(raw_all) != total:
         raise UpstreamFormatError(f"申万估值不完整：count={total}，实收={len(raw_all)}")
     fresh = _parse(raw_all)
+    if not fresh and (not combined or end != today):
+        raise UpstreamFormatError(f"申万估值空返回（{code} {start}~{end}）——上游改版/软封嫌疑")
     pending_today = None
-    if end == today and (not fresh or fresh[-1]["date"] < today):
+    latest_available = fresh[-1]["date"] if fresh else combined[-1]["date"]
+    if end == today and latest_available < today:
         pending_today = today                  # 当日盘后未发布：豁免不拒
     merged = {x["date"]: x for x in combined}  # 全史拼段为基座（防历史年丢失）
     for x in fresh:                            # 新覆旧（重叠段）
         merged[x["date"]] = x
     rows = [merged[d] for d in sorted(merged)]
+    verified_earliest = previous_report.get("verified_earliest")
+    if effective_start == _SWS_VALUATION_EPOCH and fresh:
+        verified_earliest = fresh[0]["date"]
     report = {"index_code": code, "rows": len(rows),
                "missing_dates": [], "pending_today": pending_today,
+               "verified_earliest": verified_earliest,
                "fetched_at": datetime.now(_BJ_TZ).isoformat()}
     by_year = defaultdict(list)
     for row in rows:
         by_year[int(row["date"][:4])].append(row)
     for year, year_rows in by_year.items():
         _cache_write(f"{rel_prefix}_{year}.json", year_rows)
-    _cache_write(f"sws/reports/{code}_val_latest.json", report)
-    if pending_today and current_year in by_year:
+    _cache_write(report_rel, report)
+    if pending_today and current_year in by_year and datetime.now(_BJ_TZ).weekday() < 5:
         current_path = FUND_CACHE_DIR / f"{rel_prefix}_{current_year}.json"
         if current_path.exists():
             back = time.time() - 18 * 3600

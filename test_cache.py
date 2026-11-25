@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fund_data_core.cache import (
+    CacheError,
     CacheRepository,
     CacheRetryAfterError,
     EmptyLoaderResult,
@@ -119,6 +120,12 @@ class CacheRepositoryTest(unittest.TestCase):
         self.repository.write("snapshots/000001.json", {"fresh": True})
         self.assertEqual(self.repository.read("snapshots/000001.json", 3600.0),
                          {"fresh": True})
+
+    def test_read_os_error_is_not_silent_cache_miss(self):
+        (self.root / "directory.json").mkdir()
+        with self.assertRaises(CacheError) as caught:
+            self.repository.read("directory.json", None)
+        self.assertIn("directory.json", str(caught.exception))
 
     def test_fresh_read_expired_load_and_raw_json(self):
         calls = []

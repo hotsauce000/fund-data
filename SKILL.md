@@ -9,10 +9,10 @@ description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集�
 description_en: Full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), holdings maps, 24,792-fund rankings, manager profiles, 10-year klines, 53-period scale history, report PDFs. Zero keys/login, budget-guarded, assertions green.
 author: hotsauce000
 origin: custom
-version: 0.8.1
+version: 0.8.3
 ---
 
-# fund-data 路由层 V0.8.1
+# fund-data 路由层 V0.8.3
 
 本文件是**路由层**（≈4K token，激活只加载本文件）。坑区/内嵌代码→**reference.md**、菜谱/FAQ→**examples.md**（均按需读取）；`fund_data.py` import 用勿通读：
 

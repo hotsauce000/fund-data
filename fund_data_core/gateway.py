@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from .errors import RiskControlError
+from .errors import LeaseError, RiskControlError
 from .policies import provider_for_url
 
 
@@ -215,6 +215,18 @@ class Gateway:
             return self._curl_transport(method, url, dict(kwargs))
         raise ValueError(f"未知 transport: {transport!r}")
 
+    def _record_failure(self, permit, **kwargs):
+        try:
+            self.coordinator.record_failure(permit, **kwargs)
+        except LeaseError:
+            pass
+
+    def _record_risk_control(self, permit, reason):
+        try:
+            self.coordinator.record_risk_control(permit, reason=reason)
+        except LeaseError:
+            self.coordinator.signal_risk(permit.provider, reason)
+
     def request(self, method, url, *, transport="requests", retries=0,
                 retry_statuses=(500, 502, 503, 504), **kwargs):
         """执行请求；任何 retry 都重新预约并独立消耗配额。
@@ -240,21 +252,21 @@ class Gateway:
             self.coordinator.mark_network_started(permit)
             try:
                 response = self._send(transport, method, url, kwargs)
-            except Exception as exc:
+            except BaseException as exc:
                 last_error = exc
-                self.coordinator.record_failure(permit, reason=type(exc).__name__)
-                if attempt < retries:
+                self._record_failure(permit, reason=type(exc).__name__)
+                if isinstance(exc, Exception) and attempt < retries:
                     continue
                 raise
             status = self._status(response)
             risk_reason = self._risk_reason(response, status)
             if risk_reason:
-                self.coordinator.record_risk_control(permit, reason=risk_reason)
+                self._record_risk_control(permit, reason=risk_reason)
                 raise RiskControlError(
                     f"{risk_reason}（{method} {url}）：疑似上游风控，不重试不降级")
             if status in retry_statuses and attempt < retries:
                 last_error = RuntimeError(f"HTTP {status}")
-                self.coordinator.record_failure(
+                self._record_failure(
                     permit, reason=f"HTTP {status}", response_received=True)
                 continue
             if 200 <= status < 400:
@@ -263,7 +275,7 @@ class Gateway:
                 # 才清零；不裁决则租约到期自动作废，绝不清零。
                 response.permit = permit
                 return response
-            self.coordinator.record_failure(
+            self._record_failure(
                 permit, reason=f"HTTP {status}", response_received=True)
             return response
         if last_error is not None:

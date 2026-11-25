@@ -459,7 +459,7 @@ def test_l1_offline():
                     "pdf_url": "https://pdf.dfcfw.com/pdf/H2_TEST_1.pdf"}
         with tempfile.TemporaryDirectory() as _d8:
             _p8 = Path(_d8) / "519702_2026-10-27_Q3.pdf"
-            _p8.write_bytes(b"exists")              # 已存在（>0B）→ 0 请求直返
+            _p8.write_bytes(b"%PDF-1.7" + b"e" * 1200)  # 合法已存在文件 → 0 请求直返
 
             def _tt_never(url, **k):
                 raise AssertionError("已存在文件不应发起网络请求")
@@ -482,6 +482,8 @@ def test_l1_offline():
                                                "EO_Bot_Ssid=111222333"]
                   and "EO_Bot_Ssid=111222333" in (_ttlog8[-1] or {}).get("Cookie", ""),
                   f"{Path(_p8r).name} cookie重放验证")
+            check("L1", "V0.8.3报告PDF-原子写无part残留",
+                  not list(Path(_d8).glob("*.part")), "")
             _p8.unlink(missing_ok=True)
             _seq8[:] = [_RPResp(_SYN_CHALLENGE), _RPResp(_SYN_CHALLENGE)]  # 顽固挑战
             fd.ttfund_get = _tt_seq8
@@ -603,6 +605,21 @@ def test_l1_offline():
             check("L1", "腾讯-结构守卫应抛未抛", False)
         except RuntimeError as e:
             check("L1", "腾讯-结构守卫有行0解析拒绝静默空", "0 行解析成功" in str(e))
+        # V0.8.3：业务解析成功才恢复腾讯熔断；原始 200 字节本身不算成功
+        _success83 = fd._cbreak_success
+        _success_calls83 = []
+        try:
+            _fields83 = ["1"] * 60
+            _fields83[1], _fields83[3] = "贵州茅台", "100"
+            _raw83 = ('v_sh600519="' + "~".join(_fields83) + '";').encode("gbk")
+            fd.urllib.request.build_opener = lambda h=None: type(
+                "_Opener83", (), {"open": lambda self, req, timeout=None: _io.BytesIO(_raw83)})()
+            fd._cbreak_success = lambda line: _success_calls83.append(line)
+            fd.tencent_quote(["600519"])
+            check("L1", "V0.8.3腾讯-业务成功才清熔断连击",
+                  _success_calls83 == ["tencent"], str(_success_calls83))
+        finally:
+            fd._cbreak_success = _success83
         # tencent 403 分流：RiskControlError + 连击镜像（不再被 OSError 当瞬态重试）
         fd.urllib.request.build_opener = lambda h=None: _StubOpener2("403")
         _fresh_coordination()
@@ -699,7 +716,7 @@ def test_l1_offline():
         fd.CB_MIN_INTERVAL = 0.7                     # 临时改值：若调用点读 TT(1.5) 会露馅
 
         class _P:
-            returncode, stdout, stderr = 0, b"legacy-bytes", b""
+            returncode, stdout, stderr = 0, b"legacy-bytes\n200", b""
 
         _sp.run = lambda *a, **k: _P()
         fd._cross_proc_throttle = lambda line, iv: _thr_calls.append((line, iv))
@@ -708,6 +725,17 @@ def test_l1_offline():
               got == b"legacy-bytes" and ("cb", 0.7) in _thr_calls
               and ("cb", 1.5) not in _thr_calls,
               "调用点引用 CB_MIN_INTERVAL（临时 0.7 生效），非东财 TT_MIN_INTERVAL")
+
+        class _P403:
+            returncode, stdout, stderr = 0, b"<html>forbidden</html>\n403", b""
+
+        _sp.run = lambda *a, **k: _P403()
+        try:
+            fd._cb_request("/yc/queryTree", {"locale": "zh_CN"}, method="POST")
+            check("L1", "V0.8.3中债-teardown403应抛未抛", False)
+        except fd.RiskControlError as e:
+            check("L1", "V0.8.3中债-teardown403不当正文",
+                  "403" in str(e) and fd._cbreak_state["cb"][0] >= 1)
     finally:
         _sp.run = _orig_run
         fd._cross_proc_throttle = _orig_thr
@@ -741,6 +769,8 @@ def test_l1_offline():
     # 分红文本解析：每10份派0.5元 → 每份0.05；拆分事件 → 0；金额被剥离 → 0
     check("L1", "分红解析-每10份换算", abs(fd._div_from_unit_money("分红：每10份派现金0.5元") - 0.05) < 1e-9)
     check("L1", "分红解析-每份形态", abs(fd._div_from_unit_money("每份派现金0.0100元") - 0.01) < 1e-9)
+    check("L1", "V0.8.3分红解析-E3裸数值形态",
+          fd._div_from_unit_money("0.01") == 0.01 and fd._div_from_unit_money(0.05) == 0.05)
     check("L1", "分红解析-拆分不记为现金", fd._div_from_unit_money("拆分：每份基金份额折算份") == 0.0)
     check("L1", "分红解析-金额被剥离记0", fd._div_from_unit_money("分红：每10份派现金元") == 0.0)
 
@@ -1758,17 +1788,90 @@ def test_l1_offline():
             {"date": "2026-09-25", "close": 100.0},
             {"date": "2026-10-08", "close": 103.0}, {"date": "2026-10-31", "close": 108.0}]
         nd = fd.nav_divergence("161725")
-        # 基点=报告期前最后净值1.0→基金 1.05/1.00-1=5.0%；重仓 108/100-1=8%×权重8.04%
-        # →加权0.64%；背离=5.0-0.64=+4.36pp（≤5 → 持仓一致）
+        # 基点=报告期前最后净值1.0→基金 1.05/1.00-1=5.0%；重仓收益=108/100-1=8%
+        # 覆盖度仅 8.04% → 归一后背离=5.0-8.0=-3.0pp，但结论必须降级
         check("L1", "重仓探测-背离数学锚与港股跳过",
-              nd["fund_return_pct"] == 5.0 and nd["divergence_pp"] == 4.36
-              and nd["verdict"] == "持仓一致" and nd["stocks_used"] == 1
+              nd["fund_return_pct"] == 5.0 and nd["divergence_pp"] == -3.0
+              and "覆盖度不足" in nd["verdict"] and nd["stocks_used"] == 1
               and nd["skipped"] and nd["skipped"][0]["code"] == "00700"
               and nd["coverage_pct"] == 8.0,
               f"基{nd['fund_return_pct']}% vs 重仓加权{nd['holdings_weighted_return_pct']}%"
               f"→背离{nd['divergence_pp']}pp；港股00700进skipped")
     finally:
         fd.fund_snapshot, fd.fund_holdings, fd._tencent_kline = _orig_snap3, _orig_hold3, _orig_kline
+
+    # V0.8.3：取数失败不得包装成“持仓分散”的基本面结论
+    _orig_pen83 = (fd.resolve_fund_code, fd.fund_list, fd.fund_holdings,
+                   fd.tencent_quote, fd.concept_blocks)
+    try:
+        fd.resolve_fund_code = lambda q: "000001"
+        fd.fund_list = lambda: [{"code": "000001", "name": "测试基金"}]
+        fd.fund_holdings = lambda q: [
+            {"period": "2026-09-30", "stock_code": f"60051{i}",
+             "stock_name": f"股票{i}", "nav_pct": 5.0} for i in range(10)]
+        fd.tencent_quote = lambda codes: {}
+        def _pen_fail83(code):
+            raise RuntimeError("mock connection failure")
+        fd.concept_blocks = _pen_fail83
+        _pen83 = fd.penetrate("000001")
+        check("L1", "V0.8.3穿透-全失败显式降级不假分散",
+              _pen83.get("degraded") is True
+              and "通道不可用" in fd.plain_text_map(_pen83)
+              and "持仓分散，无明显单一主题" not in fd.plain_text_map(_pen83),
+              f"failed={len(_pen83['failed_stocks'])} degraded={_pen83.get('degraded')}")
+    finally:
+        (fd.resolve_fund_code, fd.fund_list, fd.fund_holdings,
+         fd.tencent_quote, fd.concept_blocks) = _orig_pen83
+
+    # V0.8.3：场外码不得借用同名股票行情；52 号段真实 QDII 不得误拒
+    _orig_qd83 = (fd.tencent_quote, fd.fund_realtime_nav)
+    _qd_calls83 = []
+    try:
+        fd.tencent_quote = lambda codes: _qd_calls83.append(("quote", codes)) or {
+            c: {"name": "沙特ETF华泰柏瑞", "price": 1.1} for c in codes}
+        fd.fund_realtime_nav = lambda codes: [
+            {"code": c, "name": "沙特ETF华泰柏瑞", "nav": 1.0,
+             "nav_date": "2026-11-24"} for c in codes]
+        _qd83 = fd.qdii_premium(["520830"])
+        check("L1", "V0.8.3QDII-52号段合法场内码",
+              _qd83[0]["premium_pct"] == 10.0, str(_qd83))
+        expect_raise("L1", "V0.8.3QDII-场外码拒绝假溢价",
+                     lambda: fd.qdii_premium(["000001"]), "非场内基金码")
+        check("L1", "V0.8.3QDII-非法码零网络",
+              _qd_calls83 == [("quote", ["520830"])], str(_qd_calls83))
+    finally:
+        fd.tencent_quote, fd.fund_realtime_nav = _orig_qd83
+
+    # V0.8.3：重仓复制法归一；低股票仓位不强行下调仓结论
+    _orig_nd83 = (fd.fund_snapshot, fd.fund_holdings, fd._tencent_kline)
+    try:
+        def _nd_snap83(fund_nav, position):
+            return {"_meta": {"code": "161725"}, "name": "仓位样本",
+                    "nav_history": [
+                        {"date": "2026-09-30", "nav": 1.0, "daily_return": None, "dividend": 0},
+                        {"date": "2026-10-02", "nav": fund_nav, "daily_return": None, "dividend": 0}],
+                    "stock_position_history": [{"date": "2026-09-30", "position_pct": position}]}
+        fd.fund_snapshot = lambda q, **k: _nd_snap83(1.18, 90.0)
+        fd.fund_holdings = lambda q, **k: [
+            {"period": "2026-09-30", "stock_code": "600519",
+             "stock_name": "样本股", "nav_pct": 45.0}]
+        fd._tencent_kline = lambda *a, **k: [
+            {"date": "2026-09-30", "close": 100.0},
+            {"date": "2026-10-02", "close": 120.0}]
+        _nd_high83 = fd.nav_divergence("161725")
+        check("L1", "V0.8.3重仓探测-覆盖度归一消除趋势假背离",
+              _nd_high83["holdings_weighted_return_pct"] == 20.0
+              and _nd_high83["divergence_pp"] == -2.0
+              and _nd_high83["verdict"] == "持仓一致",
+              f"基金18% vs 前十归一20%：{_nd_high83['divergence_pp']}pp")
+        fd.fund_snapshot = lambda q, **k: _nd_snap83(1.12, 60.0)
+        _nd_low83 = fd.nav_divergence("161725")
+        check("L1", "V0.8.3重仓探测-低股票仓位结论降级",
+              _nd_low83["divergence_pp"] == -8.0
+              and "股票仓位不足" in _nd_low83["verdict"],
+              f"60%股票仓位：{_nd_low83['verdict']}")
+    finally:
+        fd.fund_snapshot, fd.fund_holdings, fd._tencent_kline = _orig_nd83
 
     # 经理画像：主页 HTML 形态 mock（mgrlists+三标签）+ ID/公司ID分流
     _pad = "<!--" + "x" * 11000 + "-->"     # 真实主页 ~71KB；mock 需越过 10000B 空壳防线
@@ -1824,6 +1927,11 @@ def test_l1_offline():
               "12字段/25.91亿元→25.91/回报8.30%→8.3")
         expect_raise("L1", "经理排行-record不符拒绝",
                      lambda: fd.manager_rank(pages=2, force_refresh=True), "校验失败")
+        fd.ttfund_get = lambda *a, **k: type(
+            "_MRDuplicate", (), {"status_code": 200,
+                                 "content": _rank_body.replace("record:1", "record:2").encode("utf-8")})()
+        expect_raise("L1", "V0.8.3经理排行-重复拼页拒绝",
+                     lambda: fd.manager_rank(pages=2, force_refresh=True), "重复 manager_id")
         expect_raise("L1", "经理排行-pages上限",
                      lambda: fd.manager_rank(pages=89, force_refresh=True), "pages")
     finally:
@@ -1845,7 +1953,8 @@ def test_l1_offline():
           fd._bucket_of("指数型-股票") == "zs" and fd._bucket_of("QDII") == "qdii"
           and fd._bucket_of("混合型-偏股") == "hh" and fd._bucket_of("债券型-长债") == "zq"
           and fd._bucket_of("股票型") == "gp" and fd._bucket_of("FOF-稳健") == "fof"
-          and fd._bucket_of(None) is None and fd._bucket_of("商品型") is None,
+          and fd._bucket_of("Reits") == "zq" and fd._bucket_of("商品") == "zs"
+          and fd._bucket_of(None) is None,
           "fund_rank 本地过滤的映射依据")
 
     # ── V0.6.1 基准指数层离线单元（kline_daily 四路解析 + F6 不降级 + 防线）──
@@ -1903,6 +2012,18 @@ def test_l1_offline():
               and rows[-1]["date"] == "2026-01-12"
               and rows[0]["source"] == "push2his",
               f"{len(rows)} 根（重复日期行+脏行剔除，01-02 只留一条，source=push2his）")
+        _cw83, _cache_keys83 = fd._cache_write, []
+        try:
+            fd._cache_write = lambda rel, payload: _cache_keys83.append(rel)
+            fd.kline_daily("1.000905", lmt=10, force_refresh=True,
+                           use_tencent_fallback=True)
+            fd.kline_daily("1.000905", lmt=10, force_refresh=True,
+                           use_tencent_fallback=False)
+            check("L1", "V0.8.3K线-备胎参数缓存键隔离",
+                  len(_cache_keys83) == 2 and _cache_keys83[0] != _cache_keys83[1]
+                  and _cache_keys83[1].endswith("_nofb.json"), str(_cache_keys83))
+        finally:
+            fd._cache_write = _cw83
         fd._push2_get = _kl_mock(["2026-01-02,3000.5"] * 5)
         expect_raise("L1", "K线-样本不足语义化报错",
                      lambda: fd.kline_daily("1.000905", lmt=10, force_refresh=True,
@@ -1916,6 +2037,18 @@ def test_l1_offline():
                      lambda: fd.kline_daily("1.000905", force_refresh=True), "mock 403")
         check("L1", "K线-风控路径零腾讯请求",
               fd.TENCENT_REQUEST_COUNT[0] == _tx0, f"腾讯账本 {fd.TENCENT_REQUEST_COUNT[0]}")
+
+        _stock_kline83 = fd._tencent_kline
+        try:
+            fd._tencent_kline = _raise_rc
+            try:
+                fd.kline_daily("600519", lmt=60, force_refresh=True)
+                check("L1", "V0.8.3股票K线-风控类型应抛未抛", False)
+            except RuntimeError as e:
+                check("L1", "V0.8.3股票K线-风控类型不抹掉",
+                      isinstance(e, fd.RiskControlError), type(e).__name__)
+        finally:
+            fd._tencent_kline = _stock_kline83
 
         # core 路由：开闸由协调器三连击达成（legacy 落盘文件已退位为镜像）
         for _sig in range(3):
@@ -3240,6 +3373,35 @@ def test_csindex_offline():
               and not _pm_report["missing_dates"] and not _pm_report["chunked"],
               str(_pm_report))
 
+        # V0.8.3：V0.8.2 遗留的空清单缓存不得绕过非空守卫
+        fd._cache_write("csindex/trade_dates/H00300.json", [])
+        fd._csindex_request = _history_fake
+        _old_empty_cache83 = fd._csindex_trade_dates("H00300")
+        check("L1", "V0.8.3中证-旧空交易日缓存自动重取",
+              _old_empty_cache83 == ["2024-01-02", "2024-01-03", "2024-01-04"],
+              str(_old_empty_cache83))
+
+        # V0.8.3：陈旧交易日清单先强制刷新；仍陈旧则显式记录，不能静默吞当日行
+        (fd.FUND_CACHE_DIR / "csindex/trade_dates/H00300.json").unlink(missing_ok=True)
+        _trade_date_calls83 = [0]
+        def _stale_dates_fake83(path, params=None, payload=None, timeout=30):
+            if path == "/perf/index-perf-tradeDate":
+                _trade_date_calls83[0] += 1
+                return {"code": "200", "success": True, "data": ["20240102", "20240103"]}
+            if path == "/perf/index-perf":
+                return {"code": "200", "success": True, "data": [
+                    _perf_row("20240102", 100, 0, 0),
+                    _perf_row("20240103", 101, 1, 1),
+                    _perf_row(_today_compact, 102, 1, 1)]}
+            raise AssertionError(path)
+        fd._csindex_request = _stale_dates_fake83
+        _stale_rows83, _stale_report83 = fd._csindex_download_history(
+            _mapping, "2024-01-01", _today_iso)
+        check("L1", "V0.8.3中证-交易日清单陈旧触发刷新并留痕",
+              _trade_date_calls83[0] == 2 and _stale_report83["trade_dates_stale"]
+              and all(x["date"] != _today_iso for x in _stale_rows83),
+              f"calls={_trade_date_calls83[0]} report={_stale_report83}")
+
         def _bad_numeric(path, params=None, payload=None, timeout=30):
             if path == "/perf/index-perf-tradeDate":
                 return {"code": "200", "success": True, "data": _valid[:2]}
@@ -3681,6 +3843,31 @@ def test_sws_offline():
         expect_raise("L1", "申万-非法period拒绝",
                      lambda: fd.sw_index_daily("801010", period="hour"), "period")
 
+        # V0.8.3：跨年缺当前年不得误判完整；历史估值区间不受该守护连坐
+        fd._cache_write("sws/daily/801999_day_2024.json", [{"date": "2024-12-31"}])
+        _cross_rows83, _cross_complete83 = fd._sws_year_rows(
+            "sws/daily/801999_day", "801999", 2026, require_current=True)
+        _, _historical_complete83 = fd._sws_year_rows(
+            "sws/daily/801999_day", "801999", 2026)
+        check("L1", "V0.8.3申万-跨年缺当前年强制刷新且历史查询不连坐",
+              _cross_rows83 and not _cross_complete83 and _historical_complete83)
+
+        # V0.8.3：周末末行落后于今天是正常形态，不得回拨制造 2h 重拉
+        _datetime83, _utime83 = fd.datetime, fd.os.utime
+        _utime_calls83 = []
+        class _WeekendDatetime83(_datetime83):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 11, 28, 12, 0, tzinfo=tz)
+        try:
+            fd.datetime = _WeekendDatetime83
+            fd.os.utime = lambda *a: _utime_calls83.append(a)
+            fd.SWS_SESSION.get = _trend_fake
+            fd.sw_index_daily("801020", force_refresh=True)
+            check("L1", "V0.8.3申万-周末不回拨当前年缓存", not _utime_calls83)
+        finally:
+            fd.datetime, fd.os.utime = _datetime83, _utime83
+
         # 估值：区间 mock + None PE 容错 + 越界拒缓存 + pending_today
         def _val_fake(url, **k):
             p = k["params"]
@@ -3706,6 +3893,9 @@ def test_sws_offline():
         _v2 = fd.sw_index_valuation("801010", "20240601", "20240630")
         check("L1", "申万-估值缓存二调0请求",
               fd.SWS_REQUEST_COUNT[0] == _n3 and len(_v2) == 2)
+        _short_report83 = fd._cache_read("sws/reports/801010_val_latest.json", None)
+        check("L1", "V0.8.3申万-短区间不写全史起点",
+              _short_report83.get("verified_earliest") is None, str(_short_report83))
         expect_raise("L1", "申万-估值end超今天拒绝",
                      lambda: fd.sw_index_valuation("801010", "", "20991231"), "不可超过今天")
         expect_raise("L1", "申万-估值start晚于end拒绝",
@@ -3752,6 +3942,36 @@ def test_sws_offline():
                                                                         # 近 3 年翻页 ≥1 发）
               and _v_gap[0]["date"] == "2024-06-05",
               f"{len(_v_gap)} 行（修复前 0 静默空）")
+
+        def _val_empty83(url, **k):
+            return _SWSResp(200, {"code": "200", "data": {"count": 0, "results": []}})
+
+        fd.SWS_SESSION.get = _val_empty83
+        expect_raise("L1", "V0.8.3申万-估值冷缓存空信封拒绝",
+                     lambda: fd.sw_index_valuation("801998", "20240101", "20241231",
+                                                   force_refresh=True), "空返回")
+        fd._cache_write("sws/valuation/801997_2024.json", [
+            {"index_code": "801997", "date": "2024-06-05", "close": 2500.0}])
+        fd.sw_index_valuation("801997", "20240101", _today)
+        _hot_report83 = fd._cache_read("sws/reports/801997_val_latest.json", None)
+        check("L1", "V0.8.3申万-热缓存空信封保留pending语义",
+              _hot_report83 and _hot_report83["pending_today"] == _today,
+              str(_hot_report83))
+
+        # 已验证全史起点可把缺年对账下界从 2003 收紧到真实起始年
+        fd._cache_write("sws/valuation/801996_2024.json", [
+            {"index_code": "801996", "date": "2024-06-05", "close": 2500.0}])
+        fd._cache_write("sws/reports/801996_val_latest.json", {
+            "verified_earliest": "2014-01-02"})
+        _fetch_starts83 = []
+        def _val_start_spy83(url, **k):
+            _fetch_starts83.append(k["params"]["start_date"])
+            return _val_fake(url, **k)
+        fd.SWS_SESSION.get = _val_start_spy83
+        fd.sw_index_valuation("801996", "20030101", "20241231")
+        check("L1", "V0.8.3申万-全史起点避免重复2003重拉",
+              _fetch_starts83 == ["2014-01-01"], str(_fetch_starts83))
+
         # 成分：单发 + 权重和警告 + 空 results 显式报错 + 缓存
         def _comp_fake(url, **k):
             return _SWSResp(200, {"code": "200", "data": {"count": 2, "results": [
@@ -3869,7 +4089,8 @@ def test_l2_smoke():
     rp = fd.fund_reports("519702")
     check("L2", "RP 报告-清单/分类/直链(V0.7.8)",
           rp["total"] >= 50 and len(rp["reports"]) == 20
-          and rp["reports"][0]["kind"] == "Q3" and rp["reports"][0]["year"] == 2026
+          and rp["reports"][0]["year"] >= 2026
+          and rp["reports"][0]["kind"] in ("Q1", "Q2", "Q3", "Q4", "interim", "annual")
           and rp["reports"][0]["pdf_url"].startswith("https://pdf.dfcfw.com/pdf/H2_AN")
           and {"Q1", "Q3", "interim", "annual"} <= {x["kind"] for x in rp["reports"]},
           f"total={rp['total']} 首行{rp['reports'][0]['kind']}{rp['reports'][0]['year']}")
@@ -3923,7 +4144,7 @@ def test_l2_smoke():
           f"Top1主题={pen['themes'][0]} 前十大权重{pen['topn_weight_pct']}%")
 
     # ── L7 宏观利率层 smoke ──
-    curve = fd.cb_yield_curve("treasury", year=date.today().year)
+    curve = fd.cb_yield_curve("treasury", year=2024)
     latest_d = max(p["date"] for p in curve["points"])
     y10 = [p["yield_pct"] for p in curve["points"] if p["term"] == "10y"]
     check("L2", "L7 中债国债曲线年文件",
@@ -4171,6 +4392,7 @@ def test_l3_cross():
 
     # 十年期国债收益率三源互证：中债年文件 vs 东财日频 vs push2 实时
     # （东财 zmgzsyl 页本身即中债口径 → 两源应近乎一致；push2 为盘中实时，宽容差）
+    # 三源互证必须保持同一时点；L2 的点数检查才使用固定历史年
     cb = [p for p in fd.cb_yield_curve("treasury", year=date.today().year)["points"]
           if p["term"] == "10y"]
     cb_latest_date = max(p["date"] for p in cb)

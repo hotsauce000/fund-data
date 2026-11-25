@@ -18,7 +18,6 @@ from pathlib import Path
 HERE = Path(__file__).parent
 SRC = (HERE / "fund_data.py").read_text(encoding="utf-8")
 SKILL_DIR = Path.home() / ".agents" / "skills" / "fund-data"
-SKILL_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── 按「═ / 标题 / ═」三行标记对切块，映射到 reference.md 章节 ──
 pat = re.compile(r"# ═══+\n# (.+?)\n# ═══+\n")
@@ -59,7 +58,7 @@ def _sig_rows() -> list:
     return rows
 
 
-VERSION = "0.8.1"
+VERSION = "0.8.3"
 DESCRIPTION = (
     "写代码实际获取基金领域底层数据时使用；基金概念解释、投资观点讨论等无需取数的"
     "话题不要加载。零key零登录：2.8万只基金清单消歧、单基金诊断快照（净值全史/规模/"
@@ -196,9 +195,15 @@ REF.append(f"""# fund-data 完整参考（reference.md · 按需读取层）V{VE
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 """)
 
-REF.append(r"""# fund-data 基金底层数据工具包 V0.8.1 模块全档
+REF.append(r"""# fund-data 基金底层数据工具包 V0.8.3 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层 + 申万行业指数层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复 + V0.8.2 申万行业指数：412/412 离线断言通过**（L1 单元 376 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 93 条。在线全量须显式 `--online`），覆盖 31 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层 + 申万行业指数层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复 + V0.8.2 申万行业指数 + V0.8.3 诊断修复：433/433 离线断言通过**（L1 单元 397 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 97 条。在线全量须显式 `--online`），覆盖 31 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.8.3 全项目诊断修复：**
+- 🔴 **投资结论可信**：`penetrate` 新增 `degraded`，板块取数全失败不再谎称“持仓分散”；`qdii_premium` 强制场内代码白名单（含 52 号段），杜绝同名股票行情制造假溢价；`nav_divergence` 重仓收益按覆盖度归一，低覆盖度/低股票仓位只给参考数值；`_div_from_unit_money` 兼容 E3 裸数值分红（000001 除息日实锚）
+- 🟠 **通道与异常语义**：腾讯仅在业务解析成功后恢复熔断；中债 teardown curl 解析 HTTP 状态；Gateway 捕获 BaseException 结算许可，租约过期不再顶替业务异常；股票 K 线风控类型原样透传
+- 🟠 **缓存与额度**：申万日线缺当前年强制刷新，历史估值区间不连坐；估值冷缓存空信封 fail-loud，只有全史抓取可写 verified_earliest；周末不制造 2h 重拉；中证陈旧交易日清单主动刷新；K 线备胎参数入缓存键
+- 🟡 **可靠性工程**：PDF 魔数校验+原子写、缓存 OSError fail-loud、经理排行 JSON 解析+分页去重、REIT/商品归桶、requirements 与 CI 超时、生成器 `--check`/`--repo-only`
 
 **V0.8.2 申万行业指数层（官方源直连，行业基金对标升级）：**
 - 🟢 **`sw_index_list()`**：申万宏源官网官方清单四类 GET 轨（市场表征 9/一级行业 31/二级行业 124/风格指数 16，实测 2026-11-24），翻页拉全 count 强校验，24h 缓存；「大类风格指数/金创指数」属上游 POST 轨（backlog）
@@ -452,6 +457,7 @@ REF.append(r"""## 端点路由速查（按需定位，不必通读）
 | P31 申购限额唯一来源（V0.7.7） | E2/E3/E6 探针实测均无完整限额（E3 SGZT 仅「限大额」短文本无金额）——唯一来源是主页面 `{code}.html` 交易状态栏，且无批量接口（N 只 N 请求）；金额与「限大额」分属不同层级 text node（嵌套 span），简单 regex 必截断（000369 实测）；外币折算是静态近似汇率非实时牌价 | `fund_purchase_limit`：`_StaticCellParser` 嵌套感知全文拼接 + `parse_purchase_limit` 纯函数（kind 四态；限大额无金额诚实 limit_cny=None 不虚报 0）；已并入快照 `purchase_limit` 数据集（失败进 missing 不炸快照）；rankhandler ft=qdii 仅 363 只混合/股票类（联接/LOF 归「指数型-海外股票」不在内） |
 | P32 基金报告双通道（V0.7.8） | ①JJGG 必须带 fundf10 Referer——裸 UA 是 200+ErrCode-999+Data=""「假成功」；type=页面 tab（0 全部/1 发行运作/2 分红送配/3 定期报告/4 人事调整/5 基金销售/6 其他），部分基金加披 Q2/Q4 季报（交银趋势实测 6 期/年）②PDF 直链 `H2_{ID}_1.pdf` 的 _1 附件号不可省（少了拿到挑战壳）③pdf.dfcfw.com 腾讯 EdgeOne 反爬：200+Content-Type 伪装 pdf 但 body 是 988B 静态 `<script>` 挑战；巨潮 column=fund 仅上市基金，场外不在其体系 | `fund_reports`：Referer 必带+Data 非 list 显式报错+无 ID 行跳过+total>0 解析空拒绝；`fund_report_pdf`：_edgeone_solve node vm 沙箱（无 require/fs/net+timeout）解 `__tst_status`/`EO_Bot_Ssid` 重放一次，仍非 PDF/残包(<1KB)显式报错；挑战 cookie 进程级复用；dfcfw.com 归 eastmoney 线同账限流 |
 | P34 申万官网 TLS（V0.8.2） | swsresearch.com 漏发中间证书（GeoTrust G2 2022 CA1，效期 2032-12-14），负载均衡部分节点全漏——requests/curl 必报 `unable to get local issuer certificate`，重试赌节点不可靠；AkShare 以 verify=False 绕过（关校验不可接受） | 自组 CA bundle：内置中间证书 PEM 常量 + certifi 根库拼接（完整链校验保留）；证书失败（SSLCertVerificationError）显式报错更新指引、不计连接级熔断；provider 级 record_failure 照计数兜底；P34 诊断命令 `openssl s_client -connect … | grep verify` |
+| P35 按年切片缓存跨年（V0.8.3） | 只盘点磁盘现存年会在跨年后把旧年当永久完整缓存；当前年缺失、周末末行落后、短区间查询被误当全史起点会分别造成冻结、重复请求与静默短史 | 日线要求当前年存在；历史估值区间不强制当前年；周末不回拨；只有全史抓取可写 verified_earliest；中证交易日清单陈旧主动刷新并留痕 |
 | P33 中证全收益（V0.8.0） | 非交易日起始日会生成与下一交易日相同的占位行；全收益代码存在 H00300/H20269/932000CNY010 等无统一规律形态；HTTP 200 可携带业务400；个别历史行 change 与收盘差有上游口径差；当日 tradeDate 清单先行含今天而行情盘后才发布 | 官方 tradeDate 过滤+缺失按年重取；衍生指数+基本资料+行情三验身份；业务 code 强校验；change 异常写审计警告，changePct 与收盘明显矛盾拒绝入库；不降级价格指数；当日未发布不计缺失（pending_today 入报告，V0.8.1 盘前同步不炸） |
 
 ## Prerequisites
@@ -611,6 +617,7 @@ assert "def sw_index_components(" in ref_text                               # V0
 assert "def _sws_ca_bundle" in ref_text                                     # V0.8.2 自组 bundle
 assert "_SWS_EXTRA_CERT_PEM" in ref_text                                    # 中间证书常量入册
 assert "P34" in ref_text                                                    # TLS 坑入册
+assert "P35" in ref_text                                                    # 按年切片跨年守护入册
 
 # 产物三 examples.md（手工维护）：校验章节齐全后原样同步到 skill 目录
 examples_src = HERE / "examples.md"
@@ -621,30 +628,46 @@ for _i in range(1, 16):                                # 逐场景断言：任�
 assert "# FAQ" in examples_text, "examples.md 缺 FAQ 区"
 assert f"V{VERSION}" in examples_text, f"examples.md 版本号未对齐 V{VERSION}"
 
-for dest in (SKILL_DIR, HERE):
+import sys as _sys
+_args = _sys.argv[1:]
+_expected = {"SKILL.md": thin_text, "reference.md": ref_text, "examples.md": examples_text}
+if "--check" in _args:
+    _drift = [name for name, expected in _expected.items()
+              if not (HERE / name).exists() or (HERE / name).read_text(encoding="utf-8") != expected]
+    if _drift:
+        print("生成物漂移: " + ", ".join(_drift), file=_sys.stderr)
+        _sys.exit(1)
+    print("OK: SKILL.md/reference.md/examples.md 与生成器输出逐字节一致")
+    _sys.exit(0)
+
+_deploy = "--repo-only" not in _args
+if _deploy:
+    SKILL_DIR.mkdir(parents=True, exist_ok=True)
+for dest in ((SKILL_DIR, HERE) if _deploy else (HERE,)):
     (dest / "SKILL.md").write_text(thin_text, encoding="utf-8")
     (dest / "reference.md").write_text(ref_text, encoding="utf-8")
-(SKILL_DIR / "examples.md").write_text(examples_text, encoding="utf-8")
-(SKILL_DIR / "fund_data.py").write_text(SRC, encoding="utf-8")
-(SKILL_DIR / "test_fund_data.py").write_text(
-    (HERE / "test_fund_data.py").read_text(encoding="utf-8"), encoding="utf-8")
-# Sprint 2：fund_data_core 与主模块同一套部署（硬依赖：fund_data.py 裸 import
-# core 异常，skill 目录缺包即 import 失败——发布必须是带核心包的完整一套）。
-# 拷贝走临时目录 + 原子 rename：中途失败时 skill 目录仍保留旧版可用核心包。
-# 同步核心包四份测试，使 skill 目录可独立跑全量回归。
-core_src, core_dst = HERE / "fund_data_core", SKILL_DIR / "fund_data_core"
-core_new = SKILL_DIR / "fund_data_core.new"
-if core_new.exists():
-    shutil.rmtree(core_new)
-shutil.copytree(core_src, core_new,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-if core_dst.exists():
-    shutil.rmtree(core_dst)
-core_new.rename(core_dst)
-for _name in ("test_coordinator.py", "test_gateway.py",
-              "test_cache.py", "test_cache_policies.py",
-              "test_locks.py", "test_no_platform_hardcoding.py"):   # V0.7.2 锁契约+平台守卫
-    shutil.copy2(HERE / _name, SKILL_DIR / _name)
+if _deploy:
+    (SKILL_DIR / "examples.md").write_text(examples_text, encoding="utf-8")
+    (SKILL_DIR / "fund_data.py").write_text(SRC, encoding="utf-8")
+    (SKILL_DIR / "test_fund_data.py").write_text(
+        (HERE / "test_fund_data.py").read_text(encoding="utf-8"), encoding="utf-8")
+    # Sprint 2：fund_data_core 与主模块同一套部署（硬依赖：fund_data.py 裸 import
+    # core 异常，skill 目录缺包即 import 失败——发布必须是带核心包的完整一套）。
+    # 拷贝走临时目录 + 原子 rename：中途失败时 skill 目录仍保留旧版可用核心包。
+    # 同步核心包四份测试，使 skill 目录可独立跑全量回归。
+    core_src, core_dst = HERE / "fund_data_core", SKILL_DIR / "fund_data_core"
+    core_new = SKILL_DIR / "fund_data_core.new"
+    if core_new.exists():
+        shutil.rmtree(core_new)
+    shutil.copytree(core_src, core_new,
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    if core_dst.exists():
+        shutil.rmtree(core_dst)
+    core_new.rename(core_dst)
+    for _name in ("test_coordinator.py", "test_gateway.py",
+                  "test_cache.py", "test_cache_policies.py",
+                  "test_locks.py", "test_no_platform_hardcoding.py"):
+        shutil.copy2(HERE / _name, SKILL_DIR / _name)
 print(f"OK: SKILL.md 路由层 {thin_bytes}B（token 下限粗估 ≈{thin_bytes // 3 // 1000}K）+ "
       f"reference.md {len(ref_text.encode('utf-8'))}B + "
       f"examples.md {len(examples_text.encode('utf-8'))}B；函数速查 {len(_sig_rows())} 个全覆盖")

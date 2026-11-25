@@ -153,7 +153,7 @@ class CacheRepository:
 
         与 get_or_load 的差别：不做装载、不做失败标记、不抛 StaleData——
         供既有「先读后写」调用形态平移使用（与磁盘 JSON 直读语义等价；
-        差异均为防御性增强：路径指向目录返回 None 而非抛 IsADirectoryError、
+        差异均为防御性增强：权限/磁盘等 OSError 转 CacheError  fail-loud、
         字节解码可识别 UTF-16/32、负 TTL 抛 ValueError）。
         """
         policy = CachePolicy(ttl_seconds=ttl_seconds)
@@ -340,8 +340,10 @@ class CacheRepository:
                 before = path.stat()
                 raw = path.read_bytes()
                 after = path.stat()
-            except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+            except (FileNotFoundError, NotADirectoryError):
                 return None
+            except OSError as exc:
+                raise CacheError(f"缓存读取失败（{path}）: {exc}") from exc
             before_state = (before.st_mtime_ns, before.st_size, before.st_ino)
             after_state = (after.st_mtime_ns, after.st_size, after.st_ino)
             if before_state != after_state:

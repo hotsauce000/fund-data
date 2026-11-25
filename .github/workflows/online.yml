@@ -1,6 +1,6 @@
 name: online
 
-# 在线全量 334 条（真实上游）。仅手动触发：按坑 P26 的教训，诊断/验证行为
+# 在线全量（真实上游）。仅手动触发：按坑 P26 的教训，诊断/验证行为
 # 本身消耗上游 IP 额度，绝不随 push 自动跑。发版前在一个平台全量跑一次，
 # 小版本间可轮换平台抽测。
 on:
@@ -25,7 +25,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: 安装依赖（requests/pandas）
-        run: python -m pip install requests pandas
-      - name: 在线全量（含离线 264 + 在线 70，打印四线请求账本）
+      - name: 安装依赖
+        run: python -m pip install -r requirements.txt
+      - name: 在线全量（打印四线请求账本）
         run: python test_fund_data.py --online

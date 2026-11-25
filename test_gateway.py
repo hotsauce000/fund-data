@@ -280,6 +280,43 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(coordinator.snapshot("eastmoney")["circuit"], "OPEN")
 
 
+    def test_expired_lease_does_not_mask_transport_error(self):
+        clock = self.clock
+
+        class SlowSession:
+            def request(self, method, url, **kwargs):
+                clock.advance(31)
+                raise OSError("late timeout")
+
+        coordinator = self.coordinator()
+        with self.assertRaises(OSError) as caught:
+            Gateway(coordinator, session=SlowSession()).get(self.url)
+        self.assertEqual(str(caught.exception), "late timeout")
+        self.assertEqual(coordinator.snapshot("eastmoney")["active_in_flight"], 0)
+
+    def test_expired_lease_still_records_late_risk_response(self):
+        clock = self.clock
+
+        class SlowSession:
+            def request(self, method, url, **kwargs):
+                clock.advance(31)
+                return FakeResponse(403, "forbidden")
+
+        coordinator = self.coordinator(circuit_threshold=1)
+        with self.assertRaises(RiskControlError):
+            Gateway(coordinator, session=SlowSession()).get(self.url)
+        snap = coordinator.snapshot("eastmoney")
+        self.assertEqual((snap["circuit"], snap["active_in_flight"]), ("OPEN", 0))
+
+    def test_keyboard_interrupt_releases_started_lease(self):
+        session = FakeSession([KeyboardInterrupt()])
+        coordinator = self.coordinator()
+        with self.assertRaises(KeyboardInterrupt):
+            Gateway(coordinator, session=session).get(self.url, retries=1)
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(coordinator.snapshot("eastmoney")["active_in_flight"], 0)
+
+
 class GatewayVerdictTests(unittest.TestCase):
     """Sprint 1 成功语义回归：HTTP 2xx 绝不清零风控连击，显式裁决才清零。"""
 
