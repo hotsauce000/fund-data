@@ -4,15 +4,15 @@ slug: fund-data
 displayName: 基金数据底座 FundBase
 display_name: 基金数据底座 FundBase
 display_name_en: FundBase · The Data Foundation for China Funds
-description: 写代码实际获取基金领域底层数据时使用；基金概念解释、投资观点讨论等无需取数的话题不要加载。零key零登录：2.8万只基金清单消歧、单基金诊断快照（净值全史/规模/持仓/经理/费率/申购限额等20+数据集，挂自动降级）、本地计算（复权/回撤/夏普/定投XIRR/同类百分位）、持仓穿透白话地图、宏观利率（中债曲线/国债/SHIBOR/GC007）、全市场排行与新发基金、经理画像与持续性矩阵、定期报告清单+PDF直链、指数与行业板块十年日线、中证官方全收益指数（官方映射/验证全史/可恢复同步）。请求预算制防封，绝不静默降级，缓存优先省额度。
+description: 写代码实际获取基金领域底层数据时使用；基金概念解释、投资观点讨论等无需取数的话题不要加载。零key零登录：2.8万只基金清单消歧、单基金诊断快照（净值全史/规模/持仓/经理/费率/申购限额等20+数据集，挂自动降级）、本地计算（复权/回撤/夏普/定投XIRR/同类百分位）、持仓穿透白话地图、宏观利率（中债曲线/国债/SHIBOR/GC007）、全市场排行与新发基金、经理画像与持续性矩阵、定期报告清单+PDF直链、指数与行业板块十年日线、中证官方全收益指数（官方映射/验证全史/可恢复同步）、公募REITs（行情板/画像/AI直读报告）。请求预算制防封，绝不静默降级，缓存优先省额度。
 description_zh: 基金域的全景数据引擎：一站式快照 20+ 数据集、白话持仓穿透地图、24792 只全市场排行、经理画像与抱团度、十年指数日线与 53 期规模全史——零 key 零登录，请求预算制防封，分层断言全绿。为一切基金应用打地基。
 description_en: Full-spectrum data engine for China funds — one-shot snapshots (20+ datasets), holdings maps, 24,792-fund rankings, manager profiles, 10-year klines, 53-period scale history, report PDFs. Zero keys/login, budget-guarded, assertions green.
 author: hotsauce000
 origin: custom
-version: 0.8.3
+version: 0.8.4
 ---
 
-# fund-data 路由层 V0.8.3
+# fund-data 路由层 V0.8.4
 
 本文件是**路由层**（≈4K token，激活只加载本文件）。坑区/内嵌代码→**reference.md**、菜谱/FAQ→**examples.md**（均按需读取）；`fund_data.py` import 用勿通读：
 
@@ -52,11 +52,11 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | 规模·全史/费率/溢价/重仓探测 | `fund_scale`·`fund_scale_history`·`fund_fees`·`qdii_premium`·`nav_divergence` | 各1·2·冷启≤12 |
 | 经理画像/排行 | `fund_manager(基金码或经理ID)` · `manager_rank(pages)`（仅姓名序） | 0~1·50/页 |
 | 指数日线 | `kline_daily("沪深300")`（指数名/板块名/股票码） | 1（缓存0） |
-| 全收益指数 | `csindex_resolve_total_return`→`csindex_total_return_daily` | 冷启≤5/缓存0 |
-| 全收益批量同步 | `csindex_sync_total_return(codes=[...])`；全量须 `all_indices=True` | 显式任务 |
-| 申万行业指数 | `sw_index_list()` → `sw_index_valuation("801030")`（官方PE/PB/股息率）·`sw_index_daily`·`sw_index_components`；挂时行业对标退 `kline_daily` 东财口径 | 冷启≤4（估值≤2年窗）/缓存0；全史估值 ~12 发分页 |
+| 全收益指数 | `csindex_resolve_total_return`→`csindex_total_return_daily`；批量 `csindex_sync_total_return(codes=[...], all_indices=True)` | 冷启≤5/缓存0 |
+| 申万行业指数 | `sw_index_list()` → `sw_index_valuation`·`sw_index_daily`·`sw_index_components`（官方PE/PB/股息率；挂时退 `kline_daily` 东财口径） | 冷启≤4/缓存0；全史估值 ~12 发 |
 | 债基利率敏感度 | `cb_yield_curve` + `credit_spread` / `treasury_yield_daily` | 1~2 |
 | 重仓股深度 | `holding_map` → **a-stock-data skill** | 0 |
+| 公募REITs | `reit_board()` → `reit_profile(code)` → **先问用户**（照 `detail_prompt`）→ `reit_report_text(code)`（AI 直读）；净值半年频，勿用 `fund_snapshot`/`fund_metrics`/`qdii_premium` | 1·4（缓存0~1）·东财2~3 |
 
 ## 失效与备源路由（失败时怎么办）
 
@@ -71,7 +71,7 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | cninfo 451/token null | enckey 时效**非风控**，刷新重试一次（P20） | 仍拒=时钟漂移 |
 | 403/429 | `RiskControlError` 上抛+熔断10min（不触发降级） | 冷却期零网络，等勿重试 |
 
-## 函数速查（61 个，构建时自动生成勿手改）
+## 函数速查（64 个，构建时自动生成勿手改）
 
 | 函数 | 说明 |
 |---|---|
@@ -136,14 +136,17 @@ from fund_data import fund_snapshot, fund_metrics   # 按场景路由表选函�
 | `sw_index_daily(index_code, period='day', force_refresh=False)` | 申万指数日线全史（period=day/week/mo |
 | `sw_index_valuation(index_code, start_date='', end_date='', force_refresh=False)` | 申万官方估值序列（PE/PB/股息率/换手率/流通市值 |
 | `sw_index_components(index_code, force_refresh=False)` | 申万指数成分股（单发 page_size=10000； |
+| `reit_board(force_refresh=False, with_nav_date=False)` | 全市场公募 REITs 行情板（腾讯 1 请求） |
+| `reit_profile(code, force_refresh=False, macro='cache')` | 单只公募 REIT 基础画像（腾讯 4 请求） |
+| `reit_report_text(code, kind=None, year=None, pages=None, keywords=None, force_refresh=False, max_chars=60000)` | REIT 报告逐页文本（AI 直读，先问用户） |
 
 ## When to Activate
 
-基金净值/复权/回撤/夏普、诊断评测、穿透地图、定投回测、档案、批量净值、利率、中证全收益指数。关键词：基金净值、复权、回撤、定投、持仓穿透、白话地图、利差、全市场排行、抱团度、公司画像、新发基金、经理画像、持续性、固收+、溢价、重仓探测、指数日线、全收益指数、规模全史。
+基金净值/复权/回撤/夏普、诊断评测、穿透地图、定投回测、档案、批量净值、利率、中证全收益指数。关键词：基金净值、复权、回撤、定投、持仓穿透、白话地图、利差、全市场排行、抱团度、公司画像、新发基金、经理画像、持续性、固收+、溢价、重仓探测、指数日线、全收益指数、规模全史、公募REITs。
 
 ## 深读与边界（按需）
 
-- 复制即用示例（15 场景菜谱）+ FAQ → 同目录 `examples.md`
-- 实现细节/坑区 P1~P34/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
+- 复制即用示例（16 场景菜谱）+ FAQ → 同目录 `examples.md`
+- 实现细节/坑区 P1~P36/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
 - 不覆盖：账户持仓/交易下单（ttskill）、盘中实时估值、货基万份收益、单基金行业史（E2停供）、语义选基、FOF底层明细与经理姓名索引（P23/P24）
 - 个股深度 → a-stock-data；holding_map() 是官方桥

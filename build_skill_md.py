@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """从实测通过的 fund_data.py 自动组装双层文档（V0.4.2 渐进加载架构）：
 
-产物一 SKILL.md（瘦路由层，上限 12KB）：skill 激活时唯一进上下文的文件——
+产物一 SKILL.md（瘦路由层，上限见构建断言，V0.8.4 为 15KB）：skill 激活时唯一进上下文的文件——
   防封铁律 + 场景路由表 + 失效/备源路由表 + 函数签名速查（ast 从模块自动抽取）
 产物二 reference.md（全量参考）：按需读取——完整内嵌代码（与源码同源直拼）
   + P1~P31 完整坑区 + 端点路由 + 使用示例 + 版本记录
@@ -58,14 +58,15 @@ def _sig_rows() -> list:
     return rows
 
 
-VERSION = "0.8.3"
+VERSION = "0.8.4"
 DESCRIPTION = (
     "写代码实际获取基金领域底层数据时使用；基金概念解释、投资观点讨论等无需取数的"
     "话题不要加载。零key零登录：2.8万只基金清单消歧、单基金诊断快照（净值全史/规模/"
     "持仓/经理/费率/申购限额等20+数据集，挂自动降级）、本地计算（复权/回撤/夏普/"
     "定投XIRR/同类百分位）、持仓穿透白话地图、宏观利率（中债曲线/国债/SHIBOR/"
     "GC007）、全市场排行与新发基金、经理画像与持续性矩阵、定期报告清单+PDF直链、"
-    "指数与行业板块十年日线、中证官方全收益指数（官方映射/验证全史/可恢复同步）。"
+    "指数与行业板块十年日线、中证官方全收益指数（官方映射/验证全史/可恢复同步）、"
+    "公募REITs（行情板/画像/AI直读报告）。"
     "请求预算制防封，绝不静默降级，缓存优先省额度。")
 
 # ══════════════════════════════════════════════════════════════════
@@ -143,11 +144,11 @@ THIN.append("""## 场景路由（我想做 X → 调什么）
 | 规模·全史/费率/溢价/重仓探测 | `fund_scale`·`fund_scale_history`·`fund_fees`·`qdii_premium`·`nav_divergence` | 各1·2·冷启≤12 |
 | 经理画像/排行 | `fund_manager(基金码或经理ID)` · `manager_rank(pages)`（仅姓名序） | 0~1·50/页 |
 | 指数日线 | `kline_daily("沪深300")`（指数名/板块名/股票码） | 1（缓存0） |
-| 全收益指数 | `csindex_resolve_total_return`→`csindex_total_return_daily` | 冷启≤5/缓存0 |
-| 全收益批量同步 | `csindex_sync_total_return(codes=[...])`；全量须 `all_indices=True` | 显式任务 |
-| 申万行业指数 | `sw_index_list()` → `sw_index_valuation("801030")`（官方PE/PB/股息率）·`sw_index_daily`·`sw_index_components`；挂时行业对标退 `kline_daily` 东财口径 | 冷启≤4（估值≤2年窗）/缓存0；全史估值 ~12 发分页 |
+| 全收益指数 | `csindex_resolve_total_return`→`csindex_total_return_daily`；批量 `csindex_sync_total_return(codes=[...], all_indices=True)` | 冷启≤5/缓存0 |
+| 申万行业指数 | `sw_index_list()` → `sw_index_valuation`·`sw_index_daily`·`sw_index_components`（官方PE/PB/股息率；挂时退 `kline_daily` 东财口径） | 冷启≤4/缓存0；全史估值 ~12 发 |
 | 债基利率敏感度 | `cb_yield_curve` + `credit_spread` / `treasury_yield_daily` | 1~2 |
 | 重仓股深度 | `holding_map` → **a-stock-data skill** | 0 |
+| 公募REITs | `reit_board()` → `reit_profile(code)` → **先问用户**（照 `detail_prompt`）→ `reit_report_text(code)`（AI 直读）；净值半年频，勿用 `fund_snapshot`/`fund_metrics`/`qdii_premium` | 1·4（缓存0~1）·东财2~3 |
 
 ## 失效与备源路由（失败时怎么办）
 
@@ -172,12 +173,12 @@ THIN.append(f"""## 函数速查（{_sig_rows().__len__()} 个，构建时自动�
 
 THIN.append("""## When to Activate
 
-基金净值/复权/回撤/夏普、诊断评测、穿透地图、定投回测、档案、批量净值、利率、中证全收益指数。关键词：基金净值、复权、回撤、定投、持仓穿透、白话地图、利差、全市场排行、抱团度、公司画像、新发基金、经理画像、持续性、固收+、溢价、重仓探测、指数日线、全收益指数、规模全史。
+基金净值/复权/回撤/夏普、诊断评测、穿透地图、定投回测、档案、批量净值、利率、中证全收益指数。关键词：基金净值、复权、回撤、定投、持仓穿透、白话地图、利差、全市场排行、抱团度、公司画像、新发基金、经理画像、持续性、固收+、溢价、重仓探测、指数日线、全收益指数、规模全史、公募REITs。
 
 ## 深读与边界（按需）
 
-- 复制即用示例（15 场景菜谱）+ FAQ → 同目录 `examples.md`
-- 实现细节/坑区 P1~P34/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
+- 复制即用示例（16 场景菜谱）+ FAQ → 同目录 `examples.md`
+- 实现细节/坑区 P1~P36/示例/版本记录 → 同目录 `reference.md`（调试/扩展/排坑时读）
 - 不覆盖：账户持仓/交易下单（ttskill）、盘中实时估值、货基万份收益、单基金行业史（E2停供）、语义选基、FOF底层明细与经理姓名索引（P23/P24）
 - 个股深度 → a-stock-data；holding_map() 是官方桥
 """)
@@ -195,9 +196,18 @@ REF.append(f"""# fund-data 完整参考（reference.md · 按需读取层）V{VE
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 """)
 
-REF.append(r"""# fund-data 基金底层数据工具包 V0.8.3 模块全档
+REF.append(r"""# fund-data 基金底层数据工具包 V0.8.4 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层 + 申万行业指数层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复 + V0.8.2 申万行业指数 + V0.8.3 诊断修复：433/433 离线断言通过**（L1 单元 397 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 97 条。在线全量须显式 `--online`），覆盖 31 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层 + 申万行业指数层 + 公募REITs层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复 + V0.8.2 申万行业指数 + V0.8.3 诊断修复 + V0.8.4 公募REITs：549/549 离线断言通过**（L1 单元 513 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 97 条。在线全量须显式 `--online`），覆盖 34 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.8.4 公募REITs层（腾讯基础数据 → 询问 → AI 直读报告，两段式）：**
+- 🟢 **`reit_board()`**：全市场行情板——腾讯行情串一次批量（103 只实测单请求）取回现价/涨跌/开高低/量额/换手/总市值 + **单位净值 + 折溢价率**；默认只发 1 请求、不逐只补净值日期，`with_nav_date=True` 才逐只补（1 请求/只）
+- 🟢 **`reit_profile(code)` ★**：单只画像 4 请求（实时概览/净值历史/分红历史/不复权日线）——基本信息（只暴露核实过的腾讯字段）、半年频净值与净值日期、净值种类（`issue_price` 新上市净值是发行价 / `report` 定期报告份额净值）、折溢价、分红史与近 12 个月派息率（没有分红返回 None 不返回 0）、分红再投资收益（复用 `fund_metrics`）、对 10Y 国债利差（默认只读缓存，零东财请求）
+- 🟢 **`reit_report_text(code, kind, year, pages)`**：第二段——定期报告逐页文本（pypdf 布局模式）。先返回页码索引 + 关键词页码（**只定位、不抽值**）+ 交叉核对值，再按页取正文（单次 ≤6 万字符）；收入/净利润/现金流/可供分配金额/经营指标/持有人结构/评估值全部由 AI 读原文，库不正则、不抽值、不缓存读数
+- 🔴 **P36 东财净值对 REIT 停在发行价**：公募 REIT 不按日披露份额净值（半年频），E2/E6 净值恒为发行价（180101 实测 2.31@2021）——`qdii_premium` 据此算出约 -40% 的假溢价，现拒绝 REIT 并指路；`fund_metrics` / `fund_dca_backtest` 的报错分支对 REIT 追加指路文案（普通基金文案不变）
+- 🔴 **防封优先**：逐只补齐按 ≥1 发/秒慢节拍串行（叠在协调器 0.2s 腾讯地板之上）、连续 2 次取数失败即中止、已取到的留当日缓存断点续跑；403/429/熔断/配额背压立即上抛不继续打；实时概览 5 分钟微缓存防同会话连打；国债默认只读缓存
+- 🟡 腾讯前复权是减法复权（除息前 qfq = 不复权 − 分红），分红再投资用不复权收盘自算，`_tencent_kline_page` 增 `fq` 参数（默认行为不变）；`finance.qq.com` 归腾讯线白名单；单页抽取失败按空页记警告（真实报告常夹空白页）；资产类型判定与经营指标结构化不在本版（AI 读报告）
+- 🟠 **独立审查修复**：逐只补齐对熔断闸门拒绝（`CircuitOpenError`，与 `RiskControlError` 平级而非父子）即时上抛；`fund_metrics`/`fund_dca_backtest` 的 REIT 指路只看进程内清单（`_is_reit(allow_load=False)`），L5 零网络层不触发加载；`nav_stale` 改按披露截止判定（年报截止 3 月末、中报截止 8 月末各留 10 天；固定 212 天阈值在每年年报季与 8 月误报）；画像 `requests` 含清单冷加载；离线夹具日期全部相对今天，23 个边界日期时间旅行回归通过。审查建议项同批落地：报告文本缓存先查后下载（带抽取方式标记，PDF 被清也不多花东财请求）；REIT 识别号段命中即判（清单类型串改名不失效）；逐只补齐 `force_refresh` 生效、中止后余下行先用缓存、连接层残包异常归类不炸穿；日线空返回不缓存；交叉核对按报告期取净值点；年报优先非摘要版。
 
 **V0.8.3 全项目诊断修复：**
 - 🔴 **投资结论可信**：`penetrate` 新增 `degraded`，板块取数全失败不再谎称“持仓分散”；`qdii_premium` 强制场内代码白名单（含 52 号段），杜绝同名股票行情制造假溢价；`nav_divergence` 重仓收益按覆盖度归一，低覆盖度/低股票仓位只给参考数值；`_div_from_unit_money` 兼容 E3 裸数值分红（000001 除息日实锚）
@@ -375,6 +385,9 @@ REF.append("""## 第一章 防封铁律（请求预算契约）
 | fund_company | 24h | 公司页静态 |
 | fund_crowding / fund_industry_allocation | 季末后120天内1h；其后90天 | 披露期防不完整数据固化；历史季度基本不可变 |
 | lsjz | 不缓存 | 补充端点，按区间现查 |
+| reits 净值历史 / 分红历史 / 不复权日线 | 24h / 24h / 20h | 半年频与事件频数据；逐只补齐断点续跑的载体（空结果有效期缩为 6h） |
+| reits 实时概览 | 5 分钟 | 防同会话重复调用连打 |
+| reits 报告文本 | 长期 | 命中就不下载 PDF、不重抽；带抽取方式标记，换抽取方式自动重抽 |
 """)
 
 REF.append(r"""## 端点路由速查（按需定位，不必通读）
@@ -418,6 +431,9 @@ REF.append(r"""## 端点路由速查（按需定位，不必通读）
 | L7 | `treasury_yield_daily(days)` / `shibor_history(period)` / `benchmark_rate_history()` | 中美国债日频+利差 / SHIBOR多期限 / 基准利率调整史(附次日沪深) | 东财 datacenter | 1 |
 | L7 | `repo_rate_gc()` / `cn_treasury_realtime()` | GC007回购(DR007代理) / 国债四期限盘中 | 腾讯+push2 | 1+4 |
 | 降级 | `fund_snapshot` 自动降级 | E2挂→E3+E4a+蛋卷分拆，source标注degraded | 组合 | ~N+2 |
+| REIT | `reit_board(force_refresh,with_nav_date)` | 全市场公募 REITs 行情板：现价/涨跌/开高低/量额/换手/总市值 + 单位净值 + 折溢价率（103 只一次批量）；with_nav_date=True 逐只补净值日期 | 腾讯 qt.gtimg.cn + stockjs.finance.qq.com | 1（补齐 +N 只，当日缓存 0） |
+| REIT ⭐ | `reit_profile(code,force_refresh,macro)` | 单只画像：基本信息 / 半年频净值与日期（发行价 or 报告净值）/ 折溢价 / 分红史与近 12 个月派息率 / 分红再投资收益 / 对 10Y 国债利差 | 腾讯基金页 4 接口 | 4（当日缓存后 0~1） |
+| REIT | `reit_report_text(code,kind,year,pages,...)` | 定期报告逐页文本（pypdf 布局模式）+ 页码索引 + 关键词页码 + 交叉核对值；AI 直接读，库不抽值 | 东财 f10/JJGG + pdf.dfcfw.com | 2~3（文本缓存后 0） |
 
 **坑区速查（全部实测，修复已内嵌）：**
 
@@ -459,6 +475,7 @@ REF.append(r"""## 端点路由速查（按需定位，不必通读）
 | P34 申万官网 TLS（V0.8.2） | swsresearch.com 漏发中间证书（GeoTrust G2 2022 CA1，效期 2032-12-14），负载均衡部分节点全漏——requests/curl 必报 `unable to get local issuer certificate`，重试赌节点不可靠；AkShare 以 verify=False 绕过（关校验不可接受） | 自组 CA bundle：内置中间证书 PEM 常量 + certifi 根库拼接（完整链校验保留）；证书失败（SSLCertVerificationError）显式报错更新指引、不计连接级熔断；provider 级 record_failure 照计数兜底；P34 诊断命令 `openssl s_client -connect … | grep verify` |
 | P35 按年切片缓存跨年（V0.8.3） | 只盘点磁盘现存年会在跨年后把旧年当永久完整缓存；当前年缺失、周末末行落后、短区间查询被误当全史起点会分别造成冻结、重复请求与静默短史 | 日线要求当前年存在；历史估值区间不强制当前年；周末不回拨；只有全史抓取可写 verified_earliest；中证交易日清单陈旧主动刷新并留痕 |
 | P33 中证全收益（V0.8.0） | 非交易日起始日会生成与下一交易日相同的占位行；全收益代码存在 H00300/H20269/932000CNY010 等无统一规律形态；HTTP 200 可携带业务400；个别历史行 change 与收盘差有上游口径差；当日 tradeDate 清单先行含今天而行情盘后才发布 | 官方 tradeDate 过滤+缺失按年重取；衍生指数+基本资料+行情三验身份；业务 code 强校验；change 异常写审计警告，changePct 与收盘明显矛盾拒绝入库；不降级价格指数；当日未发布不计缺失（pending_today 入报告，V0.8.1 盘前同步不炸） |
+| P36 东财净值对 REIT 停在发行价（V0.8.4） | 公募 REIT 不按日披露份额净值（半年频，中期/年度报告），东财 E2/E6 对 REIT 的净值恒为发行价（180101 实测 2.31@2021）——`qdii_premium` 放行 508/180 号段后据此算出约 -40% 的假溢价；腾讯前复权是减法复权（除息前 qfq = 不复权 − 分红）；新上市 REIT 的「净值」是发行价（净值日期 = 成立日） | `qdii_premium` 号段判断后加 `_is_reit` 拒绝并指路；`fund_metrics`/`fund_dca_backtest` 报错分支追加指路；REIT 走 `reit_board`/`reit_profile`（腾讯半年频净值，行情串第 81 段单位净值 / 第 77 段折溢价率，输出必带 `nav_date`/`nav_kind`）；`_tencent_kline_page(fq="")` 取不复权自算分红再投资；`finance.qq.com` 归腾讯线白名单 |
 
 ## Prerequisites
 
@@ -466,7 +483,7 @@ REF.append(r"""## 端点路由速查（按需定位，不必通读）
 pip install requests
 ```
 
-硬依赖 requests + 系统 curl（L7 中债通道需要，P11；macOS/Linux 自带）+ 系统 node（V0.5 巨潮抱团度/行业配置线的 enckey 计算，macOS/Linux 常见自带；无 node 时该两函数显式报错不静默）。pandas 可选。L6 穿透自带内嵌股票域通道，无需 a-stock-data 即可跑通；个股深度再加载 a-stock-data。
+硬依赖 requests + 系统 curl（L7 中债通道需要，P11；macOS/Linux 自带）+ 系统 node（V0.5 巨潮抱团度/行业配置线的 enckey 计算与 V0.7.8 报告 PDF 的 EdgeOne 挑战求解，macOS/Linux 常见自带；无 node 时相应函数显式报错不静默）。pandas 可选。pypdf 可选（仅 `reit_report_text` 的 REIT 报告 PDF 转文本需要，缺失时显式报错给安装提示）。L6 穿透自带内嵌股票域通道，无需 a-stock-data 即可跑通；个股深度再加载 a-stock-data。
 """)
 
 REF.append("## 层 1 · 前置层：统一入口 + 主键表（模块 L1）\n\n所有端点的前置依赖：\n")
@@ -505,6 +522,8 @@ REF.append("## 层 9 · 中证官方全收益指数层（V0.8.0：清单 + 官�
 REF.append(code(sections[next(k for k in sections if k.startswith("V0.8.0 中证官方全收益指数层"))]))
 REF.append("## 层 10 · 申万行业指数层（V0.8.2：官方清单 + 估值 + 日线 + 成分）\n")
 REF.append(code(sections[next(k for k in sections if k.startswith("V0.8.2 申万行业指数层"))]))
+REF.append("## 层 11 · 公募REITs层（V0.8.4：腾讯基础数据 + 询问后 AI 直读报告）\n")
+REF.append(code(sections["V0.8.4 公募REITs层：腾讯基础数据 + 询问后 AI 直读报告"]))
 
 REF.append("""## 使用示例
 
@@ -566,6 +585,13 @@ csindex_universe()                             # 全系列人民币基础指数�
 csindex_resolve_total_return("000300")        # 官方映射 → H00300
 csindex_total_return_daily("000300", "20240101", "20241231")
 csindex_sync_total_return(codes=["000300", "H30269"])  # 显式批量，可恢复
+
+# V0.8.4 公募REITs层（两段式：腾讯基础数据 → 询问 → AI 直读报告）
+board = reit_board()                               # 全市场行情板：1 请求（行情+净值+折溢价）
+p = reit_profile("180101")                         # 单只画像：4 请求（当日缓存后 0~1）
+print(p["detail_prompt"])                          # 先把画像交给用户，照这句询问是否读报告
+idx = reit_report_text("180101")                   # 用户确认后：页码索引 + 关键词页码（不抽值）
+txt = reit_report_text("180101", pages=idx["keyword_pages"]["可供分配金额"])  # 按页取正文，AI 直接读
 ```
 
 **不覆盖（明确边界）**：账户持仓/交易下单（用 ttskill）、港基专项、盘中实时估值、基金经理历任切分（独立评测 skill 的 jjjl 通道）、单基金行业配置史（E2 已停供；全市场季度口径见 `fund_industry_allocation`）、货基万份收益（P15）、债券持仓明细 zqcc、FOF 底层基金明细（五源实测无结构化接口，坑P24）、经理姓名→ID 索引（坑P23）。
@@ -579,8 +605,10 @@ thin_text = "\n".join(THIN)
 ref_text = "\n".join(REF)
 
 thin_bytes = len(thin_text.encode("utf-8"))
-assert thin_bytes < 14500, f"瘦 SKILL.md 超重 {thin_bytes}B（上限 14500）——把长内容移入 reference.md。"
+assert thin_bytes < 15000, f"瘦 SKILL.md 超重 {thin_bytes}B（上限 15000）——把长内容移入 reference.md。"
 # V0.8.0：四个全收益公开入口与独立防封路由纳入后，上限 13400→14500；
+# V0.8.4：公募 REITs 三入口 + 「先问用户」路由规则纳入后，上限 14500→15000（实测 14944；
+# 新增内容已压到一行路由，并顺手并掉全收益两行、压紧申万行措辞）；
 # 长说明仍只放 reference.md，路由层不内嵌实现。
 for n, _, _ in _sig_rows():                          # 签名覆盖：每个公开函数都在路由层
     assert f"| `{n}(" in thin_text, f"签名速查表漏行 {n}"
@@ -618,12 +646,16 @@ assert "def _sws_ca_bundle" in ref_text                                     # V0
 assert "_SWS_EXTRA_CERT_PEM" in ref_text                                    # 中间证书常量入册
 assert "P34" in ref_text                                                    # TLS 坑入册
 assert "P35" in ref_text                                                    # 按年切片跨年守护入册
+assert "def reit_board(" in ref_text                                     # V0.8.4 REITs 行情板内嵌同源
+assert "def reit_profile(" in ref_text                                   # V0.8.4 REITs 画像
+assert "def reit_report_text(" in ref_text                               # V0.8.4 AI 直读报告
+assert "P36" in ref_text                                                 # REIT 净值坑入册
 
 # 产物三 examples.md（手工维护）：校验章节齐全后原样同步到 skill 目录
 examples_src = HERE / "examples.md"
 examples_text = examples_src.read_text(encoding="utf-8")
 assert "## 环境准备" in examples_text, "examples.md 缺「环境准备」章节"
-for _i in range(1, 16):                                # 逐场景断言：任一场景被删即拦住（锚点带" ·"防 1 被 10 子串掩盖）
+for _i in range(1, 17):                                # 逐场景断言：任一场景被删即拦住（锚点带" ·"防 1 被 10 子串掩盖）
     assert f"## 场景 {_i} ·" in examples_text, f"examples.md 缺「场景 {_i}」"
 assert "# FAQ" in examples_text, "examples.md 缺 FAQ 区"
 assert f"V{VERSION}" in examples_text, f"examples.md 版本号未对齐 V{VERSION}"

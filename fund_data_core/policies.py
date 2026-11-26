@@ -75,6 +75,9 @@ _HOST_PROVIDERS = {
     "danjuanapp.com": "danjuan",
     "gtimg.cn": "tencent",
     "gu.qq.com": "tencent",
+    # finance.qq.com 是腾讯基金页静态数据域（V0.8.4 公募 REITs 层：
+    # stockjs.finance.qq.com 承载基金净值历史 year_all 静态文件），归入腾讯线同账
+    "finance.qq.com": "tencent",
     "sinajs.cn": "sina",
     "sina.com.cn": "sina",
     "csindex.com.cn": "csindex",

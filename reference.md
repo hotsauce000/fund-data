@@ -1,13 +1,22 @@
-# fund-data 完整参考（reference.md · 按需读取层）V0.8.3
+# fund-data 完整参考（reference.md · 按需读取层）V0.8.4
 
 > 本文件按需读取：调试 / 扩展 / 排查坑时才打开，勿随 skill 激活预加载。
 > 路由与签名速查见 SKILL.md；本文件内嵌代码与 fund_data.py 同源直拼（构建时生成）。
 
 **V0.4.2（2026-11-10）文档架构：渐进加载**——SKILL.md 瘦身为路由层（上限 12KB 内 ≈3K token，激活省 ~90%），全量参考移本文件；函数签名速查改 ast 自动生成（杜绝"README 改了模板没改"漂移）；credit_spread 测试锚 0.6 防方向颠倒。
 
-# fund-data 基金底层数据工具包 V0.8.3 模块全档
+# fund-data 基金底层数据工具包 V0.8.4 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层 + 申万行业指数层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复 + V0.8.2 申万行业指数 + V0.8.3 诊断修复：433/433 离线断言通过**（L1 单元 397 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 97 条。在线全量须显式 `--online`），覆盖 31 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层 + 申万行业指数层 + 公募REITs层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复 + V0.8.2 申万行业指数 + V0.8.3 诊断修复 + V0.8.4 公募REITs：549/549 离线断言通过**（L1 单元 513 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 97 条。在线全量须显式 `--online`），覆盖 34 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+
+**V0.8.4 公募REITs层（腾讯基础数据 → 询问 → AI 直读报告，两段式）：**
+- 🟢 **`reit_board()`**：全市场行情板——腾讯行情串一次批量（103 只实测单请求）取回现价/涨跌/开高低/量额/换手/总市值 + **单位净值 + 折溢价率**；默认只发 1 请求、不逐只补净值日期，`with_nav_date=True` 才逐只补（1 请求/只）
+- 🟢 **`reit_profile(code)` ★**：单只画像 4 请求（实时概览/净值历史/分红历史/不复权日线）——基本信息（只暴露核实过的腾讯字段）、半年频净值与净值日期、净值种类（`issue_price` 新上市净值是发行价 / `report` 定期报告份额净值）、折溢价、分红史与近 12 个月派息率（没有分红返回 None 不返回 0）、分红再投资收益（复用 `fund_metrics`）、对 10Y 国债利差（默认只读缓存，零东财请求）
+- 🟢 **`reit_report_text(code, kind, year, pages)`**：第二段——定期报告逐页文本（pypdf 布局模式）。先返回页码索引 + 关键词页码（**只定位、不抽值**）+ 交叉核对值，再按页取正文（单次 ≤6 万字符）；收入/净利润/现金流/可供分配金额/经营指标/持有人结构/评估值全部由 AI 读原文，库不正则、不抽值、不缓存读数
+- 🔴 **P36 东财净值对 REIT 停在发行价**：公募 REIT 不按日披露份额净值（半年频），E2/E6 净值恒为发行价（180101 实测 2.31@2021）——`qdii_premium` 据此算出约 -40% 的假溢价，现拒绝 REIT 并指路；`fund_metrics` / `fund_dca_backtest` 的报错分支对 REIT 追加指路文案（普通基金文案不变）
+- 🔴 **防封优先**：逐只补齐按 ≥1 发/秒慢节拍串行（叠在协调器 0.2s 腾讯地板之上）、连续 2 次取数失败即中止、已取到的留当日缓存断点续跑；403/429/熔断/配额背压立即上抛不继续打；实时概览 5 分钟微缓存防同会话连打；国债默认只读缓存
+- 🟡 腾讯前复权是减法复权（除息前 qfq = 不复权 − 分红），分红再投资用不复权收盘自算，`_tencent_kline_page` 增 `fq` 参数（默认行为不变）；`finance.qq.com` 归腾讯线白名单；单页抽取失败按空页记警告（真实报告常夹空白页）；资产类型判定与经营指标结构化不在本版（AI 读报告）
+- 🟠 **独立审查修复**：逐只补齐对熔断闸门拒绝（`CircuitOpenError`，与 `RiskControlError` 平级而非父子）即时上抛；`fund_metrics`/`fund_dca_backtest` 的 REIT 指路只看进程内清单（`_is_reit(allow_load=False)`），L5 零网络层不触发加载；`nav_stale` 改按披露截止判定（年报截止 3 月末、中报截止 8 月末各留 10 天；固定 212 天阈值在每年年报季与 8 月误报）；画像 `requests` 含清单冷加载；离线夹具日期全部相对今天，23 个边界日期时间旅行回归通过。审查建议项同批落地：报告文本缓存先查后下载（带抽取方式标记，PDF 被清也不多花东财请求）；REIT 识别号段命中即判（清单类型串改名不失效）；逐只补齐 `force_refresh` 生效、中止后余下行先用缓存、连接层残包异常归类不炸穿；日线空返回不缓存；交叉核对按报告期取净值点；年报优先非摘要版。
 
 **V0.8.3 全项目诊断修复：**
 - 🔴 **投资结论可信**：`penetrate` 新增 `degraded`，板块取数全失败不再谎称“持仓分散”；`qdii_premium` 强制场内代码白名单（含 52 号段），杜绝同名股票行情制造假溢价；`nav_divergence` 重仓收益按覆盖度归一，低覆盖度/低股票仓位只给参考数值；`_div_from_unit_money` 兼容 E3 裸数值分红（000001 除息日实锚）
@@ -184,6 +193,9 @@
 | fund_company | 24h | 公司页静态 |
 | fund_crowding / fund_industry_allocation | 季末后120天内1h；其后90天 | 披露期防不完整数据固化；历史季度基本不可变 |
 | lsjz | 不缓存 | 补充端点，按区间现查 |
+| reits 净值历史 / 分红历史 / 不复权日线 | 24h / 24h / 20h | 半年频与事件频数据；逐只补齐断点续跑的载体（空结果有效期缩为 6h） |
+| reits 实时概览 | 5 分钟 | 防同会话重复调用连打 |
+| reits 报告文本 | 长期 | 命中就不下载 PDF、不重抽；带抽取方式标记，换抽取方式自动重抽 |
 
 ## 端点路由速查（按需定位，不必通读）
 
@@ -226,6 +238,9 @@
 | L7 | `treasury_yield_daily(days)` / `shibor_history(period)` / `benchmark_rate_history()` | 中美国债日频+利差 / SHIBOR多期限 / 基准利率调整史(附次日沪深) | 东财 datacenter | 1 |
 | L7 | `repo_rate_gc()` / `cn_treasury_realtime()` | GC007回购(DR007代理) / 国债四期限盘中 | 腾讯+push2 | 1+4 |
 | 降级 | `fund_snapshot` 自动降级 | E2挂→E3+E4a+蛋卷分拆，source标注degraded | 组合 | ~N+2 |
+| REIT | `reit_board(force_refresh,with_nav_date)` | 全市场公募 REITs 行情板：现价/涨跌/开高低/量额/换手/总市值 + 单位净值 + 折溢价率（103 只一次批量）；with_nav_date=True 逐只补净值日期 | 腾讯 qt.gtimg.cn + stockjs.finance.qq.com | 1（补齐 +N 只，当日缓存 0） |
+| REIT ⭐ | `reit_profile(code,force_refresh,macro)` | 单只画像：基本信息 / 半年频净值与日期（发行价 or 报告净值）/ 折溢价 / 分红史与近 12 个月派息率 / 分红再投资收益 / 对 10Y 国债利差 | 腾讯基金页 4 接口 | 4（当日缓存后 0~1） |
+| REIT | `reit_report_text(code,kind,year,pages,...)` | 定期报告逐页文本（pypdf 布局模式）+ 页码索引 + 关键词页码 + 交叉核对值；AI 直接读，库不抽值 | 东财 f10/JJGG + pdf.dfcfw.com | 2~3（文本缓存后 0） |
 
 **坑区速查（全部实测，修复已内嵌）：**
 
@@ -267,6 +282,7 @@
 | P34 申万官网 TLS（V0.8.2） | swsresearch.com 漏发中间证书（GeoTrust G2 2022 CA1，效期 2032-12-14），负载均衡部分节点全漏——requests/curl 必报 `unable to get local issuer certificate`，重试赌节点不可靠；AkShare 以 verify=False 绕过（关校验不可接受） | 自组 CA bundle：内置中间证书 PEM 常量 + certifi 根库拼接（完整链校验保留）；证书失败（SSLCertVerificationError）显式报错更新指引、不计连接级熔断；provider 级 record_failure 照计数兜底；P34 诊断命令 `openssl s_client -connect … | grep verify` |
 | P35 按年切片缓存跨年（V0.8.3） | 只盘点磁盘现存年会在跨年后把旧年当永久完整缓存；当前年缺失、周末末行落后、短区间查询被误当全史起点会分别造成冻结、重复请求与静默短史 | 日线要求当前年存在；历史估值区间不强制当前年；周末不回拨；只有全史抓取可写 verified_earliest；中证交易日清单陈旧主动刷新并留痕 |
 | P33 中证全收益（V0.8.0） | 非交易日起始日会生成与下一交易日相同的占位行；全收益代码存在 H00300/H20269/932000CNY010 等无统一规律形态；HTTP 200 可携带业务400；个别历史行 change 与收盘差有上游口径差；当日 tradeDate 清单先行含今天而行情盘后才发布 | 官方 tradeDate 过滤+缺失按年重取；衍生指数+基本资料+行情三验身份；业务 code 强校验；change 异常写审计警告，changePct 与收盘明显矛盾拒绝入库；不降级价格指数；当日未发布不计缺失（pending_today 入报告，V0.8.1 盘前同步不炸） |
+| P36 东财净值对 REIT 停在发行价（V0.8.4） | 公募 REIT 不按日披露份额净值（半年频，中期/年度报告），东财 E2/E6 对 REIT 的净值恒为发行价（180101 实测 2.31@2021）——`qdii_premium` 放行 508/180 号段后据此算出约 -40% 的假溢价；腾讯前复权是减法复权（除息前 qfq = 不复权 − 分红）；新上市 REIT 的「净值」是发行价（净值日期 = 成立日） | `qdii_premium` 号段判断后加 `_is_reit` 拒绝并指路；`fund_metrics`/`fund_dca_backtest` 报错分支追加指路；REIT 走 `reit_board`/`reit_profile`（腾讯半年频净值，行情串第 81 段单位净值 / 第 77 段折溢价率，输出必带 `nav_date`/`nav_kind`）；`_tencent_kline_page(fq="")` 取不复权自算分红再投资；`finance.qq.com` 归腾讯线白名单 |
 
 ## Prerequisites
 
@@ -274,7 +290,7 @@
 pip install requests
 ```
 
-硬依赖 requests + 系统 curl（L7 中债通道需要，P11；macOS/Linux 自带）+ 系统 node（V0.5 巨潮抱团度/行业配置线的 enckey 计算，macOS/Linux 常见自带；无 node 时该两函数显式报错不静默）。pandas 可选。L6 穿透自带内嵌股票域通道，无需 a-stock-data 即可跑通；个股深度再加载 a-stock-data。
+硬依赖 requests + 系统 curl（L7 中债通道需要，P11；macOS/Linux 自带）+ 系统 node（V0.5 巨潮抱团度/行业配置线的 enckey 计算与 V0.7.8 报告 PDF 的 EdgeOne 挑战求解，macOS/Linux 常见自带；无 node 时相应函数显式报错不静默）。pandas 可选。pypdf 可选（仅 `reit_report_text` 的 REIT 报告 PDF 转文本需要，缺失时显式报错给安装提示）。L6 穿透自带内嵌股票域通道，无需 a-stock-data 即可跑通；个股深度再加载 a-stock-data。
 
 ## 层 1 · 前置层：统一入口 + 主键表（模块 L1）
 
@@ -283,7 +299,7 @@ pip install requests
 ```python
 # -*- coding: utf-8 -*-
 """
-fund-data V0.8.3 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层 + 基金报告 + 中证全收益指数 + 申万行业指数）
+fund-data V0.8.4 — 基金底层数据工具包（基金主源 + 蛋卷备胎 + 本地计算 + 跨域穿透 + 宏观利率 + 全市场数据层 + 经理画像与专项组装层 + 基金报告 + 中证全收益指数 + 申万行业指数 + 公募REITs）
 
 请求预算契约（防封铁律，详见 SKILL.md 第一章）：
   1. 单基金深度诊断 ≤3 请求（1×pingzhongdata + 0~1×lsjz + 0~1×主页面限额，V0.7.7 起快照含 purchase_limit）
@@ -292,6 +308,10 @@ fund-data V0.8.3 — 基金底层数据工具包（基金主源 + 蛋卷备胎 +
   4. 所有东财/天天请求走 ttfund_get()：串行 + 1.5s 最小间隔 + 会话复用 + 强制 HTTPS
   5. 基金报告清单 1 请求（f10/JJGG，当日缓存）；报告 PDF 下载 1~2 请求/份
      （EdgeOne 挑战自动解，同会话后续通常 1 请求直连，V0.7.8）
+  6. 公募 REITs（V0.8.4）：全市场行情板 1 请求（腾讯）；单只画像 4 请求（腾讯，当日缓存后 0~1）；
+     行情板逐只补净值日期另计 1 请求/只（≥1s 慢节拍、连续 2 败中止、断点续跑）；报告 PDF
+     1~2 请求/份（东财，仅第二段且先问用户）。REIT 不走 fund_snapshot/fund_metrics/qdii_premium
+     （东财净值对 REIT 停在发行价，坑P36）
 
 坑记录（2026-11-05 实测）：
   P1  pingzhongdata 必须 HTTPS（UA 无关）——HTTP 静默返回 0 字节，HTTP 200 照常
@@ -322,6 +342,7 @@ fund-data V0.8.3 — 基金底层数据工具包（基金主源 + 蛋卷备胎 +
       2026-11-06）——中债通道用 subprocess curl（_cb_request），仍计入限流与审计
 """
 import html as _html
+import http.client
 import io
 import json
 import math
@@ -347,7 +368,7 @@ try:  # pandas 可选：仅 fund_metrics 的 DataFrame 输出用到，缺了降�
 except ImportError:
     pd = None
 
-__version__ = "0.8.3"
+__version__ = "0.8.4"
 
 
 FUND_CACHE_DIR = Path.home() / ".fund_data_cache"
@@ -1664,7 +1685,8 @@ def fund_metrics(snapshot: dict, start: str = "", end: str = "",
         adj = [a for a in adj if (not start or a["date"] >= start)
                and (not end or a["date"] <= end)]
     if len(adj) < 2:
-        raise ValueError(f"区间内净值不足 2 个点（{len(adj)}），无法计算指标")
+        raise ValueError(f"区间内净值不足 2 个点（{len(adj)}），无法计算指标"
+                         + _reit_not_applicable((snapshot.get("_meta") or {}).get("code")))
     navs = [a["adj_nav"] for a in adj]
     total_ret = navs[-1] / navs[0] - 1
     days = (datetime.strptime(adj[-1]["date"], "%Y-%m-%d")
@@ -1762,7 +1784,8 @@ def fund_dca_backtest(snapshot: dict, amount: float = 1000.0, freq: str = "month
         adj = [a for a in adj if (not start or a["date"] >= start)
                and (not end or a["date"] <= end)]
     if len(adj) < 2:
-        raise ValueError("区间内净值不足 2 个点，无法回测")
+        raise ValueError("区间内净值不足 2 个点，无法回测"
+                         + _reit_not_applicable((snapshot.get("_meta") or {}).get("code")))
     seen, invest_dates = set(), []
     for a in adj:                                      # 每期首个交易日 = 该期第一条净值
         if freq == "monthly":
@@ -3553,18 +3576,23 @@ def fund_industry_allocation(rdate: str = "", force_refresh: bool = False) -> li
 
 
 def _tencent_kline_page(pre: str, end_date: Optional[str] = None,
-                        bars: Optional[int] = None) -> list[dict]:
+                        bars: Optional[int] = None, fq: str = "qfq") -> list[dict]:
     """腾讯 fqkline 单页拉取（V0.7.6 抽取为翻页协议原子操作）。
 
     param 第 3/4 槽为起止日期：end_date 空=最新页；给定=以该日为页末锚
     （服务端回含锚日的行，与上一页最早行重叠 +1，供缝合校验）。
     页内升序 [{date, close}]；仅支持带 sh/sz 前缀的 6 位码。
     bars 缺省 _TENCENT_KLINE_CAP（体内解析——常量定义在本函数之后，默认参数
-    def 时求值会 NameError）。"""
+    def 时求值会 NameError）。
+    fq：默认 "qfq" 前复权（既有调用方行为不变）；"" = 不复权（V0.8.4 公募 REITs
+    层——腾讯前复权是**减法复权**，除息日前复权价 = 不复权价 − 分红，算分红再投资
+    收益须用不复权收盘价自算；param 尾槽留空，返回键为 day）。"""
+    if fq not in ("qfq", ""):
+        raise ValueError(f"fq 只支持 'qfq'（前复权）或 ''（不复权），收到 {fq!r}")
     if bars is None:
         bars = _TENCENT_KLINE_CAP
     url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
-           f"param={pre},day,,{end_date if end_date else ''},{int(bars)},qfq")
+           f"param={pre},day,,{end_date if end_date else ''},{int(bars)},{fq}")
     raw = None
     for attempt in (1, 2):                        # 瞬态重试1次（对齐 tencent_quote 同通道）
         try:
@@ -3818,6 +3846,12 @@ def qdii_premium(codes: list) -> list[dict]:
     if bad:
         raise ValueError(f"非场内基金码: {bad}；放行前缀为 {sorted(listed_prefixes)}，"
                          "拒绝借用同名股票行情计算假溢价")
+    # V0.8.4（P36）：508/180 号段的公募 REIT 能过号段白名单，但 E6 净值对 REIT 停在
+    # 发行价（180101 恒 2.31@2021）——按它算出约 -40% 的假溢价。拒绝并指路腾讯口径。
+    reits = [c for c in codes if _is_reit(c)[0]]
+    if reits:
+        raise ValueError(f"{reits} 是公募 REIT：东财净值对 REIT 停在发行价，算出的折溢价是假的。"
+                         "请用 reit_profile(code)（腾讯半年频净值，带净值日期）")
     q = tencent_quote(codes)
     e6 = {x["code"]: x for x in fund_realtime_nav(codes)}
     out = []
@@ -6025,6 +6059,1050 @@ def sw_index_components(index_code, force_refresh: bool = False) -> list[dict]:
               " ∉[95,105]（长尾缺行嫌疑），数据照常返回", file=sys.stderr)
     _cache_write(rel, rows)
     return rows
+```
+
+## 层 11 · 公募REITs层（V0.8.4：腾讯基础数据 + 询问后 AI 直读报告）
+
+```python
+# 两段式：第一段只用腾讯拉基础数据（零 PDF）→ AI 先把画像交给用户并询问 → 确认后才进
+# 第二段取报告文本，由 AI 直接读。库里不写任何抽取规则：不正则、不抽值、不缓存读数。
+# 2026-11-26 实测钉死（180101 主锚，508000 沪市交叉）：
+#   · 公募 REIT 不按日披露份额净值（半年频，中期/年度报告）；东财 E2/E6 对 REIT 的净值
+#     停在发行价（180101 恒 2.31@2021）——qdii_premium 据此算出约 -40% 的假溢价（P36）
+#   · 腾讯行情串自带单位净值（第 81 段）与折溢价率（第 77 段），103 只一次批量可取
+#     （URL 956 字符）；净值日期与净值历史取 stockjs.finance.qq.com 的 year_all 静态文件
+#   · 新上市 REIT 的净值是发行价（净值日期 = 成立日，508610：2026-11-03）——输出必带净值日期
+#   · 腾讯前复权是减法复权（除息前 qfq = 不复权 − 分红）——分红再投资收益用不复权收盘自算
+#   · 经营指标/可供分配金额/收入净利润现金流/评估值只在定期报告 PDF：第二段 AI 直读
+
+_REIT_CODE_RE = re.compile(r"508\d{3}|180[1-9]\d{2}|181\d{3}")
+_REIT_HALF_YEAR_ENDS = ("06-30", "12-31")   # 公募 REIT 份额净值的披露节点（中期/年度报告）
+_REIT_NAV_TTL_HOURS = 24               # 净值历史：半年频，当日缓存足够
+_REIT_DIV_TTL_HOURS = 24               # 分红历史：事件频，当日缓存足够
+_REIT_ZONE_TTL_HOURS = 300 / 3600      # 实时概览 5 分钟微缓存（防同会话重复调用连打）
+_REIT_KLINE_TTL_HOURS = 20
+_REIT_KLINE_BARS = 400                 # 不复权日线根数 ≈ 1.6 年（年初至今 + 近一年 + 缓冲）
+_REIT_ANNUAL_READY = (4, 10)           # 年报（12-31 份额净值）披露截止 3 月末，再留 10 天等腾讯更新
+_REIT_INTERIM_READY = (9, 10)          # 中期报告（06-30 份额净值）披露截止 8 月末，再留 10 天
+_REIT_TTM_DAYS = 365
+_REIT_FANOUT_INTERVAL = 1.0            # 逐只补齐的请求间隔下限（秒，另加 0~0.3s 抖动）
+_REIT_FANOUT_MAX_FAILS = 2             # 连续失败 2 次即中止（403/429/熔断另有即时上抛）
+_REIT_QUOTE_CHUNK = 200                # 行情批量每请求代码数（103 只实测单请求）
+_REIT_EMPTY_BACKDATE_HOURS = 18        # 空结果缓存 mtime 回拨 18h → 剩余有效期 6h
+_REIT_TOC_HIT_MIN = 6                  # 一页命中 ≥6 个不同词条 = 疑似目录页
+_REIT_EXTRACTOR = "pypdf-layout-v1"     # 报告文本缓存的抽取方式标记：换抽取方式即自动重抽
+# 连接层失败的归类（防封语义见 _tencent_fund_get / _reit_fill_nav_dates）：http.client.HTTPException
+# 族（坏状态行/残包等）不是 OSError 子类，不单列就会从 OSError 分支漏过去
+_REIT_TRANSPORT_ERRORS = (OSError, http.client.HTTPException)
+_REIT_FANOUT_FAIL_ERRORS = (OSError, http.client.HTTPException, RuntimeError, ValueError)
+# 关键词页码定位词表：上交所《REITs 规则适用指引第 7 号》规定的披露项 + 实测补充。
+# 只用来定位页码，不抽值；泛词（评估/运营管理）实测单份命中 15~30 页，已换成评估值/评估方法
+_REIT_KEYWORDS = ("可供分配金额", "实际分配金额", "现金流分派率", "主要财务指标",
+                  "经营活动产生的现金流量净额", "出租率", "平均租金", "收缴率", "剩余租期",
+                  "车流量", "通行费收入", "发电量", "结算电量", "入住率", "持有人结构",
+                  "份额净值", "评估值", "评估方法", "业态")
+_REIT_READING_TIPS = (
+    "页码一律指 PDF 序号（第 N 页 = PDF 第 N 页），与报告目录的印刷页码有偏移",
+    "表格列多：注意本期、上年同期、本年累计、同比不要串列；金额单位看表头（人民币元/万元）",
+    "读完用 cross_check 对账：单位实际分配 ↔ 腾讯分红史，期末份额净值 ↔ 腾讯净值；对不上先怀疑读串了行列",
+    "keyword_pages 只是定位建议（可能有漏和误），以原文为准",
+)
+_REIT_DETAIL_PROMPT = ("以上是 {code} 的基础画像（腾讯：行情/半年频净值/折溢价/分红史/分红再投资收益）。"
+                       "是否继续读它的定期报告，取经营指标、可供分配金额、收入/净利润/经营现金流等详细数据？"
+                       "这些只在报告 PDF 里：东财 2~3 发（清单 1 + PDF 1~2），由 AI 直接读原文。"
+                       "确认后先 reit_report_text(\"{code}\") 取页码索引，再指定页码读正文。")
+
+
+class _ReitPacer:
+    """REIT 层请求间慢节拍（防封第一位）：首发不等，其后每次网络命中前先等
+    _REIT_FANOUT_INTERVAL + 0~0.3s 抖动。叠在协调器 0.2s 腾讯地板之上——全市场逐只
+    补齐 103 发按约 1 发/秒出，不打成突发；只在真正发请求前等，缓存命中不空等。"""
+
+    def __init__(self):
+        self.sent = 0
+
+    def wait(self):
+        if self.sent:
+            time.sleep(_REIT_FANOUT_INTERVAL + random.uniform(0, 0.3))
+        self.sent += 1
+
+
+def _reit_code(value) -> str:
+    """归一化 REIT 代码：sh/sz 前缀可选 → 6 位数字；非法抛 ValueError。"""
+    c = str(value or "").strip().lower()
+    for pre in ("sh", "sz", "bj"):
+        if c.startswith(pre):
+            c = c[len(pre):]
+    if not re.fullmatch(r"\d{6}", c):
+        raise ValueError(f"REIT 代码须为 6 位数字（可带 sh/sz 前缀），收到 {value!r}")
+    return c
+
+
+def _is_reit(code, allow_load: bool = True) -> tuple[bool, str]:
+    """是不是公募 REIT → (是否, 依据)。
+
+    依据 fund_list：清单类型列是 Reits；code_pattern：清单没这么说（新上市未进 30 天缓存
+    清单、清单没装载，或上游改了类型串），但代码落在 508xxx / 180[1-9]xx / 181xxx——号段
+    是交易所分配给 REIT 的，形态命中即判 REIT：2026-11-26 实测命中全部 103 只，180 号段的
+    15 只非 REIT 全是 1800xx，零误判（180 号段不可整体当 REIT）。类型串哪怕改名
+    （Reits→REIT），qdii_premium 的假溢价防线也不失效。其余 not_reit / not_code。
+    allow_load=True（网络函数用）：清单未装载时经 fund_list() 加载（磁盘缓存命中 0 请求，
+    冷时东财 1 请求）。清单取不到（东财熔断/网络失败）不在此处上抛——降级到形态判断：
+    东财故障不该拦住纯腾讯的 reit_profile；真要打东财的调用方（qdii_premium）会在它自己的
+    东财调用点如实抛出。
+    allow_load=False（零网络函数用）：只看进程内已装载的清单（_FUND_LIST_MEM），没装载
+    就直接按形态判断，绝不触发加载——否则 fund_metrics 这类「零网络」函数会在报错分支
+    里发请求、带上重试与等待。"""
+    try:
+        c = _reit_code(code)
+    except ValueError:
+        return (False, "not_code")
+    if allow_load:
+        try:
+            source = fund_list()
+        except Exception:
+            source = None
+    else:
+        source = _FUND_LIST_MEM
+    row = next((f for f in (source or []) if f.get("code") == c), None)
+    if row is not None and str(row.get("type") or "").strip().lower() == "reits":
+        return (True, "fund_list")
+    if _REIT_CODE_RE.fullmatch(c):
+        return (True, "code_pattern")              # 号段命中即判 REIT，不因清单类型串改名而漏拦
+    return (False, "fund_list" if row is not None else "not_reit")
+
+
+def _reit_not_applicable(code) -> str:
+    """REIT 走到净值类工具的报错分支时追加的指路文案；非 REIT 或判定失败返回空串
+    （指路文案绝不让原本的报错变形）。只看进程内已装载的清单与代码形态：零网络、
+    零加载——本函数被 fund_metrics / fund_dca_backtest（L5 零网络层）的报错分支调用。"""
+    try:
+        hit, _ = _is_reit(code, allow_load=False)
+    except Exception:
+        return ""
+    if not hit:
+        return ""
+    return (f"。{code} 是公募 REIT：不按日披露份额净值（东财净值停在发行价），净值类指标不适用"
+            "——请用 reit_profile(code)（腾讯半年频净值 + 分红再投资收益）")
+
+
+def _reit_num(value) -> Optional[float]:
+    """字段 → 数值；空串/非数值/非有限数返回 None。REIT 行不用 tencent_quote 的 0.0
+    约定——净值缺失必须是 None，0.0 会被当成真净值算出 -100% 的折溢价。"""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _reit_iso_date(value) -> Optional[str]:
+    text = str(value or "").strip()
+    return text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else None
+
+
+def _tencent_fund_get(url: str, referer: bool = True) -> bytes:
+    """腾讯基金页接口取原始字节：经 _tencent_raw（许可/配额/403·429 分流/P12 直连）。
+    瞬态网络错退避 2s 重试 1 次（tencent_quote 同口径）；有状态码失败与风控信号不重试
+    ——HTTPError 是 OSError 子类，须先于 OSError 捕获；http.client.HTTPException 族
+    （坏状态行/残包）不是 OSError，须单列，否则既不重试也会炸穿行情板的逐只补齐。"""
+    headers = {"User-Agent": UA}
+    if referer:
+        headers["Referer"] = "https://gu.qq.com/"
+    for attempt in (1, 2):
+        try:
+            return _tencent_raw(url, headers=headers)
+        except urllib.error.HTTPError:
+            raise
+        except _REIT_TRANSPORT_ERRORS:
+            if attempt == 2:
+                raise
+            time.sleep(2.0)
+
+
+def _reit_quote_time(raw) -> Optional[str]:
+    """行情串第 30 段 20261126120530 → 2026-11-26 12:05:30；形态不符返回 None。"""
+    t = str(raw or "").strip()
+    if not re.fullmatch(r"\d{14}", t):
+        return None
+    return f"{t[:4]}-{t[4:6]}-{t[6:8]} {t[8:10]}:{t[10:12]}:{t[12:]}"
+
+
+def _parse_reit_quotes(text: str) -> dict[str, dict]:
+    """腾讯批量行情响应（GBK 已解码）→ {6 位代码: 行情字段}（纯函数）。
+
+    字段位 2026-11-26 实测（88 段/行，沪深 REIT 同构）：1 名称 / 3 现价 / 4 昨收 / 5 今开 /
+    30 行情时间 / 32 涨跌% / 33 最高 / 34 最低 / 36 成交量(手) / 37 成交额(万) / 38 换手率% /
+    45 总市值(亿) / 77 折溢价率% / 81 单位净值。不足 82 段时净值与折溢价留空不抛；
+    有行但 0 行解析成功 = 疑似字段结构变更，拒绝静默空。"""
+    out, lines = {}, 0
+    for line in text.split(";"):
+        if '="' not in line:
+            continue
+        v = line.split('="', 1)[1].split("~")
+        if len(v) < 4:
+            continue
+        lines += 1
+        code = v[2].strip()
+        if not re.fullmatch(r"\d{6}", code):
+            continue
+
+        def f(i):
+            return _reit_num(v[i]) if i < len(v) else None
+
+        row = {"code": code, "name": v[1].strip(), "price": f(3), "last_close": f(4),
+               "open": f(5), "quote_time": _reit_quote_time(v[30] if len(v) > 30 else None),
+               "change_pct": f(32), "high": f(33), "low": f(34), "volume_lots": f(36),
+               "amount_wan": f(37), "turnover_pct": f(38), "mcap_yi": f(45),
+               "nav": f(81), "premium_pct": f(77)}
+        out[code] = row
+    if lines and not out:
+        raise RuntimeError(f"腾讯 REIT 行情响应含 {lines} 行但 0 行解析成功——疑似字段结构变更，拒绝静默空")
+    return out
+
+
+def _parse_reit_nav_history(text: str) -> list[dict]:
+    """腾讯净值历史 year_all 静态文件 → [{date, nav, acc_nav}] 升序（纯函数）。
+
+    原文形态 fundNavAllYearData={"code": "jj180101", "data": [["20260630", "2.1141",
+    "2.5299"], ...], "name": ...}（JSON，中文为转义形式）。公募 REIT 不按日披露份额净值，实测
+    半年频：180101 共 11 点，2021-06-07 的 2.3100 → 2026-06-30 的 2.1141，与中报份额净值
+    逐位一致。空 data 返回空列表；单行畸形/日期重复/净值非正数拒绝（拒绝静默错）。"""
+    brace = text.find("{")
+    if brace < 0:
+        raise UpstreamFormatError(f"腾讯净值历史无 JSON 对象: {text[:60]!r}")
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text[brace:])
+    except ValueError as e:
+        raise UpstreamFormatError(f"腾讯净值历史非 JSON: {text[:60]!r}") from e
+    rows = obj.get("data") if isinstance(obj, dict) else None
+    if not isinstance(rows, list):
+        raise UpstreamFormatError("腾讯净值历史缺 data 列表（疑似上游改版）")
+    out, seen = [], set()
+    for x in rows:
+        day = str(x[0]) if isinstance(x, list) and x else ""
+        nav = _reit_num(str(x[1])) if isinstance(x, list) and len(x) > 1 else None
+        if not re.fullmatch(r"\d{8}", day) or nav is None or nav <= 0:
+            raise UpstreamFormatError(f"腾讯净值历史行畸形: {x!r}")
+        if day in seen:
+            raise UpstreamFormatError(f"腾讯净值历史日期重复: {day}")
+        seen.add(day)
+        acc = _reit_num(x[2]) if len(x) > 2 and x[2] not in (None, "") else None
+        out.append({"date": f"{day[:4]}-{day[4:6]}-{day[6:]}", "nav": nav, "acc_nav": acc})
+    out.sort(key=lambda r: r["date"])
+    return out
+
+
+def _parse_reit_zone(text: str, code: str) -> dict:
+    """腾讯基金实时概览 getPriceZone → {quote, nav, basic, totals}（纯函数）。
+
+    原文三层：data.data 行情（zxjg 现价 / jtkp 今开 / zgj 最高 / zdj 最低 / ztsp 昨收 /
+    cjl 成交量(手) / cj_total_amount 成交额(万) / jgzffd 涨跌% / zyjl 折溢价率(小数) /
+    update_time），data.info 基本信息 21 字段，data.profit 累计分红。
+    只暴露核实过的字段——**不返回**：fxrq「发行日期」（实为最近一次发行，180101 显示
+    2023-05-24 是扩募日）、clgm「成立规模」（单位不明）、sgzt/shzt 申购赎回状态
+    （对 REIT 恒显示「开放」，是错的）。zxgm「最新规模」单位万元（180101 实测 300439
+    万元 = 中报净资产 30.04 亿）。jjdm 与请求代码不符 = 串台，拒绝。"""
+    try:
+        obj = json.loads(text)
+    except ValueError as e:
+        raise UpstreamFormatError(f"腾讯实时概览非 JSON（{code}）: {text[:60]!r}") from e
+    if not isinstance(obj, dict) or obj.get("code") not in (0, "0"):
+        raise UpstreamFormatError(f"腾讯实时概览业务码异常（{code}）: {str(obj)[:60]!r}")
+    data = obj.get("data") if isinstance(obj.get("data"), dict) else {}
+    live, info, profit = data.get("data"), data.get("info"), data.get("profit")
+    if not (isinstance(live, dict) and isinstance(info, dict) and isinstance(profit, dict)):
+        raise UpstreamFormatError(f"腾讯实时概览缺 data/data·info/profit 段（{code}）——疑似上游改版")
+    if info.get("jjdm") and str(info.get("jjdm")).strip() != code:
+        raise UpstreamFormatError(f"腾讯实时概览串台：请求 {code} 返回 jjdm={info.get('jjdm')!r}")
+    tx_premium = _reit_num(live.get("zyjl"))
+    return {
+        "quote": {"price": _reit_num(live.get("zxjg")), "open": _reit_num(live.get("jtkp")),
+                  "high": _reit_num(live.get("zgj")), "low": _reit_num(live.get("zdj")),
+                  "last_close": _reit_num(live.get("ztsp")),
+                  "volume_lots": _reit_num(live.get("cjl")),
+                  "amount_wan": _reit_num(live.get("cj_total_amount")),
+                  "change_pct": _reit_num(live.get("jgzffd")),
+                  "premium_pct": round(tx_premium * 100, 4) if tx_premium is not None else None,
+                  "time": live.get("update_time")},
+        "nav": {"nav": _reit_num(info.get("dwjz")), "nav_date": _reit_iso_date(info.get("jzrq")),
+                "acc_nav": _reit_num(info.get("ljjz"))},
+        "basic": {"code": code, "full_name": info.get("jjqc"), "short_name": info.get("jjjc"),
+                  "established": _reit_iso_date(info.get("clrq")),
+                  "manager_company": info.get("glrmc"), "custodian": info.get("tgrmc"),
+                  "managers": info.get("jjjl"), "latest_scale_wan": _reit_num(info.get("zxgm"))},
+        "totals": {"dividend_per_unit": _reit_num(profit.get("ljfh")),
+                   "dividend_count": _reit_num(profit.get("ljfhcs"))},
+    }
+
+
+def _parse_reit_dividends(text: str, sym: str) -> list[dict]:
+    """腾讯分红历史 getProfitHistory → [{ex_date, per_unit}] 新→旧（纯函数）。
+
+    原文形态 data.{sym}.{total, data:[{date: 除息日, fh: 每份分红}]}——180101 实测 13 条，
+    日期与东财分红表逐条一致（180102 亦逐条核对）。没有分红的新 REIT 节点缺失或
+    data 为空 → 空列表。行畸形/除息日重复/金额非正数拒绝。"""
+    try:
+        obj = json.loads(text)
+    except ValueError as e:
+        raise UpstreamFormatError(f"腾讯分红历史非 JSON（{sym}）: {text[:60]!r}") from e
+    if not isinstance(obj, dict) or obj.get("code") not in (0, "0"):
+        raise UpstreamFormatError(f"腾讯分红历史业务码异常（{sym}）: {str(obj)[:60]!r}")
+    data = obj.get("data")
+    if not isinstance(data, dict):
+        raise UpstreamFormatError(f"腾讯分红历史缺 data（{sym}）——疑似上游改版")
+    node = data.get(sym)
+    if node is None and len(data) == 1:                 # 节点键形态漂移：仅此一节点时直接采用
+        node = next(iter(data.values()))
+    if node is None:
+        if data:
+            raise UpstreamFormatError(f"腾讯分红历史无 {sym} 节点: {list(data)[:3]}")
+        return []
+    rows = node.get("data") if isinstance(node, dict) else None
+    if rows is None and isinstance(node, dict) and "total" in node:
+        rows = []                                        # total 在而 data 缺席 = 没有分红
+    if not isinstance(rows, list):
+        raise UpstreamFormatError(f"腾讯分红历史缺 data 列表（{sym}）")
+    out = []
+    for x in rows:
+        ex_date = str(x.get("date")) if isinstance(x, dict) else ""
+        per_unit = _reit_num(x.get("fh")) if isinstance(x, dict) else None
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", ex_date) or per_unit is None or per_unit <= 0:
+            raise UpstreamFormatError(f"腾讯分红历史行畸形（{sym}）: {x!r}")
+        out.append({"ex_date": ex_date, "per_unit": round(per_unit, 6)})
+    if len({r["ex_date"] for r in out}) != len(out):
+        raise UpstreamFormatError(f"腾讯分红历史除息日重复（{sym}）")
+    out.sort(key=lambda r: r["ex_date"], reverse=True)
+    return out
+
+
+def _reit_backdate(rel: str, hours: float) -> None:
+    """缓存文件 mtime 回拨 hours（缩短剩余有效期：空结果/未取到不该占满 TTL）。"""
+    p = FUND_CACHE_DIR / rel
+    try:
+        if p.exists():
+            back = time.time() - hours * 3600
+            os.utime(p, (back, back))
+    except OSError:
+        pass
+
+
+def _reit_nav_history(code: str, force_refresh: bool = False, pacer=None) -> dict:
+    """腾讯净值历史（1 请求，24h 缓存）→ {code, history:[{date,nav,acc_nav}], note, fetched_at}。
+    404 = 腾讯没有该代码的静态文件（新上市未生成）→ 空历史，缓存有效期缩为 6h。"""
+    rel = f"reits/navhist/{code}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=_REIT_NAV_TTL_HOURS)
+        if cached is not None and isinstance(cached.get("history"), list):
+            return cached
+    if pacer is not None:
+        pacer.wait()
+    note = None
+    try:
+        url = f"https://stockjs.finance.qq.com/fundUnitNavAll/data/year_all/{code}.js"
+        history = _parse_reit_nav_history(_tencent_fund_get(url).decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        history, note = [], "腾讯没有该代码的净值历史文件（HTTP 404：新上市未生成，或代码有误）"
+    else:
+        _cbreak_success("tencent")
+    payload = {"code": code, "history": history, "note": note,
+               "fetched_at": datetime.now(_BJ_TZ).isoformat(timespec="seconds")}
+    _cache_write(rel, payload)
+    if not history:
+        _reit_backdate(rel, _REIT_EMPTY_BACKDATE_HOURS)
+    return payload
+
+
+def _reit_zone(pre: str, force_refresh: bool = False, pacer=None) -> dict:
+    """腾讯基金实时概览（1 请求，5 分钟微缓存）：行情 + 净值日期 + 基本信息 + 累计分红。"""
+    code = pre[2:]
+    rel = f"reits/zone/{code}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=_REIT_ZONE_TTL_HOURS)
+        if cached is not None and isinstance(cached.get("zone"), dict):
+            return cached["zone"]
+    if pacer is not None:
+        pacer.wait()
+    url = f"https://web.ifzq.gtimg.cn/fund/newfund/fundBase/getPriceZone?symbol={pre}"
+    zone = _parse_reit_zone(_tencent_fund_get(url).decode("utf-8", errors="replace"), code)
+    _cbreak_success("tencent")
+    _cache_write(rel, {"code": code,
+                       "fetched_at": datetime.now(_BJ_TZ).isoformat(timespec="seconds"),
+                       "zone": zone})
+    return zone
+
+
+def _reit_dividends(pre: str, force_refresh: bool = False, pacer=None) -> dict:
+    """腾讯分红历史（1 请求，24h 缓存）→ {code, history:[{ex_date,per_unit}] 新→旧}。"""
+    code = pre[2:]
+    rel = f"reits/div/{code}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=_REIT_DIV_TTL_HOURS)
+        if cached is not None and isinstance(cached.get("history"), list):
+            return cached
+    if pacer is not None:
+        pacer.wait()
+    url = ("https://web.ifzq.gtimg.cn/fund/newfund/fundProfit/getProfitHistory"
+           f"?app=web&symbol={pre}")
+    history = _parse_reit_dividends(_tencent_fund_get(url).decode("utf-8", errors="replace"), pre)
+    _cbreak_success("tencent")
+    payload = {"code": code, "history": history,
+               "fetched_at": datetime.now(_BJ_TZ).isoformat(timespec="seconds")}
+    _cache_write(rel, payload)
+    return payload
+
+
+def _reit_kline_raw(pre: str, force_refresh: bool = False, pacer=None) -> list[dict]:
+    """不复权日线收盘 [{date, close}] 升序（1 请求，20h 缓存）。
+
+    当日盘中 bar 剔除——收益指标只算到上一收盘，缓存期内不会冻结一个盘中价；
+    所以返回可能比请求根数少 1。上市不足 2 个交易日时不足 2 行，由调用方如实标注。
+    空返回（今日才上市，或上游异常）**不缓存**——否则一次异常空响应会把这只 REIT 的
+    收益指标钉死 20 小时。"""
+    rel = f"reits/kline_raw/{pre[2:]}_{_REIT_KLINE_BARS}.json"
+    if not force_refresh:
+        cached = _cache_read(rel, max_age_hours=_REIT_KLINE_TTL_HOURS)
+        if isinstance(cached, list) and cached:
+            return cached
+    if pacer is not None:
+        pacer.wait()
+    today = datetime.now(_BJ_TZ).date().isoformat()
+    rows = [r for r in _tencent_kline_page(pre, bars=_REIT_KLINE_BARS, fq="") if r["date"] < today]
+    _cbreak_success("tencent")
+    if rows:
+        _cache_write(rel, rows)
+    return rows
+
+
+def _reit_nav_expected(today: str) -> str:
+    """最近一个「披露截止日已过」的半年末（纯函数）——今天理应能拿到的最新净值日期。
+
+    公募 REIT 的份额净值半年披露一次：年报（12-31 净值）截止次年 3 月末，中期报告
+    （06-30 净值）截止 8 月末；各再留 10 天等腾讯把新净值补上。"""
+    y = int(today[:4])
+    md = (int(today[5:7]), int(today[8:]))
+    if md >= _REIT_INTERIM_READY:
+        return f"{y}-06-30"
+    if md >= _REIT_ANNUAL_READY:
+        return f"{y - 1}-12-31"
+    return f"{y - 1}-06-30"
+
+
+def _reit_nav_meta(nav_date, established, today: str) -> dict:
+    """净值种类与过期判定（纯函数）。
+
+    nav_kind：issue_price = 净值日期等于成立日（份额净值尚未披露，这个「净值」是发行价，
+    折溢价须读作「相对发行价」）；report = 来自中期/年度报告的份额净值；unknown = 没有
+    净值日期。只知道净值日期时（行情板逐只补齐）：半年末 → report，否则推断为发行价并
+    标 nav_kind_inferred=True（以 reit_profile 的成立日核对为准）。
+    nav_stale：净值日早于 nav_expected（最近一个已过披露截止日的半年末）——该出的报告
+    净值腾讯还没有。按披露截止判而不是「距今 N 天」：12-31 的净值要到次年 3 月末才更新，
+    固定天数阈值每年 1~3 月和 8 月都会把正常状态误报成过期。新上市同理：成立日早于
+    nav_expected 却还挂着发行价，说明首份定期报告的净值没跟上。"""
+    expected = _reit_nav_expected(today)
+    if not nav_date:
+        return {"nav_kind": "unknown", "nav_kind_basis": "没有净值日期", "nav_kind_inferred": False,
+                "nav_stale": None, "nav_age_days": None, "nav_expected": expected}
+    if established and nav_date == established:
+        kind, basis, inferred = "issue_price", "净值日期等于成立日：份额净值尚未披露，净值是发行价", False
+    elif established:
+        kind, basis, inferred = "report", "净值日期晚于成立日：来自定期报告的份额净值", False
+    elif nav_date[5:] in _REIT_HALF_YEAR_ENDS:
+        kind, basis, inferred = "report", "净值日期是半年末：来自中期/年度报告的份额净值", False
+    else:
+        kind, basis, inferred = "issue_price", "净值日期不是半年末：推断为发行价（新上市，以成立日核对为准）", True
+    age = (date.fromisoformat(today) - date.fromisoformat(nav_date)).days
+    return {"nav_kind": kind, "nav_kind_basis": basis, "nav_kind_inferred": inferred,
+            "nav_stale": nav_date < expected, "nav_age_days": age, "nav_expected": expected}
+
+
+def _reit_ttm_dividend(history: list[dict], as_of: str) -> dict:
+    """近 12 个月（as_of 往前 365 天，含两端）除息的每份分红合计与次数（纯函数）。
+
+    没有分红时 per_unit=None 而不是 0——REIT 一年分红 1~4 次且有跨期调配，0 会被误读成
+    「不分红」。上市不足一年时窗口内只有上市后的分红，口径不完整，count 供调用方判断。"""
+    start = (date.fromisoformat(as_of) - timedelta(days=_REIT_TTM_DAYS)).isoformat()
+    rows = [d for d in history if start <= d["ex_date"] <= as_of]
+    return {"window": [start, as_of], "count": len(rows),
+            "per_unit": round(sum(d["per_unit"] for d in rows), 6) if rows else None,
+            "ex_dates": [d["ex_date"] for d in rows]}
+
+
+def _reit_dividends_by_year(history: list[dict]) -> dict:
+    """分红史按除息日所在年份聚合 → {年: {per_unit, count}}（纯函数）。"""
+    by_year = {}
+    for d in history:
+        item = by_year.setdefault(d["ex_date"][:4], {"per_unit": 0.0, "count": 0})
+        item["per_unit"] = round(item["per_unit"] + d["per_unit"], 6)
+        item["count"] += 1
+    return by_year
+
+
+def _reit_total_return(kline: list[dict], dividends: list[dict]) -> tuple[list[dict], list[dict]]:
+    """不复权收盘 + 分红历史 → 分红再投资序列 [{date, nav}]（纯函数），并返回被跳过的分红。
+
+    除息日当日收益率 = (收盘价 + 每份分红) ÷ 前一日收盘价 − 1，逐日连乘；首点 = 首日收盘价。
+    腾讯前复权是减法复权，不能拿来做分红再投资，故用不复权收盘自算。除息日落在日线
+    区间内却不在日线里（数据缺行）的分红跳过并返回，调用方标注——绝不悄悄漏掉一笔分红。"""
+    div_by_date = {d["ex_date"]: d["per_unit"] for d in dividends}
+    series, level, prev_close = [], None, None
+    for row in kline:
+        if level is None:
+            level = row["close"]
+        else:
+            level = level * (row["close"] + div_by_date.get(row["date"], 0.0)) / prev_close
+        series.append({"date": row["date"], "nav": level})
+        prev_close = row["close"]
+    skipped = []
+    if series:
+        kdates = {r["date"] for r in kline}
+        skipped = [d for d in dividends
+                   if series[0]["date"] < d["ex_date"] <= series[-1]["date"]
+                   and d["ex_date"] not in kdates]
+    return series, skipped
+
+
+def _reit_window_metrics(series: list[dict], start: str) -> Optional[dict]:
+    """以 start 之前最后一个完成 bar 为基点的区间指标（复用 fund_metrics，零网络）。
+
+    基点取 start 前一 bar，年初至今才是「自上年末收盘起算」而非「自今年首个收盘起算」。
+    序列起点不早于 start（上市晚于窗口起点）= 窗口不完整，返回 None 不硬造。"""
+    i = sum(1 for r in series if r["date"] < start)
+    if i < 1 or len(series) - i < 1:
+        return None
+    return fund_metrics({"nav_history": series[i - 1:]})
+
+
+def _reit_cn10y_cache() -> Optional[dict]:
+    """只读国债缓存里日期最新的 10 年期国债收益率（零请求）。
+
+    扫 macro/tsy_*.json 里未过期（20h）的缓存，取日期最新一行；值域守卫 (0,15)。
+    没有缓存返回 None——REIT 利差不为此发东财请求。"""
+    best = None
+    macro_dir = FUND_CACHE_DIR / "macro"
+    if not macro_dir.is_dir():
+        return None
+    for p in sorted(macro_dir.glob("tsy_*.json")):
+        if not re.fullmatch(r"tsy_\d+\.json", p.name):
+            continue
+        rows = _cache_read(f"macro/{p.name}", max_age_hours=SNAPSHOT_TTL_HOURS)
+        if not isinstance(rows, list):
+            continue
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            day = str(r.get("SOLAR_DATE") or r.get("date") or "")[:10]
+            val = _reit_num(r.get("EMM00166466", r.get("cn_10y")))
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) or val is None or not 0 < val < 15:
+                continue
+            if best is None or day > best["date"]:
+                best = {"date": day, "cn_10y": val}
+    return best
+
+
+def _reit_fill_nav_dates(rows: list[dict], force_refresh: bool, pacer, today: str) -> None:
+    """行情板逐只补净值日期（就地写回 rows；防封逻辑都在这里）。
+
+    每只先读当日缓存，缺的才发 1 请求（_ReitPacer 慢节拍）。RiskControlError（403/429/
+    配额背压）与 CircuitOpenError（熔断闸门拒绝——两者是平级异常，不是父子关系，须分别
+    列出）立即上抛，绝不带着被拒的连接继续打；其余失败（网络/结构）连续
+    _REIT_FANOUT_MAX_FAILS 次即中止——已取到的留在缓存，下次调用只补缺的（断点续跑）。
+    中止后余下各行仍先用当日缓存填，实在没有的才标「未取」——缓存里有数据却报缺失是误导。
+    force_refresh=True：净值历史绕过缓存重取（行情批本就不缓存，每次都是实时）。"""
+    def _cached(code):
+        if force_refresh:
+            return None
+        hist = _cache_read(f"reits/navhist/{code}.json", max_age_hours=_REIT_NAV_TTL_HOURS)
+        return hist if isinstance(hist, dict) and isinstance(hist.get("history"), list) else None
+
+    def _apply(row, hist):
+        if not hist["history"]:
+            row["notes"].append(hist.get("note") or "腾讯净值历史为空")
+            return
+        last = hist["history"][-1]
+        meta = _reit_nav_meta(last["date"], None, today)
+        row.update(nav_date=last["date"], nav_kind=meta["nav_kind"], nav_stale=meta["nav_stale"])
+        if row["nav"] is None:
+            row["nav"] = last["nav"]
+        elif abs(row["nav"] - last["nav"]) > 0.00005:
+            row["notes"].append(f"行情串净值 {row['nav']} 与净值历史末点 {last['nav']}"
+                                f"（{last['date']}）不一致，折溢价按行情串净值")
+        if meta["nav_kind_inferred"]:
+            row["notes"].append(meta["nav_kind_basis"])
+
+    fails, last_error = 0, None
+    for i, row in enumerate(rows):
+        hist = _cached(row["code"])
+        if hist is None:
+            try:
+                hist = _reit_nav_history(row["code"], force_refresh=force_refresh, pacer=pacer)
+            except (RiskControlError, CircuitOpenError):
+                raise                             # 风控/熔断/背压：立即停（F6 契约）
+            except _REIT_FANOUT_FAIL_ERRORS as e:
+                fails += 1
+                last_error = f"{type(e).__name__}: {str(e)[:60]}"
+                row["notes"].append(f"净值历史取数失败（{type(e).__name__}）")
+                if fails >= _REIT_FANOUT_MAX_FAILS:
+                    for rest in rows[i + 1:]:
+                        rest_hist = _cached(rest["code"])
+                        if rest_hist is None:
+                            rest["notes"].append(f"净值日期未取（补齐已中止：连续 {fails} 次失败，"
+                                                 "已取到的在当日缓存，下次调用只补缺的）")
+                        else:
+                            _apply(rest, rest_hist)
+                    print(f"[fund_data] 警告：REIT 净值日期补齐中止（连续 {fails} 次失败，"
+                          f"最后错误 {last_error}），已完成 {i + 1 - fails}/{len(rows)} 只",
+                          file=sys.stderr)
+                    return
+                continue
+            fails = 0
+        _apply(row, hist)
+
+
+def _reit_premium_basis(row: dict) -> Optional[str]:
+    """折溢价的比较基准文案；没有净值时为 None。"""
+    if not row.get("nav"):
+        return None
+    if row.get("nav_kind") == "issue_price":
+        return f"相对发行价 {row['nav']}（净值日期 {row.get('nav_date')}）"
+    if row.get("nav_date"):
+        return f"相对 {row['nav_date']} 份额净值 {row['nav']}"
+    return "相对腾讯净值（净值日期未取：传 with_nav_date=True 或对单只用 reit_profile）"
+
+
+def reit_board(force_refresh: bool = False, with_nav_date: bool = False) -> list[dict]:
+    """全市场公募 REITs 行情板（腾讯 1 请求）。
+
+    默认不逐只补净值日期（with_nav_date=False）。清单取 fund_list() 里类型为 Reits 的
+    基金（东财缓存 30 天，冷时 1 请求）；腾讯行情串一次批量取回现价/涨跌/开高低/成交量额/
+    换手/总市值 + 单位净值 + 折溢价率。按代码升序，每行 {code, name, price, change_pct,
+    open, high, low, volume_lots, amount_wan, turnover_pct, mcap_yi, nav, premium_pct,
+    nav_date, nav_kind, nav_stale, premium_basis, quote_time, notes}。
+    with_nav_date=False（默认，防封第一）：只发 1 请求；折溢价是腾讯按最新可得净值算的，
+    但不知道净值是哪天的（nav_kind="unknown"）——全市场初筛够用，入围标的再 reit_profile。
+    with_nav_date=True：逐只补净值历史拿净值日期，1 请求/只（103 只按 1 发/秒约 2 分钟，
+    当日缓存）。force_refresh=True：净值历史绕过当日缓存重取（行情批本就每次实时）。
+    ⚠️ 净值是半年频：折溢价相对的是旧净值，必须连同 nav_date / nav_kind 一起解读。
+    ⚠️ 行情无返回的代码（未上市/代码变更）保留在板内，价格为空并在 notes 说明。"""
+    universe = sorted((f for f in fund_list()
+                       if str(f.get("type") or "").strip().lower() == "reits"),
+                      key=lambda f: str(f.get("code")))
+    if not universe:
+        raise RuntimeError("基金清单里没有类型为 Reits 的基金（2026-11 实测 103 只）"
+                           "——疑似上游类型字段变更，拒绝静默空")
+    codes = [str(f["code"]) for f in universe]
+    pacer = _ReitPacer()
+    quotes = {}
+    for i in range(0, len(codes), _REIT_QUOTE_CHUNK):
+        pacer.wait()
+        url = "https://qt.gtimg.cn/q=" + ",".join(
+            _tencent_prefix(c) for c in codes[i:i + _REIT_QUOTE_CHUNK])
+        quotes.update(_parse_reit_quotes(_tencent_fund_get(url, referer=False).decode(
+            "gbk", errors="replace")))
+    if not quotes:
+        raise RuntimeError(f"腾讯 REIT 行情批量返回 0 行（{len(codes)} 只）——疑似上游变更，拒绝静默空")
+    _cbreak_success("tencent")
+    rows = []
+    for f in universe:
+        q = quotes.get(str(f["code"])) or {}
+        row = {"code": str(f["code"]), "name": q.get("name") or f.get("name"),
+               "price": q.get("price"), "change_pct": q.get("change_pct"), "open": q.get("open"),
+               "high": q.get("high"), "low": q.get("low"), "volume_lots": q.get("volume_lots"),
+               "amount_wan": q.get("amount_wan"), "turnover_pct": q.get("turnover_pct"),
+               "mcap_yi": q.get("mcap_yi"), "nav": q.get("nav"),
+               "premium_pct": q.get("premium_pct"), "nav_date": None, "nav_kind": "unknown",
+               "nav_stale": None,
+               "premium_basis": None, "quote_time": q.get("quote_time"), "notes": []}
+        if not q:
+            row["notes"].append("腾讯行情无返回（未上市或代码变更）")
+        rows.append(row)
+    if with_nav_date:
+        _reit_fill_nav_dates(rows, force_refresh, pacer,
+                             datetime.now(_BJ_TZ).date().isoformat())
+    for row in rows:
+        row["premium_basis"] = _reit_premium_basis(row)
+    return rows
+
+
+def reit_profile(code, force_refresh: bool = False, macro: str = "cache") -> dict:
+    """单只公募 REIT 基础画像（腾讯 4 请求）。
+
+    当日缓存后 0~1 请求（实时概览 5 分钟微缓存）；零 PDF。东财 0~1 请求（仅基金清单
+    冷加载）。返回 {code, name, as_of, basic, quote, nav, premium, dividends, returns,
+    spread, notes, detail_prompt, requests}。
+    basic：全称/简称/成立日/管理人/托管人/经理/最新规模（只暴露核实过的腾讯字段）。
+    nav：最新净值、净值日期、nav_kind（issue_price=净值日期等于成立日，这个净值是发行价；
+    report=定期报告份额净值）、nav_stale（净值日早于最近一个已过披露截止日的半年末：
+    年报截止 3 月末、中报截止 8 月末，各留 10 天）、单位与累计净值历史。
+    premium：折溢价率与 P/NAV，basis 写明相对哪天的净值。
+    dividends：全部分红（除息日/每份）、累计、分年合计、近 12 个月每份分红与派息率
+    （除息日落在近 365 天内的合计 ÷ 现价；没有分红返回 None 不返回 0）。
+    returns：分红再投资口径（不复权收盘 + 除息日加回分红，逐日连乘后复用 fund_metrics）
+    的年初至今、近一年、最大回撤、年化波动；窗口不完整（上市不足一年）返回 None 并说明。
+    spread：近 12 个月派息率 − 10 年期国债，单位基点。macro="cache"（默认）只读国债缓存，
+    没有缓存时 spread 里 cn_10y 为空并提示先调 treasury_yield_daily()；macro="fetch" 才发
+    东财 1 请求（风控异常照常上抛）。
+    requests：本次调用真实发出的请求数（按请求账本前后差值，含清单冷加载）。
+    detail_prompt：交给用户后照着问的文案——确认后才进第二段 reit_report_text。
+    ⚠️ 净值是半年频：折溢价相对的是旧净值，必须连同 nav_date / nav_kind 一起解读。"""
+    if macro not in ("cache", "fetch"):
+        raise ValueError(f"macro 只支持 'cache'（只读国债缓存，默认）或 'fetch'（允许东财 1 请求），"
+                         f"收到 {macro!r}")
+    c = _reit_code(code)
+    tx0, tt0 = TENCENT_REQUEST_COUNT[0], TT_REQUEST_COUNT[0]   # 基线取在识别之前：清单冷加载也算数
+    hit, basis = _is_reit(c)
+    if not hit:
+        raise ValueError(f"{c} 不是公募 REIT（依据：{basis}）。普通基金请走 fund_snapshot / fund_metrics")
+    pre = _tencent_prefix(c)
+    today = datetime.now(_BJ_TZ).date().isoformat()
+    pacer, notes = _ReitPacer(), []
+    zone = _reit_zone(pre, force_refresh, pacer)
+    hist = _reit_nav_history(c, force_refresh, pacer)
+    divs = _reit_dividends(pre, force_refresh, pacer)
+    kline = _reit_kline_raw(pre, force_refresh, pacer)
+
+    basic = zone["basic"]
+    price = zone["quote"].get("price")
+    nav_date, nav, acc_nav = zone["nav"]["nav_date"], zone["nav"]["nav"], zone["nav"]["acc_nav"]
+    history = hist.get("history") or []
+    if history:                                      # 净值取实时概览与净值历史缓存里较新的
+        last = history[-1]
+        if nav_date is None or last["date"] >= nav_date:
+            if nav_date is not None and last["date"] > nav_date:
+                notes.append(f"实时概览净值日期 {nav_date} 早于净值历史末点 "
+                             f"{last['date']}，净值以净值历史为准")
+            elif nav_date is not None and nav is not None and abs(last["nav"] - nav) > 0.00005:
+                notes.append(f"实时概览与净值历史同为 {nav_date} 的净值不一致"
+                             f"（{nav} 对 {last['nav']}），以净值历史为准")
+            if last["acc_nav"] is not None:             # 历史行缺累计净值列时别把实时概览的值冲掉
+                acc_nav = last["acc_nav"]
+            elif acc_nav is not None and (nav_date is None or last["date"] > nav_date):
+                notes.append(f"净值历史末点 {last['date']} 缺累计净值，acc_nav 仍是实时概览的值"
+                             + (f"（{nav_date}）" if nav_date else "（概览未给净值日期）"))
+            nav_date, nav = last["date"], last["nav"]
+        else:
+            notes.append(f"净值历史缓存末点 {history[-1]['date']} 早于实时概览净值日期 {nav_date}"
+                         "（当日缓存尚未更新），净值取实时概览")
+    meta = _reit_nav_meta(nav_date, basic.get("established"), today)
+
+    premium = {"premium_pct": None, "p_nav": None, "basis": None, "nav_stale": meta["nav_stale"]}
+    if price and nav:
+        premium["premium_pct"] = round((price / nav - 1) * 100, 2)
+        premium["p_nav"] = round(price / nav, 4)
+        if meta["nav_kind"] != "issue_price":
+            premium["basis"] = (f"相对 {nav_date} 份额净值 {nav}" if nav_date
+                                else f"相对腾讯净值 {nav}（无净值日期）")
+        elif meta["nav_kind_inferred"]:                 # 腾讯未给成立日：只能说「推断为发行价」
+            premium["basis"] = f"相对发行价 {nav}（净值日期 {nav_date} 非半年末，推断为发行价）"
+        else:
+            premium["basis"] = f"相对发行价 {nav}（净值日期 {nav_date} = 成立日）"
+        tx_premium = zone["quote"].get("premium_pct")
+        if tx_premium is not None and abs(tx_premium - premium["premium_pct"]) > 0.05:
+            notes.append(f"本地折溢价 {premium['premium_pct']}% 与腾讯折溢价字段 {tx_premium}% "
+                         "不一致（行情时点不同或上游口径变化），以「现价 ÷ 净值 − 1」为准")
+    else:
+        notes.append("缺现价或净值，折溢价未计算")
+
+    div_history = divs.get("history") or []
+    total_div = round(sum(d["per_unit"] for d in div_history), 6)
+    by_year = _reit_dividends_by_year(div_history)
+    ttm = _reit_ttm_dividend(div_history, today)
+    if ttm["per_unit"] is not None and price:
+        ttm["yield_pct"] = round(ttm["per_unit"] / price * 100, 2)
+    else:
+        ttm["yield_pct"] = None
+    declared = zone["totals"].get("dividend_per_unit")
+    if div_history and declared is not None and abs(declared - total_div) > 0.0005:
+        notes.append(f"分红历史合计 {total_div} 与腾讯「累计分红」字段 {declared} 不一致"
+                     "（分红史可能不完整），请用报告里的实际分配金额核对")
+    dividends = {"count": len(div_history), "total_per_unit": total_div if div_history else None,
+                 "history": div_history, "by_year": by_year, "ttm": ttm}
+
+    series, skipped = _reit_total_return(kline, div_history)
+    returns = {"method": "分红再投资：不复权收盘价 + 除息日加回每份分红，逐日连乘（腾讯前复权是减法复权，不可直接用）",
+               "first_bar": series[0]["date"] if series else None,
+               "as_of": series[-1]["date"] if series else None,
+               "ytd_pct": None, "ret_1y_pct": None, "max_drawdown_pct": None,
+               "max_drawdown_window": None, "annualized_volatility_pct": None, "window": None,
+               "skipped_dividends": skipped, "notes": []}
+    if skipped:
+        returns["notes"].append(f"有 {len(skipped)} 笔分红的除息日不在日线里"
+                                f"（{', '.join(d['ex_date'] for d in skipped)}），收益未计入，请核对")
+    if not kline:
+        returns["notes"].append("腾讯日线返回空（今日才上市或上游异常，未缓存），收益指标未计算")
+    elif len(series) < 2:
+        returns["notes"].append("日线只有 1 根完成 bar（刚上市），收益指标未计算")
+    else:
+        m_ytd = _reit_window_metrics(series, f"{today[:4]}-01-01")
+        if m_ytd:
+            returns["ytd_pct"] = m_ytd["total_return_pct"]
+        else:
+            returns["notes"].append("今年还没有完成的日线（新年首个交易日之前，或今年才上市），"
+                                    "年初至今未计算")
+        m_1y = _reit_window_metrics(
+            series, (date.fromisoformat(today) - timedelta(days=_REIT_TTM_DAYS)).isoformat())
+        if m_1y:
+            returns.update(ret_1y_pct=m_1y["total_return_pct"],
+                           max_drawdown_pct=m_1y["max_drawdown_pct"],
+                           max_drawdown_window=m_1y["max_drawdown_window"],
+                           annualized_volatility_pct=m_1y["annualized_volatility_pct"],
+                           window=m_1y["window"])
+        else:
+            returns["notes"].append("上市不足一年，近一年收益/回撤/波动未计算")
+
+    if macro == "fetch" and _reit_cn10y_cache() is None:
+        treasury_yield_daily(days=5)                  # 东财 1 请求；风控异常照常上抛
+    cn10y = _reit_cn10y_cache()
+    spread = None
+    if ttm["yield_pct"] is not None:
+        spread = {"ttm_yield_pct": ttm["yield_pct"],
+                  "basis": f"近 12 个月每份分红 {ttm['per_unit']} ÷ 现价 {price}",
+                  "cn_10y_pct": None, "cn_10y_date": None, "spread_bp": None}
+        if cn10y:
+            spread.update(cn_10y_pct=cn10y["cn_10y"], cn_10y_date=cn10y["date"],
+                          spread_bp=round((ttm["yield_pct"] - cn10y["cn_10y"]) * 100, 1))
+        else:
+            spread["note"] = ("没有未过期的国债缓存：先调 treasury_yield_daily()（东财 1 发），"
+                              "或传 macro='fetch'")
+    return {
+        "code": c, "name": basic.get("short_name"),
+        "as_of": zone["quote"].get("time"),
+        "basic": {**basic, "latest_scale_note": "腾讯「最新规模」，单位万元（180101 实测与中报净资产一致）"},
+        "quote": zone["quote"],
+        "nav": {"nav": nav, "nav_date": nav_date, "acc_nav": acc_nav, **meta, "history": history,
+                "frequency": "半年频（公募 REIT 不按日披露份额净值）"},
+        "premium": premium, "dividends": dividends, "returns": returns, "spread": spread,
+        "notes": notes, "detail_prompt": _REIT_DETAIL_PROMPT.format(code=c),
+        "requests": {"tencent": TENCENT_REQUEST_COUNT[0] - tx0,
+                     "eastmoney": TT_REQUEST_COUNT[0] - tt0},
+    }
+
+
+def _reit_norm_pages(pages) -> list[int]:
+    """pages 参数归一化：None → []；单个整数或整数可迭代 → 去重升序页码列表。"""
+    if pages is None:
+        return []
+    try:
+        items = [pages] if isinstance(pages, int) else list(pages)
+    except TypeError:
+        raise ValueError(f"pages 须为 ≥1 的页码整数或其列表，收到 {pages!r}") from None
+    out = []
+    for p in items:
+        if isinstance(p, bool) or not isinstance(p, int) or p < 1:
+            raise ValueError(f"pages 须为 ≥1 的页码整数或其列表，收到 {p!r}")
+        if p not in out:
+            out.append(p)
+    return sorted(out)
+
+
+def _reit_locate_keywords(pages_text: list[str], words) -> tuple[dict, list[int]]:
+    """关键词页码定位（纯函数）：对每页去掉空白后的文本做子串查找，只返回页码。
+
+    去空白是因为布局模式的表格会把词拆开（实测「平均租金」「可供分配金额」在表格里
+    被空格隔断）。一页命中 ≥ _REIT_TOC_HIT_MIN 个不同词条标为疑似目录页。"""
+    folded = ["".join(t.split()) for t in pages_text]
+    hits = {w: [i + 1 for i, t in enumerate(folded) if w in t]
+            for w in words if any(w in t for t in folded)}
+    toc = [i + 1 for i, t in enumerate(folded)
+           if sum(1 for w in words if w in t) >= _REIT_TOC_HIT_MIN]
+    return hits, toc
+
+
+def _reit_pdf_pages(pdf_path: str) -> tuple[list[str], list[str]]:
+    """pypdf 布局模式逐页抽取文本 → (逐页文本, 警告)（用到才导入；缺失/过旧显式报错给升级提示）。
+
+    布局模式保留表格的行列位置，AI 读多列财务表时不易串列（180101 季报 23 页 0.3 秒）。
+    抽取在文件句柄存活期间做完，不把句柄带出函数。单页抽取失败按空页处理并记入警告
+    （空白页无内容流时 pypdf 抛 KeyError——真实报告常夹空白页，一页坏不该让整份报告取不到
+    文本）；全篇无文本由调用方报错。"""
+    try:
+        import pypdf
+    except ImportError as e:
+        raise RuntimeError("需要 pypdf（REIT 报告 PDF 转文本）：pip install pypdf") from e
+    texts, warnings = [], []
+    try:
+        with open(pdf_path, "rb") as fh:
+            pages = pypdf.PdfReader(fh).pages
+            for i, page in enumerate(pages, start=1):
+                try:
+                    texts.append(page.extract_text(extraction_mode="layout") or "")
+                    continue
+                except TypeError as e:               # 只有「不认识 extraction_mode」才是版本过旧
+                    if "extraction_mode" in str(e):
+                        raise RuntimeError("pypdf 版本过旧，不支持布局模式抽取："
+                                           "pip install -U pypdf") from e
+                    why = type(e).__name__
+                except Exception as e:
+                    why = type(e).__name__
+                texts.append("")
+                warnings.append(f"第 {i} 页文本抽取失败（{why}），按空页处理")
+    except OSError as e:
+        raise RuntimeError(f"PDF 打开失败（{Path(pdf_path).name}）: "
+                           f"{type(e).__name__} {str(e)[:80]}") from e
+    except RuntimeError:
+        raise
+    except Exception as e:                           # pypdf 异常族庞杂（解析/加密…），统一归一上抛
+        raise RuntimeError(f"PDF 解析失败（{Path(pdf_path).name}）: "
+                           f"{type(e).__name__} {str(e)[:80]}") from e
+    return texts, warnings
+
+
+def _reit_cross_check(code: str, report: dict) -> dict:
+    """报告阅读的交叉核对值：只读当日腾讯缓存，零请求；缓存不存在就如实说没有。"""
+    divs = _cache_read(f"reits/div/{code}.json", max_age_hours=_REIT_DIV_TTL_HOURS)
+    navh = _cache_read(f"reits/navhist/{code}.json", max_age_hours=_REIT_NAV_TTL_HOURS)
+    div_rows = (divs or {}).get("history") if isinstance(divs, dict) else None
+    nav_rows = (navh or {}).get("history") if isinstance(navh, dict) else None
+    if not div_rows and not nav_rows:
+        return {"available": False,
+                "note": "当日没有这只 REIT 的腾讯缓存（先调过 reit_profile 才有）；本函数不为此发请求"}
+    out = {"available": True, "source": "当日腾讯缓存（reit_profile / reit_board 写入）"}
+    if div_rows:
+        out["dividends_by_year"] = _reit_dividends_by_year(div_rows)
+        out["dividend_history"] = div_rows
+    hints = []
+    if report.get("kind") in ("Q1", "Q2", "Q3", "Q4", "interim", "annual") and report.get("year"):
+        hints.append(f"报告里「本年累计/本年实际分配金额」（每份）↔ "
+                     f"dividends_by_year[{report['year']}] 的 per_unit")
+        hints.append("腾讯按除息日归年；报告若按权益登记日或收益分配所属期归年，跨年处会有差异，以报告为准")
+    period_end = {"interim": "-06-30", "annual": "-12-31"}.get(report.get("kind"))
+    if nav_rows and period_end and report.get("year"):
+        want = f"{report['year']}{period_end}"           # 取报告期对应的那个点，而不是永远取末点
+        point = next((p for p in nav_rows if p["date"] == want), None)
+        if point:
+            out["nav"] = {"nav": point["nav"], "nav_date": point["date"], "matched_period": True}
+            hints.append(f"报告里「期末份额净值」↔ nav.nav（腾讯 {want} 的份额净值）")
+        else:
+            latest = nav_rows[-1]
+            out["nav"] = {"nav": latest["nav"], "nav_date": latest["date"],
+                          "matched_period": False}
+            hints.append(f"腾讯净值历史里没有 {want} 的点，报告里的期末份额净值暂无法对照"
+                         f"（腾讯最新一点是 {latest['date']}：新报告可能尚未更新，旧报告期可能早于"
+                         "腾讯历史的起点）")
+    if not div_rows:
+        hints.append("当日没有分红史缓存，实际分配金额无法对照")
+    out["hints"] = hints
+    return out
+
+
+def reit_report_text(code, kind=None, year=None, pages=None, keywords=None,
+                     force_refresh: bool = False, max_chars: int = 60000) -> dict:
+    """REIT 报告逐页文本（AI 直读，先问用户）。
+
+    第二段：取一份定期报告的逐页文本交给 AI 直接读。库只负责取到文本——**不写任何
+    抽取规则**：收入/净利润/现金流/可供分配金额/经营指标/持有人结构/评估值全部由 AI
+    读原文，库不正则、不抽值、不缓存读数。四步：
+      ① 清单  复用 fund_reports（东财 1 发，当日缓存）
+      ② 转文本 pypdf 布局模式逐页抽取，存 reits/text/{code}_{报告ID}（JSON，无扩展名）——
+         **先查这份文本缓存，命中就不下载 PDF**（省东财 1~2 发）；带抽取方式标记，换了自动重抽
+      ③ 下载  仅文本缓存未命中时复用 fund_report_pdf（东财 1~2 发，存 FUND_CACHE_DIR/reits/pdf/）
+      ④ 建索引 每页页码/字符数/开头预览 + 关键词页码定位
+    kind：None=最新一份季报/中期/年报 | Q1~Q4 | interim（中期）| annual（年度）| other
+      （评估报告、审计报告等未分类）| 其他字符串=标题包含该词（如 "评估"、"审计"）。
+    year：报告年度（other 类与标题词选报时 year 列为空，按「年份列等于或标题含该年」筛）。
+    pages：None=只返回索引不返回正文；给页码列表=附上这些页的正文（每页一段，带页码），
+      合计超过 max_chars 报错并提示缩小范围。
+    keywords：在默认 _REIT_KEYWORDS 之外追加的定位词；只返回页码，不返回任何数值。
+    返回 {code, title, report_id, date, kind, year, page_count, total_chars, page_index,
+    keyword_pages, toc_pages, cross_check, reading_tips, next}；给了 pages 时另带
+    pages_text 与 chars，且不再带 page_index / keyword_pages（索引调用里已经拿过）。"""
+    c = _reit_code(code)
+    hit, basis = _is_reit(c)
+    if not hit:
+        raise ValueError(f"{c} 不是公募 REIT（依据：{basis}）；普通基金报告请走 fund_reports")
+    allowed = (None, "Q1", "Q2", "Q3", "Q4", "interim", "annual", "other")
+    if kind is not None and (not isinstance(kind, str) or not kind.strip()):
+        raise ValueError("kind 需为 None / Q1~Q4 / interim / annual / other，或标题包含的词（如 '评估'）"
+                         f"，收到 {kind!r}")
+    kind = kind.strip() if isinstance(kind, str) else kind
+    by_title = kind is not None and kind not in allowed          # 自由文本 → 标题包含
+    if year is not None and (isinstance(year, bool) or not re.fullmatch(r"\d{4}", str(year))):
+        raise ValueError(f"year 须为 4 位年份或 None，收到 {year!r}")
+    year = int(year) if year is not None else None
+    want_pages = _reit_norm_pages(pages)
+    if isinstance(max_chars, bool) or not isinstance(max_chars, int) or max_chars < 1:
+        raise ValueError(f"max_chars 须为正整数，收到 {max_chars!r}")
+    try:
+        extra = ([] if keywords is None
+                 else [keywords] if isinstance(keywords, str) else list(keywords))
+    except TypeError:
+        raise ValueError(f"keywords 须为字符串或字符串列表，收到 {keywords!r}") from None
+    words = list(_REIT_KEYWORDS)
+    for w in extra:
+        w = str(w).strip()
+        if w and w not in words:
+            words.append(w)
+
+    listing = fund_reports(c, category="periodic", limit=100, force_refresh=force_refresh)
+    reports = listing.get("reports") or []
+    if kind is None:
+        cands = [r for r in reports if r.get("kind") != "other"]
+    elif by_title:
+        cands = [r for r in reports if kind in (r.get("title") or "")]
+    else:
+        cands = [r for r in reports if r.get("kind") == kind]
+    if year is not None:
+        loose = kind == "other" or by_title                    # 这两类的 year 列为空，看标题
+        cands = [r for r in cands if r.get("year") == year
+                 or (loose and str(year) in (r.get("title") or ""))]
+    if not cands:
+        have = sorted({f"{r.get('kind')} {r.get('year')}" for r in reports if r.get("kind") != "other"})
+        raise ValueError(f"{c} 没有匹配的定期报告（kind={kind!r} year={year!r}）；"
+                         f"可用：{' / '.join(have) or '无'}")
+    # 年报与年报摘要同归 annual：同类里优先不含「摘要」的；稳定排序保留源序新→旧
+    cands = sorted(cands, key=lambda r: "摘要" in (r.get("title") or ""))
+    report = cands[0]                                 # 源序新→旧：取最新一份
+
+    text_rel = f"reits/text/{c}_{report.get('report_id')}"
+    doc = None
+    if not force_refresh:                             # 先查文本缓存：命中就不必下载 PDF
+        cached = _cache_read(text_rel, max_age_hours=None)
+        if (isinstance(cached, dict) and cached.get("extractor") == _REIT_EXTRACTOR
+                and isinstance(cached.get("pages"), list) and cached["pages"]):
+            doc = cached
+    if doc is None:
+        pdf_path = fund_report_pdf(report, dest_dir=FUND_CACHE_DIR / "reits" / "pdf",
+                                   force_refresh=force_refresh)
+        texts, extract_warnings = _reit_pdf_pages(pdf_path)
+        if not any(t.strip() for t in texts):
+            raise RuntimeError(f"报告 PDF 没有可提取的文本（{Path(pdf_path).name}）——疑似扫描件；"
+                               + ("；".join(extract_warnings) or "无逐页警告"))
+        doc = {"code": c, "report_id": report.get("report_id"), "title": report.get("title"),
+               "extractor": _REIT_EXTRACTOR,
+               "extracted_at": datetime.now(_BJ_TZ).isoformat(timespec="seconds"),
+               "extract_warnings": extract_warnings,
+               "pages": [{"page": i + 1, "chars": len(t), "preview": "".join(t.split())[:60],
+                          "text": t} for i, t in enumerate(texts)]}
+        _cache_write(text_rel, doc)
+    hits, toc = _reit_locate_keywords([p["text"] for p in doc["pages"]], words)
+    out = {"code": c, "title": report.get("title"), "report_id": report.get("report_id"),
+           "date": report.get("date"), "kind": report.get("kind"), "year": report.get("year"),
+           "page_count": len(doc["pages"]),
+           "total_chars": sum(p["chars"] for p in doc["pages"]),
+           "toc_pages": toc, "cross_check": _reit_cross_check(c, report),
+           "reading_tips": list(_REIT_READING_TIPS)}
+    if doc.get("extract_warnings"):
+        out["extract_warnings"] = doc["extract_warnings"]
+    if not want_pages:
+        out["page_index"] = [{k: v for k, v in p.items() if k != "text"} for p in doc["pages"]]
+        out["keyword_pages"] = hits
+        out["next"] = (f"reit_report_text({c!r}, kind={report.get('kind')!r}, year={report.get('year')!r}, "
+                       f"pages=[...]) 取正文；一次合计 ≤{max_chars} 字符")
+        return out
+    bad = [p for p in want_pages if p > len(doc["pages"])]
+    if bad:
+        raise ValueError(f"页码超出范围 {bad}（本报告共 {len(doc['pages'])} 页）")
+    chosen = [doc["pages"][p - 1] for p in want_pages]
+    total = sum(p["chars"] for p in chosen)
+    if total > max_chars:
+        detail = "，".join(f"第{p['page']}页 {p['chars']}" for p in chosen)
+        raise ValueError(f"所选页合计 {total} 字符，超过上限 {max_chars}（{detail}）"
+                         "——请缩小页码范围")
+    out["pages_text"] = [{"page": p["page"], "text": p["text"]} for p in chosen]
+    out["chars"] = total
+    return out
 
 
 # ── Sprint 2 默认激活：跨进程请求协调（真实时钟；测试可随时重建）────────
@@ -6093,6 +7171,13 @@ csindex_universe()                             # 全系列人民币基础指数�
 csindex_resolve_total_return("000300")        # 官方映射 → H00300
 csindex_total_return_daily("000300", "20240101", "20241231")
 csindex_sync_total_return(codes=["000300", "H30269"])  # 显式批量，可恢复
+
+# V0.8.4 公募REITs层（两段式：腾讯基础数据 → 询问 → AI 直读报告）
+board = reit_board()                               # 全市场行情板：1 请求（行情+净值+折溢价）
+p = reit_profile("180101")                         # 单只画像：4 请求（当日缓存后 0~1）
+print(p["detail_prompt"])                          # 先把画像交给用户，照这句询问是否读报告
+idx = reit_report_text("180101")                   # 用户确认后：页码索引 + 关键词页码（不抽值）
+txt = reit_report_text("180101", pages=idx["keyword_pages"]["可供分配金额"])  # 按页取正文，AI 直接读
 ```
 
 **不覆盖（明确边界）**：账户持仓/交易下单（用 ttskill）、港基专项、盘中实时估值、基金经理历任切分（独立评测 skill 的 jjjl 通道）、单基金行业配置史（E2 已停供；全市场季度口径见 `fund_industry_allocation`）、货基万份收益（P15）、债券持仓明细 zqcc、FOF 底层基金明细（五源实测无结构化接口，坑P24）、经理姓名→ID 索引（坑P23）。

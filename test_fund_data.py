@@ -1230,8 +1230,8 @@ def test_l1_offline():
     _thin = (_repo / "SKILL.md").read_text(encoding="utf-8")
     _ref = (_repo / "reference.md").read_text(encoding="utf-8")
     _thin_b = len(_thin.encode("utf-8"))
-    check("L1", "架构-瘦SKILL体积上限", _thin_b < 14500,
-          f"{_thin_b}B/上限14500（V0.8.0 四个全收益入口纳入；长文仍移 reference.md）")
+    check("L1", "架构-瘦SKILL体积上限", _thin_b < 15000,
+          f"{_thin_b}B/上限15000（V0.8.4 REITs 三入口+先问用户规则纳入；长文仍移 reference.md）")
     _pub = [n.name for n in _ast.parse((_repo / "fund_data.py").read_text(encoding="utf-8")).body
             if isinstance(n, _ast.FunctionDef) and not n.name.startswith("_")]
     check("L1", "架构-签名速查全覆盖", len(_pub) >= 32 and all(f"| `{n}(" in _thin for n in _pub),
@@ -4043,6 +4043,953 @@ def test_sws_online():
           f"{len(c)} 只，权重和 {ws:.2f}%")
 
 
+def test_reit_offline():
+    """V0.8.4 公募 REITs 层（零网络：腾讯基金页响应按 2026-11-26 实采形态合成）。"""
+    import datetime as _dt_reit
+    import http.client as _hc_reit
+    import io as _io_reit
+    import shutil as _sh_reit
+    import urllib.error as _ue_reit
+    from fund_data_core.policies import provider_for_host
+
+    # ── A 白名单：腾讯基金页静态数据域归腾讯线 ──
+    check("L1", "REIT白名单-腾讯基金页静态域归腾讯线",
+          provider_for_host("stockjs.finance.qq.com") == "tencent"
+          and fd.provider_for_url(
+              "https://stockjs.finance.qq.com/fundUnitNavAll/data/year_all/180101.js") == "tencent")
+    expect_raise("L1", "REIT白名单-仿冒域仍拒绝",
+                 lambda: provider_for_host("evilfinance.qq.com"), "未知 host")
+
+    # ── B 行情串解析（88 段，字段位与实采同构）──
+    def _quote_line(sym, name, price, last, opn, hi, lo, vol, amt, turn, mcap, prem, nav,
+                    tm="20261126120530"):
+        v = [""] * 88
+        v[0], v[1], v[2], v[3], v[4], v[5] = "1", name, sym[2:], price, last, opn
+        v[30], v[32], v[33], v[34] = tm, "-0.43", hi, lo
+        v[36], v[37], v[38], v[45], v[77], v[81] = vol, amt, turn, mcap, prem, nav
+        return f'v_{sym}="' + "~".join(v) + '";'
+
+    _REIT_QUOTES = {
+        "sz180101": _quote_line("sz180101", "博时蛇口产园REIT", "1.386", "1.392", "1.389", "1.395",
+                                "1.386", "1710", "24", "0.01", "19.47", "-34.44", "2.1141"),
+        "sz180102": _quote_line("sz180102", "华夏合肥高新REIT", "3.200", "3.210", "3.205", "3.220",
+                                "3.190", "500", "16", "0.05", "12.30", "0.00", "3.2000"),
+        "sh508000": _quote_line("sh508000", "华安张江产业园REIT", "1.674", "1.661", "1.661", "1.690",
+                                "1.637", "2581", "43", "0.03", "15.98", "-34.55", "2.5576"),
+        "sh508610": _quote_line("sh508610", "广发新城吾悦商业REIT", "3.152", "3.138", "3.134", "3.175",
+                                "3.110", "9962", "313", "0.20", "15.76", "1.48", "3.1060"),
+        "sh508888": _quote_line("sh508888", "MismatchREIT", "2.000", "2.000", "2.000", "2.000",
+                                "2.000", "1", "0", "0.00", "2.00", "-4.76", "2.0000"),
+    }
+    _q = fd._parse_reit_quotes("\n".join(list(_REIT_QUOTES.values())))
+    _r = _q["180101"]
+    check("L1", "REIT行情串-字段取位(88段实采同构)",
+          len(_q) == 5 and _r["name"] == "博时蛇口产园REIT" and _r["price"] == 1.386
+          and _r["last_close"] == 1.392 and _r["open"] == 1.389 and _r["change_pct"] == -0.43
+          and _r["high"] == 1.395 and _r["low"] == 1.386 and _r["volume_lots"] == 1710.0
+          and _r["amount_wan"] == 24.0 and _r["turnover_pct"] == 0.01 and _r["mcap_yi"] == 19.47
+          and _r["quote_time"] == "2026-11-26 12:05:30", str(_r)[:110])
+    check("L1", "REIT行情串-净值第81段折溢价第77段",
+          _r["nav"] == 2.1141 and _r["premium_pct"] == -34.44
+          and _q["508610"]["nav"] == 3.106 and _q["508610"]["premium_pct"] == 1.48)
+    _short = fd._parse_reit_quotes('v_sz180101="' + "~".join(
+        ["1", "短行REIT", "180101", "1.2"] + [""] * 48) + '";')
+    check("L1", "REIT行情串-字段不足净值留空不抛",
+          _short["180101"]["price"] == 1.2 and _short["180101"]["nav"] is None
+          and _short["180101"]["premium_pct"] is None and _short["180101"]["mcap_yi"] is None)
+    expect_raise("L1", "REIT行情串-有行0解析拒绝静默空",
+                 lambda: fd._parse_reit_quotes('v_xx="1~名~ABC~1.0";'), "0 行解析成功")
+    check("L1", "REIT行情串-空响应与占位行返回空",
+          fd._parse_reit_quotes("") == {} and fd._parse_reit_quotes('_pv_none="1";') == {})
+
+    # ── C 净值历史 / 分红历史解析 ──
+    _nv = fd._parse_reit_nav_history(
+        'fundNavAllYearData={"code": "jj180101", "data": [["20260630", "2.1141", "2.5299"], '
+        '["20210607", "2.3100", "2.3100"], ["20251231", "2.1235", "2.5162"]], "name": "x"}')
+    check("L1", "REIT净值历史-去前缀解析升序",
+          [x["date"] for x in _nv] == ["2021-06-07", "2025-12-31", "2026-06-30"]
+          and _nv[0]["nav"] == 2.31 and _nv[-1]["acc_nav"] == 2.5299, str(_nv))
+    check("L1", "REIT净值历史-空data返回空列表",
+          fd._parse_reit_nav_history('fundNavAllYearData={"code":"jj508999","data":[]}') == [])
+    expect_raise("L1", "REIT净值历史-行畸形拒绝",
+                 lambda: fd._parse_reit_nav_history('x={"data":[["20260630", "abc", "2.5"]]}'),
+                 "畸形")
+    expect_raise("L1", "REIT净值历史-日期重复拒绝",
+                 lambda: fd._parse_reit_nav_history(
+                     'x={"data":[["20260630","2.1",""],["20260630","2.2",""]]}'), "重复")
+    expect_raise("L1", "REIT净值历史-非JSON拒绝",
+                 lambda: fd._parse_reit_nav_history("<html>404</html>"), "无 JSON 对象")
+    expect_raise("L1", "REIT净值历史-缺data拒绝",
+                 lambda: fd._parse_reit_nav_history('{"code":"jj180101"}'), "缺 data")
+    _PROFIT13 = json.dumps({"code": 0, "msg": "ok", "data": {"sz180101": {"total": 13, "data": [
+        {"date": "2026-09-17", "fh": 0.0362}, {"date": "2026-04-17", "fh": 0.0231},
+        {"date": "2025-12-08", "fh": 0.02}, {"date": "2025-09-11", "fh": 0.0399},
+        {"date": "2025-04-24", "fh": 0.0283}, {"date": "2024-12-17", "fh": 0.0259},
+        {"date": "2024-08-22", "fh": 0.0434}, {"date": "2024-04-12", "fh": 0.0336},
+        {"date": "2023-10-31", "fh": 0.0479}, {"date": "2023-04-04", "fh": 0.0396},
+        {"date": "2022-12-19", "fh": 0.0566}, {"date": "2022-04-07", "fh": 0.0301},
+        {"date": "2021-11-30", "fh": 0.0274}]}}})
+    _dv13 = fd._parse_reit_dividends(_PROFIT13, "sz180101")
+    check("L1", "REIT分红历史-新→旧与合计锚(180101)",
+          len(_dv13) == 13 and abs(sum(d["per_unit"] for d in _dv13) - 0.452) < 1e-9
+          and _dv13[0] == {"ex_date": "2026-09-17", "per_unit": 0.0362}
+          and _dv13[-1]["ex_date"] == "2021-11-30", str(_dv13[:2]))
+    check("L1", "REIT分红历史-无分红与节点键漂移",
+          fd._parse_reit_dividends('{"code":0,"data":{}}', "sh508610") == []
+          and fd._parse_reit_dividends('{"code":0,"data":{"sh508610":{"total":0,"data":[]}}}', "sh508610") == []
+          and fd._parse_reit_dividends('{"code":0,"data":{"sh508610":{"total":0}}}', "sh508610") == []
+          and fd._parse_reit_dividends(
+              '{"code":0,"data":{"jj508610":{"total":1,"data":[{"date":"2026-10-01","fh":0.01}]}}}',
+              "sh508610") == [{"ex_date": "2026-10-01", "per_unit": 0.01}])
+    expect_raise("L1", "REIT分红历史-行畸形拒绝",
+                 lambda: fd._parse_reit_dividends(
+                     '{"code":0,"data":{"sz180101":{"total":1,"data":[{"date":"2026/10/01","fh":0.01}]}}}',
+                     "sz180101"), "畸形")
+    expect_raise("L1", "REIT分红历史-业务码异常拒绝",
+                 lambda: fd._parse_reit_dividends('{"code":-1,"msg":"err","data":{}}', "sz180101"),
+                 "业务码")
+
+    # ── D 净值种类与过期 ──
+    _mt = fd._reit_nav_meta
+    check("L1", "REIT净值种类-净值日期等于成立日是发行价",
+          _mt("2026-11-03", "2026-11-03", "2026-11-26")["nav_kind"] == "issue_price"
+          and _mt("2026-11-03", "2026-11-03", "2026-11-26")["nav_kind_inferred"] is False
+          and _mt("2026-06-30", "2021-06-07", "2026-11-26")["nav_kind"] == "report"
+          and _mt("2026-03-31", "2021-06-07", "2026-11-26")["nav_kind"] == "report")
+    check("L1", "REIT净值种类-无成立日按半年末推断",
+          _mt("2026-11-03", None, "2026-11-26")["nav_kind"] == "issue_price"
+          and _mt("2026-11-03", None, "2026-11-26")["nav_kind_inferred"] is True
+          and _mt("2026-06-30", None, "2026-11-26")["nav_kind"] == "report"
+          and _mt("2026-06-30", None, "2026-11-26")["nav_kind_inferred"] is False)
+    _exp = fd._reit_nav_expected
+    check("L1", "REIT净值过期-应然净值日按披露截止推进",
+          _exp("2026-01-05") == "2025-06-30" and _exp("2027-03-31") == "2026-06-30"
+          and _exp("2027-04-10") == "2026-12-31" and _exp("2027-08-31") == "2026-12-31"
+          and _exp("2027-09-10") == "2027-06-30" and _exp("2027-12-31") == "2027-06-30",
+          str([_exp(d) for d in ("2026-01-05", "2027-03-31", "2027-04-10", "2027-08-31",
+                                 "2027-09-10", "2027-12-31")]))
+    check("L1", "REIT净值过期-年报季与8月不误报真过期才标",
+          _mt("2026-06-30", None, "2026-11-26")["nav_stale"] is False      # 中报净值，年报未到截止
+          and _mt("2026-06-30", None, "2027-03-31")["nav_stale"] is False   # 年报截止日当天仍属正常
+          and _mt("2026-06-30", None, "2027-04-10")["nav_stale"] is True    # 截止后：该有年报净值了
+          and _mt("2025-12-31", None, "2026-08-31")["nav_stale"] is False   # 8 月：中报截止日当天
+          and _mt("2025-12-31", None, "2026-09-10")["nav_stale"] is True
+          and _mt("2025-12-31", None, "2026-11-26")["nav_stale"] is True
+          and _mt("2026-05-20", "2026-05-20", "2026-12-01")["nav_stale"] is True   # 5 月成立：中报该出了还挂发行价
+          and _mt("2026-11-03", "2026-11-03", "2026-11-26")["nav_stale"] is False,
+          str([_mt(d, e, w) for d, e, w in (("2026-06-30", None, "2027-04-10"),
+                                            ("2025-12-31", None, "2026-09-10"))]))
+    check("L1", "REIT净值种类-无净值日期",
+          _mt(None, None, "2026-11-26") == {
+              "nav_kind": "unknown", "nav_kind_basis": "没有净值日期", "nav_kind_inferred": False,
+              "nav_stale": None, "nav_age_days": None, "nav_expected": "2026-06-30"})
+
+    # ── E 近 12 个月派息 ──
+    _dv = [{"ex_date": "2026-09-17", "per_unit": 0.0362}, {"ex_date": "2026-04-17", "per_unit": 0.0231},
+           {"ex_date": "2025-12-08", "per_unit": 0.02}, {"ex_date": "2025-11-26", "per_unit": 0.0399},
+           {"ex_date": "2025-11-25", "per_unit": 0.05}]
+    _tt = fd._reit_ttm_dividend(_dv, "2026-11-26")
+    check("L1", "REIT近12个月派息-窗口含两端",
+          _tt["count"] == 4 and abs(_tt["per_unit"] - 0.1192) < 1e-9
+          and _tt["window"] == ["2025-11-26", "2026-11-26"], str(_tt))
+    check("L1", "REIT近12个月派息-无分红返回None不返回0",
+          fd._reit_ttm_dividend([_dv[-1]], "2026-11-26")["per_unit"] is None
+          and fd._reit_ttm_dividend([], "2026-11-26") == {
+              "window": ["2025-11-26", "2026-11-26"], "count": 0, "per_unit": None, "ex_dates": []})
+
+    # ── F 分红再投资与区间指标 ──
+    _kl = [{"date": "2026-10-15", "close": 10.0}, {"date": "2026-10-16", "close": 9.0},
+           {"date": "2026-10-19", "close": 9.0}, {"date": "2026-10-20", "close": 8.0}]
+    _tr, _sk = fd._reit_total_return(_kl, [
+        {"ex_date": "2026-10-16", "per_unit": 1.0}, {"ex_date": "2026-10-18", "per_unit": 0.4},
+        {"ex_date": "2026-10-01", "per_unit": 0.7}])
+    check("L1", "REIT分红再投资-除息日加回逐日连乘",
+          [round(x["nav"], 6) for x in _tr] == [10.0, 10.0, 10.0, 8.888889]
+          and [d["ex_date"] for d in _sk] == ["2026-10-18"],
+          f"{[round(x['nav'], 4) for x in _tr]} skipped={[d['ex_date'] for d in _sk]}")
+    _ser = [{"date": (_dt_reit.datetime(2026, 1, 1) + _dt_reit.timedelta(days=i)).date().isoformat(),
+             "nav": 100.0 * (1.01 ** i)} for i in range(60)]        # 每日 +1%
+    _wm = fd._reit_window_metrics(_ser, "2026-02-01")
+    check("L1", "REIT区间指标-基点取窗口前最后一bar",
+          _wm["window"] == {"start": "2026-01-31", "end": "2026-03-01", "days": 29, "points": 30}
+          and abs(_wm["total_return_pct"] - round((1.01 ** 29 - 1) * 100, 4)) < 1e-6, str(_wm["window"]))
+    check("L1", "REIT区间指标-窗口不完整返回None",
+          fd._reit_window_metrics(_ser, "2025-12-01") is None
+          and fd._reit_window_metrics(_ser[:5], "2026-01-01") is None
+          and fd._reit_window_metrics(_ser, "2027-01-01") is None)
+
+    # ── H 关键词页码定位 ──
+    _PAGES5 = ["封面\n1", "§1 重要提示",
+               "目录 " + " ".join(["可供分配金额", "实际分配金额", "现金流分派率", "主要财务指标",
+                                   "出租率", "入住率"]),
+               "3.1 主要财务指标\n本期收入 1 元\n可供分配金额 2 元", "期末基金份额持有人结构\n机构 90%"]
+    _kh, _toc = fd._reit_locate_keywords(_PAGES5, fd._REIT_KEYWORDS)
+    check("L1", "REIT关键词定位-页码与疑似目录页",
+          _kh == {"可供分配金额": [3, 4], "实际分配金额": [3], "现金流分派率": [3],
+                  "主要财务指标": [3, 4], "出租率": [3], "入住率": [3], "持有人结构": [5]}
+          and _toc == [3], f"{_kh} toc={_toc}")
+    _kh2, _ = fd._reit_locate_keywords(
+        ["本期经营活动产生的现金流量\n净额为 1 元", "平均    租金 71.86 元"], fd._REIT_KEYWORDS)
+    check("L1", "REIT关键词定位-去空白匹配且只返回页码",
+          _kh2 == {"经营活动产生的现金流量净额": [1], "平均租金": [2]}
+          and all(type(pg) is int for ps in _kh2.values() for pg in ps)
+          and "71.86" not in json.dumps(_kh2, ensure_ascii=False), str(_kh2))
+
+    # ── G/I/J/K/L/M：识别 + 网络 mock 全链路 ──
+    _reit_rows = ([{"code": f"508{i:03d}", "name": f"沪REIT{i}", "type": "Reits"} for i in range(1, 71)]
+                  + [{"code": f"180{a}{b:02d}", "name": f"深REIT{a}{b}", "type": "Reits"}
+                     for a in (1, 2) for b in range(10)]
+                  + [{"code": f"18100{i}", "name": f"深REIT{i}", "type": "Reits"} for i in (1, 2)]
+                  + [{"code": f"1800{b:02d}", "name": f"银华系{b}", "type": "混合型-灵活"} for b in range(15)])
+    _board_list = [
+        {"code": "180101", "name": "博时蛇口产园REIT", "type": "Reits"},
+        {"code": "180102", "name": "华夏合肥高新REIT", "type": "Reits"},
+        {"code": "180001", "name": "银华优势企业混合", "type": "混合型-灵活"},     # 非 REIT 混在清单里
+        {"code": "508000", "name": "华安张江产业园REIT", "type": "Reits"},
+        {"code": "508610", "name": "广发新城吾悦商业REIT", "type": "Reits"},
+        {"code": "508888", "name": "MismatchREIT", "type": "Reits"},
+        {"code": "508999", "name": "未上市REIT", "type": "Reits"},               # 行情无返回
+    ]
+
+    def _nav_file(code, rows):
+        return json.dumps({"code": f"jj{code}", "data": rows, "name": "x"}, ensure_ascii=False)
+
+    # 夹具里的日期一律相对今天构造，任何日期运行都成立（写死日期 = 定时炸弹，审查抓的坑）：
+    _today = fd.datetime.now(fd._BJ_TZ).date()
+    _hy = max(d for d in (f"{_today.year}-06-30", f"{_today.year}-12-31", f"{_today.year - 1}-12-31")
+              if d <= _today.isoformat())            # 最近一个已到的半年末 = 报告净值日，永不过期
+    _hy_c = _hy.replace("-", "")
+    _new = (_today - _dt_reit.timedelta(days=23)).isoformat()       # 新上市 23 天：净值还是发行价
+    if _new[5:] in ("06-30", "12-31"):                # 撞上半年末会被判成报告净值，挪一天
+        _new = (_today - _dt_reit.timedelta(days=24)).isoformat()
+    _nav_rows_101 = [["20210607", "2.3100", "2.3100"]]
+    if _hy_c != "20260630":
+        _nav_rows_101.append(["20260630", "2.1141", "2.5299"])     # 供交叉核对按报告期（2026 中报）取点
+    _nav_rows_101.append([_hy_c, "2.1141", "2.5299"])
+    _REIT_NAVS = {
+        "180101": _nav_file("180101", _nav_rows_101),
+        "180102": _nav_file("180102", [[_new.replace("-", ""), "3.2000", "3.2000"]]),
+        "508000": _nav_file("508000", []),
+        "508610": _nav_file("508610", [[_new.replace("-", ""), "3.1060", "3.1060"]]),
+        "508888": _nav_file("508888", [[_hy_c, "2.1000", "2.1000"]]),
+        "508999": _nav_file("508999", [[_hy_c, "2.0000", "2.0000"]]),
+    }
+    _net = {"calls": [], "fail_nav": None, "notfound": set(), "drop_quotes": False,
+            "zones": {}, "profits": {}}
+
+    def _fake_get(url, referer=True):
+        fd.TENCENT_REQUEST_COUNT[0] += 1               # 与真实通道账本同口径（_tencent_raw 入账）
+        _net["calls"].append(url)
+        if "qt.gtimg.cn" in url:
+            if _net["drop_quotes"]:
+                return b""
+            syms = url.split("q=")[1].split(",")
+            return "\n".join(_REIT_QUOTES[s] for s in syms if s in _REIT_QUOTES).encode("gbk")
+        if "stockjs.finance.qq.com" in url:
+            code = url.rsplit("/", 1)[1].split(".")[0]
+            if code in _net["notfound"]:
+                raise _ue_reit.HTTPError(url, 404, "Not Found", None, None)
+            if _net["fail_nav"] is not None:
+                raise _net["fail_nav"](f"模拟失败 {code}")
+            return _REIT_NAVS[code].encode("utf-8")
+        if "getPriceZone" in url:
+            return _net["zones"][url.rsplit("symbol=", 1)[1]].encode("utf-8")
+        if "getProfitHistory" in url:
+            return _net["profits"][url.rsplit("symbol=", 1)[1]].encode("utf-8")
+        raise AssertionError(f"REIT 层不应请求: {url}")
+
+    def _zone_json(code, price, nav, nav_date, established, ljfh, n, prem=None):
+        return json.dumps({"code": 0, "msg": "OK", "data": {
+            "data": {"jtkp": "1.389", "ztsp": "1.392", "zgj": "1.395", "zdj": "1.386", "cjl": "1710",
+                     "cj_total_amount": "24", "zxjg": price, "jjdwjz": nav, "zyjl": prem,
+                     "jgzffd": "-0.43", "update_time": "2026-11-26 12:05:30"},
+            "profit": {"ljfh": ljfh, "ljfhcs": str(n)},
+            "info": {"jjdm": code, "jjqc": "博时招商蛇口产业园封闭式基础设施证券投资基金",
+                     "jjjc": "博时招商蛇口产业园REIT", "txjjlx": "封闭型", "jjlx": "封闭式基金",
+                     "sclx": "sz", "fxrq": "2023-05-24", "clrq": established, "clgm": "124394",
+                     "jjjl": "王翘楚、刘玄、李慧娟", "glrdm": "80000226", "glrmc": "博时基金管理有限公司",
+                     "tgrmc": "招商银行股份有限公司", "jycs": "1", "smartbox_type": "FJ",
+                     "sgzt": "开放", "shzt": "开放", "jzrq": nav_date, "dwjz": nav, "ljjz": "2.5299",
+                     "zxgm": "300439.0000"}}}, ensure_ascii=False)
+
+    def _no_net(*a, **k):
+        raise AssertionError("REIT 离线测试不得发真实网络请求")
+
+    _saved = (fd.fund_list, fd._tencent_fund_get, fd._tencent_raw, fd._tencent_kline_page,
+              fd.fund_reports, fd.fund_report_pdf, fd._reit_pdf_pages, fd.tencent_quote,
+              fd.fund_realtime_nav, fd.treasury_yield_daily, fd.time.sleep, fd._REIT_FANOUT_INTERVAL)
+    _nav_dir = fd.FUND_CACHE_DIR / "reits" / "navhist"
+    _tx0_all = fd.TENCENT_REQUEST_COUNT[0]          # 桩会冒记腾讯账本：结束还原，免得在线层末尾账本虚高
+    _orig_bo = fd.urllib.request.build_opener
+    try:
+        fd._REIT_FANOUT_INTERVAL = 0.0                  # 沙箱不真睡；节拍语义见下方专项断言
+        fd._tencent_raw = _no_net
+        fd.fund_report_pdf = _no_net                    # 第一段任何路径都不该碰 PDF
+
+        # ── G 识别 ──
+        fd.fund_list = lambda **k: _reit_rows
+        _hits = {x["code"]: fd._is_reit(x["code"]) for x in _reit_rows}
+        check("L1", "REIT识别-清单内按类型权威判断",
+              sum(1 for v in _hits.values() if v[0]) == 92
+              and all(_hits[x["code"]] == (True, "fund_list") for x in _reit_rows if x["type"] == "Reits")
+              and all(_hits[x["code"]] == (False, "fund_list") for x in _reit_rows if x["type"] != "Reits"))
+        check("L1", "REIT识别-形态兜底与180号段不可整体当REIT",
+              fd._is_reit("508999") == (True, "code_pattern")
+              and fd._is_reit("180301") == (True, "code_pattern")
+              and fd._is_reit("181777") == (True, "code_pattern")
+              and fd._is_reit("513100") == (False, "not_reit")
+              and fd._is_reit("SZ180101") == (True, "fund_list")
+              and fd._is_reit(None) == (False, "not_code")
+              and fd._is_reit("18010") == (False, "not_code"))
+
+        def _fl_down(**k):
+            raise fd.CircuitOpenError("东财熔断中（演练）")
+
+        fd.fund_list = _fl_down
+        check("L1", "REIT识别-清单不可用降级形态判断不上抛",
+              fd._is_reit("180101") == (True, "code_pattern")
+              and fd._is_reit("161725") == (False, "not_reit"))
+
+        # ── I 行情板 ──
+        fd.fund_list = lambda **k: _board_list
+        fd._tencent_fund_get = _fake_get
+        _b = fd.reit_board()
+        check("L1", "REIT行情板-默认1发只含REIT按代码升序",
+              _net["calls"] == ["https://qt.gtimg.cn/q=" + ",".join(
+                  ("sz180101", "sz180102", "sh508000", "sh508610", "sh508888", "sh508999"))]
+              and [x["code"] for x in _b] == ["180101", "180102", "508000", "508610", "508888", "508999"]
+              and not _nav_dir.exists(),
+              f"{len(_net['calls'])} 发")
+        check("L1", "REIT行情板-默认净值日期未取如实标注",
+              _b[0]["nav"] == 2.1141 and _b[0]["premium_pct"] == -34.44 and _b[0]["nav_kind"] == "unknown"
+              and _b[0]["nav_date"] is None and "净值日期未取" in _b[0]["premium_basis"]
+              and _b[0]["notes"] == [], str(_b[0])[:120])
+        check("L1", "REIT行情板-行情无返回保留行并标注",
+              _b[-1]["price"] is None and _b[-1]["premium_pct"] is None
+              and _b[-1]["premium_basis"] is None and any("行情无返回" in n for n in _b[-1]["notes"]))
+        _net["calls"].clear()
+        _b2 = fd.reit_board(with_nav_date=True)
+        check("L1", "REIT行情板-逐只补净值日期1发/只",
+              len(_net["calls"]) == 7 and _b2[0]["nav_date"] == _hy
+              and _b2[0]["nav_kind"] == "report" and _b2[0]["nav_stale"] is False
+              and _b2[0]["premium_basis"] == f"相对 {_hy} 份额净值 2.1141"
+              and _b2[1]["nav_kind"] == "issue_price" and _b2[1]["nav_stale"] is False
+              and "推断" in _b2[1]["notes"][0]
+              and _b2[1]["premium_basis"] == f"相对发行价 3.2（净值日期 {_new}）"
+              and any("净值历史为空" in n for n in _b2[2]["notes"]) and _b2[2]["nav_kind"] == "unknown"
+              and _b2[3]["nav"] == 3.106 and _b2[3]["premium_basis"].startswith("相对发行价")
+              and _b2[4]["nav"] == 2.0 and any("不一致" in n for n in _b2[4]["notes"])
+              and _b2[5]["nav"] == 2.0 and _b2[5]["premium_pct"] is None
+              and _b2[5]["premium_basis"] == f"相对 {_hy} 份额净值 2.0",
+              str([(x["code"], x["nav_kind"], x["premium_basis"]) for x in _b2]))
+        _net["calls"].clear()
+        fd.reit_board(with_nav_date=True)
+        check("L1", "REIT行情板-净值日期当日缓存二调1发", len(_net["calls"]) == 1)
+
+        # 节拍：缓存全清 → 逐只补齐每发前睡 ≥1s（叠在协调器 0.2s 腾讯地板之上）
+        _sleeps = []
+        _sh_reit.rmtree(_nav_dir, ignore_errors=True)
+        _net["calls"].clear()
+        fd.time.sleep = lambda s: _sleeps.append(s)
+        fd._REIT_FANOUT_INTERVAL = 1.0
+        fd.reit_board(with_nav_date=True)
+        check("L1", "REIT防封-逐只补齐慢节拍≥1发/秒",
+              len(_net["calls"]) == 7 and len(_sleeps) == 6 and min(_sleeps) >= 1.0
+              and max(_sleeps) <= 1.3 and fd._REIT_FANOUT_MAX_FAILS == 2,
+              f"sleeps={[round(s, 2) for s in _sleeps]}")
+        _sleeps.clear()
+        fd.reit_board(with_nav_date=True)
+        check("L1", "REIT防封-缓存命中不空等", _sleeps == [])
+        fd.time.sleep, fd._REIT_FANOUT_INTERVAL = _saved[10], 0.0
+
+        _sh_reit.rmtree(_nav_dir, ignore_errors=True)
+        _net["calls"].clear()
+        _net["fail_nav"] = OSError
+        _b3 = fd.reit_board(with_nav_date=True)
+        check("L1", "REIT防封-连续2败即中止",
+              len(_net["calls"]) == 3 and any("取数失败" in n for n in _b3[1]["notes"])
+              and any("补齐已中止" in n for n in _b3[2]["notes"])
+              and all(x["nav_kind"] == "unknown" for x in _b3), f"{len(_net['calls'])} 发")
+        _net["fail_nav"] = None
+        _net["calls"].clear()
+        _b4 = fd.reit_board(with_nav_date=True)
+        check("L1", "REIT防封-中止后断点续跑只补缺的",
+              len(_net["calls"]) == 7 and _b4[0]["nav_date"] == _hy
+              and not any("中止" in n for x in _b4 for n in x["notes"]), f"{len(_net['calls'])} 发")
+        _net["calls"].clear()
+        fd.reit_board(with_nav_date=True, force_refresh=True)
+        check("L1", "REIT行情板-force_refresh净值历史绕过缓存重取", len(_net["calls"]) == 7,
+              f"{len(_net['calls'])} 发")
+        _sh_reit.rmtree(_nav_dir, ignore_errors=True)
+        fd._cache_write("reits/navhist/508888.json", {          # 缓存载荷格式（不是接口原文格式）
+            "code": "508888", "history": [{"date": _hy, "nav": 2.1, "acc_nav": 2.1}], "note": None})
+        _net["calls"].clear()
+        _net["fail_nav"] = OSError
+        _b3b = fd.reit_board(with_nav_date=True)
+        _net["fail_nav"] = None
+        check("L1", "REIT防封-中止后余下行先用当日缓存不误报未取",
+              len(_net["calls"]) == 3 and _b3b[4]["nav_date"] == _hy
+              and not any("中止" in n for n in _b3b[4]["notes"])
+              and any("补齐已中止" in n for n in _b3b[2]["notes"]), str(_b3b[4]["notes"]))
+        _sh_reit.rmtree(_nav_dir, ignore_errors=True)
+        _net["calls"].clear()
+        _net["fail_nav"] = _hc_reit.IncompleteRead      # 坏状态行/残包族：不是 OSError，归入可数失败
+        _b3c = fd.reit_board(with_nav_date=True)
+        _net["fail_nav"] = None
+        check("L1", "REIT防封-连接层残包异常归入失败不炸穿整次补齐",
+              len(_net["calls"]) == 3 and any("取数失败" in n for n in _b3c[0]["notes"])
+              and any("补齐已中止" in n for n in _b3c[5]["notes"]), f"{len(_net['calls'])} 发")
+        _sh_reit.rmtree(_nav_dir, ignore_errors=True)
+        _net["calls"].clear()
+        _net["fail_nav"] = fd.RiskControlError
+        expect_raise("L1", "REIT防封-风控信号立即上抛不继续打",
+                     lambda: fd.reit_board(with_nav_date=True), "模拟失败")
+        check("L1", "REIT防封-风控后零追加请求", len(_net["calls"]) == 2)
+        _net["fail_nav"] = None
+        _sh_reit.rmtree(_nav_dir, ignore_errors=True)
+        _net["calls"].clear()
+        _net["fail_nav"] = fd.CircuitOpenError          # 熔断闸门拒绝：与 RiskControlError 平级，不能被当普通失败吞
+        expect_raise("L1", "REIT防封-熔断拒绝立即上抛不吞",
+                     lambda: fd.reit_board(with_nav_date=True), "模拟失败")
+        check("L1", "REIT防封-熔断后零追加请求", len(_net["calls"]) == 2)
+        _net["fail_nav"] = None
+        _sh_reit.rmtree(_nav_dir, ignore_errors=True)
+        _net["notfound"] = {"508000"}
+        _net["calls"].clear()
+        _b5 = fd.reit_board(with_nav_date=True)
+        _p404 = _nav_dir / "508000.json"
+        check("L1", "REIT净值历史-404视为无文件且缓存缩期",
+              len(_net["calls"]) == 7 and any("HTTP 404" in n for n in _b5[2]["notes"])
+              and _p404.exists() and (time.time() - _p404.stat().st_mtime) > 17 * 3600
+              and _b5[3]["nav_date"] == _new, str(_b5[2]["notes"]))
+        _net["notfound"] = set()
+        _net["drop_quotes"] = True
+        expect_raise("L1", "REIT行情板-0行拒绝静默空", lambda: fd.reit_board(), "0 行")
+        _net["drop_quotes"] = False
+        fd.fund_list = lambda **k: [{"code": "161725", "name": "x", "type": "股票指数"}]
+        expect_raise("L1", "REIT行情板-清单无REIT拒绝静默空", lambda: fd.reit_board(), "拒绝静默空")
+        fd.fund_list = lambda **k: _board_list
+
+        # ── I2 取数口径：连接层异常退避重试 1 次；有状态码失败不重试 ──
+        _raw_calls, _sleeps2 = [], []
+
+        def _flaky_raw(url, headers=None, timeout=10):
+            _raw_calls.append(url)
+            if len(_raw_calls) == 1:
+                raise _hc_reit.BadStatusLine("坏状态行")
+            return b"ok"
+
+        fd._tencent_raw, fd.time.sleep = _flaky_raw, lambda s: _sleeps2.append(s)
+        check("L1", "REIT取数-连接层异常退避2s重试1次后成功",
+              _saved[1]("https://qt.gtimg.cn/q=sz180101", referer=False) == b"ok"
+              and len(_raw_calls) == 2 and _sleeps2 and min(_sleeps2) >= 2.0, str(_sleeps2))
+        _raw_calls.clear()
+
+        def _http404_raw(url, headers=None, timeout=10):
+            _raw_calls.append(url)
+            raise _ue_reit.HTTPError(url, 404, "Not Found", None, None)
+
+        fd._tencent_raw = _http404_raw
+        expect_raise("L1", "REIT取数-有状态码失败直接上抛",
+                     lambda: _saved[1]("https://qt.gtimg.cn/q=sz180101"), "404")
+        check("L1", "REIT取数-有状态码失败不重试只发1次", len(_raw_calls) == 1)
+        fd._tencent_raw, fd.time.sleep = _no_net, _saved[10]
+
+        # ── J 画像（夹具日期见上：_hy 报告净值日 / _new 新上市日，均相对今天）──
+        _sh_reit.rmtree(fd.FUND_CACHE_DIR / "reits", ignore_errors=True)
+        _cal = [_today - _dt_reit.timedelta(days=i) for i in range(1, 801)]
+        _kd = [d.isoformat() for d in reversed(_cal) if d.weekday() < 5][-500:]    # 最近 500 根工作日 bar，截至昨日
+        _div_pairs = [(_kd[-11], 0.05), (_kd[-170], 0.03), (_kd[-250], 0.02), (_kd[-270], 0.5)]
+        _kline_calls = []
+
+        def _fake_kline(pre, end_date=None, bars=None, fq="qfq"):
+            fd.TENCENT_REQUEST_COUNT[0] += 1
+            _kline_calls.append({"pre": pre, "bars": bars, "fq": fq})
+            if pre == "sh508000":                       # 空返回（今日才上市或上游异常）
+                return []
+            if pre == "sh508610":                       # 刚上市：只有 1 根完成 bar
+                return [{"date": _kd[-1], "close": 3.2}]
+            return [{"date": d, "close": 1.0} for d in _kd]
+
+        fd._tencent_kline_page = _fake_kline
+        _net["zones"]["sz180101"] = _zone_json(
+            "180101", 1.386, "2.1141", _hy, "2021-06-07", "0.6000", 4, prem=-0.34440187313750537)
+        _net["profits"]["sz180101"] = json.dumps({"code": 0, "msg": "ok", "data": {"sz180101": {
+            "total": 4, "data": [{"date": ex, "fh": per} for ex, per in _div_pairs]}}})
+        _y0 = f"{_today.year}-01-01"
+        _fy = _f1 = 1.0
+        _ttm_sum, _ttm_n, _by_year = 0.0, 0, {}
+        for _ex, _per in _div_pairs:                   # 期望值独立手算（不复权平盘 → 收益全部来自分红）
+            if _ex >= _y0:
+                _fy *= 1 + _per
+            if (_today - date.fromisoformat(_ex)).days <= 365:
+                _f1 *= 1 + _per
+                _ttm_sum += _per
+                _ttm_n += 1
+            _it = _by_year.setdefault(_ex[:4], {"per_unit": 0.0, "count": 0})
+            _it["per_unit"] = round(_it["per_unit"] + _per, 6)
+            _it["count"] += 1
+        _ttm_sum = round(_ttm_sum, 6)
+        _yield = round(_ttm_sum / 1.386 * 100, 2)
+        _no_ytd = _kd[-1] < _y0                       # 今年还没有完成 bar（新年首个交易日之前）
+        _net["calls"].clear()
+        _p = fd.reit_profile("sz180101")
+        check("L1", "REIT画像-4发腾讯零东财零PDF",
+              _p["requests"] == {"tencent": 4, "eastmoney": 0} and len(_net["calls"]) == 3
+              and _kline_calls == [{"pre": "sz180101", "bars": fd._REIT_KLINE_BARS, "fq": ""}]
+              and _p["name"] == "博时招商蛇口产业园REIT" and _p["as_of"] == "2026-11-26 12:05:30",
+              str(_p["requests"]))
+        check("L1", "REIT画像-净值种类与折溢价基准",
+              _p["nav"]["nav"] == 2.1141 and _p["nav"]["nav_date"] == _hy
+              and _p["nav"]["nav_kind"] == "report" and _p["nav"]["nav_stale"] is False
+              and _p["nav"]["history"][0]["date"] == "2021-06-07"
+              and _p["premium"]["premium_pct"] == -34.44 and _p["premium"]["p_nav"] == 0.6556
+              and _p["premium"]["basis"] == f"相对 {_hy} 份额净值 2.1141", str(_p["premium"]))
+        _pj = json.dumps(_p, ensure_ascii=False)
+        check("L1", "REIT画像-基本信息只暴露核实字段",
+              _p["basic"]["full_name"] == "博时招商蛇口产业园封闭式基础设施证券投资基金"
+              and _p["basic"]["established"] == "2021-06-07"
+              and _p["basic"]["manager_company"] == "博时基金管理有限公司"
+              and _p["basic"]["custodian"] == "招商银行股份有限公司"
+              and _p["basic"]["managers"] == "王翘楚、刘玄、李慧娟"
+              and _p["basic"]["latest_scale_wan"] == 300439.0
+              and "2023-05-24" not in _pj and "124394" not in _pj
+              and "开放" not in json.dumps(_p["basic"], ensure_ascii=False), str(_p["basic"])[:110])
+        check("L1", "REIT画像-分红合计分年与近12个月派息率",
+              _p["dividends"]["count"] == 4 and abs(_p["dividends"]["total_per_unit"] - 0.6) < 1e-9
+              and _p["dividends"]["by_year"] == _by_year
+              and _p["dividends"]["ttm"]["count"] == _ttm_n
+              and abs(_p["dividends"]["ttm"]["per_unit"] - _ttm_sum) < 1e-9
+              and _p["dividends"]["ttm"]["yield_pct"] == _yield and _p["notes"] == [],
+              f"ttm={_p['dividends']['ttm']} notes={_p['notes']}")
+        check("L1", "REIT画像-分红再投资收益(不复权+分红自算)",
+              ((_p["returns"]["ytd_pct"] is None) if _no_ytd
+               else abs(_p["returns"]["ytd_pct"] - round((_fy - 1) * 100, 4)) < 1e-3)
+              and abs(_p["returns"]["ret_1y_pct"] - round((_f1 - 1) * 100, 4)) < 1e-3
+              and _p["returns"]["skipped_dividends"] == [] and _p["returns"]["max_drawdown_pct"] == 0.0
+              and _p["returns"]["as_of"] == _kd[-1] and _p["returns"]["window"]["start"] < _kd[-250]
+              and "减法复权" in _p["returns"]["method"],
+              str({k: _p["returns"][k] for k in ("ytd_pct", "ret_1y_pct", "window")}))
+        check("L1", "REIT画像-利差默认只读缓存无缓存不请求",
+              _p["spread"]["ttm_yield_pct"] == _yield and _p["spread"]["cn_10y_pct"] is None
+              and _p["spread"]["spread_bp"] is None and "国债缓存" in _p["spread"]["note"]
+              and "是否" in _p["detail_prompt"] and "180101" in _p["detail_prompt"], str(_p["spread"]))
+        _net["calls"].clear()
+        _p2 = fd.reit_profile("180101")
+        _ok2 = _p2["requests"] == {"tencent": 0, "eastmoney": 0} and _net["calls"] == [] and len(_kline_calls) == 1
+        _p3 = fd.reit_profile("180101", force_refresh=True)
+        check("L1", "REIT画像-当日缓存二调0发与强制刷新4发",
+              _ok2 and _p3["requests"]["tencent"] == 4 and len(_net["calls"]) == 3
+              and len(_kline_calls) == 2, str((_p2["requests"], _p3["requests"])))
+        fd._cache_write("macro/tsy_5.json", [
+            {"SOLAR_DATE": "2026-11-24 00:00:00", "EMM00166466": 1.5853},
+            {"SOLAR_DATE": "2026-11-25 00:00:00", "EMM00166466": 1.5914}])
+        _p4 = fd.reit_profile("180101", force_refresh=True)
+        check("L1", "REIT画像-国债缓存取最新一行算利差基点",
+              _p4["spread"]["cn_10y_pct"] == 1.5914 and _p4["spread"]["cn_10y_date"] == "2026-11-25"
+              and _p4["spread"]["spread_bp"] == round((_yield - 1.5914) * 100, 1)
+              and _p4["requests"]["eastmoney"] == 0, str(_p4["spread"]))
+        (fd.FUND_CACHE_DIR / "macro" / "tsy_5.json").unlink()
+        _tsy_calls = []
+
+        def _fake_tsy(days=30):
+            _tsy_calls.append(days)
+            fd._cache_write("macro/tsy_5.json", [{"SOLAR_DATE": "2026-11-25 00:00:00", "EMM00166466": 1.5914}])
+            return [{"date": "2026-11-25", "cn_10y": 1.5914}]
+
+        fd.treasury_yield_daily = _fake_tsy
+        fd.reit_profile("180101", force_refresh=True, macro="fetch")
+        fd.reit_profile("180101", force_refresh=True, macro="fetch")
+        check("L1", "REIT画像-macro=fetch仅无缓存时发1次", _tsy_calls == [5])
+        (fd.FUND_CACHE_DIR / "macro" / "tsy_5.json").unlink()
+        fd.treasury_yield_daily = lambda days=30: (_ for _ in ()).throw(fd.RiskControlError("HTTP 403（演练）"))
+        expect_raise("L1", "REIT画像-国债风控异常照常上抛不吞",
+                     lambda: fd.reit_profile("180101", force_refresh=True, macro="fetch"), "403")
+        expect_raise("L1", "REIT画像-非法macro拒绝", lambda: fd.reit_profile("180101", macro="bogus"), "macro")
+        expect_raise("L1", "REIT画像-非REIT拒绝", lambda: fd.reit_profile("180001"), "不是公募 REIT")
+        expect_raise("L1", "REIT画像-非法代码拒绝", lambda: fd.reit_profile("18010"), "6 位数字")
+        _net["zones"]["sh508610"] = _zone_json("508610", 3.152, "3.1060", _new, _new,
+                                               "0.0000", 0, prem=0.0148)
+        _net["profits"]["sh508610"] = '{"code":0,"msg":"ok","data":{}}'
+        _p6 = fd.reit_profile("508610")
+        check("L1", "REIT画像-新上市净值是发行价收益不硬造",
+              _p6["nav"]["nav_kind"] == "issue_price" and _p6["nav"]["nav_kind_inferred"] is False
+              and _p6["premium"]["basis"] == f"相对发行价 3.106（净值日期 {_new} = 成立日）"
+              and _p6["dividends"]["count"] == 0 and _p6["dividends"]["total_per_unit"] is None
+              and _p6["dividends"]["ttm"]["per_unit"] is None and _p6["spread"] is None
+              and _p6["returns"]["ytd_pct"] is None and _p6["returns"]["ret_1y_pct"] is None
+              and _p6["returns"]["notes"] == ["日线只有 1 根完成 bar（刚上市），收益指标未计算"],
+              str(_p6["returns"]["notes"]))
+        _net["zones"]["sz180102"] = _zone_json("999999", 3.2, "3.2", "2026-11-03", "2026-11-03", "0.0", 0)
+        expect_raise("L1", "REIT画像-实时概览串台拒绝", lambda: fd.reit_profile("180102"), "串台")
+        _net["zones"]["sz180101"] = _zone_json(
+            "180101", 1.386, "2.1141", _hy, "2021-06-07", "0.5000", 4)     # 累计分红字段 ≠ 分红史合计
+        check("L1", "REIT画像-累计分红与分红史不一致入notes",
+              any("累计分红" in n for n in fd.reit_profile("180101", force_refresh=True)["notes"]))
+        _kline_calls.clear()
+        _kl_rel = fd.FUND_CACHE_DIR / "reits" / "kline_raw" / f"508000_{fd._REIT_KLINE_BARS}.json"
+        check("L1", "REIT日线-空返回不缓存也不冒充刚上市",
+              fd._reit_kline_raw("sh508000") == [] and not _kl_rel.exists()
+              and fd._reit_kline_raw("sh508000") == [] and len(_kline_calls) == 2,
+              f"{len(_kline_calls)} 次")
+        _sat = next(d.isoformat() for d in _cal                          # 最后一根 bar 之前的最近周六：
+                    if d.weekday() == 5 and d.isoformat() < _kd[-1])      # 落在日线区间内却不在日线里
+        _REIT_NAVS["508888"] = _nav_file("508888", [[_hy_c, "2.1000"]])
+        _net["zones"]["sh508888"] = _zone_json("508888", 2.0, "2.1", _hy, "2020-01-01", "0.1000", 1,
+                                               prem=-0.0476)
+        _net["profits"]["sh508888"] = json.dumps({"code": 0, "data": {"sh508888": {"total": 2, "data": [
+            {"date": _kd[-5], "fh": 0.05}, {"date": _sat, "fh": 0.05}]}}})
+        _p7 = fd.reit_profile("508888", force_refresh=True)
+        check("L1", "REIT画像-累计净值不被历史缺列冲掉且漏行分红入notes",
+              _p7["nav"]["acc_nav"] == 2.5299 and _p7["dividends"]["count"] == 2
+              and [d["ex_date"] for d in _p7["returns"]["skipped_dividends"]] == [_sat]
+              and any("不在日线里" in n for n in _p7["returns"]["notes"]), str(_p7["returns"]["notes"]))
+        _REIT_NAVS["508777"] = _nav_file("508777", [])
+        _net["zones"]["sh508777"] = _zone_json("508777", 2.0, "2.0", None, "2020-01-01", "0.0000", 0)
+        _net["profits"]["sh508777"] = '{"code":0,"msg":"ok","data":{}}'
+        _p8 = fd.reit_profile("508777")
+        _hy_prev = f"{int(_hy[:4]) - 1}-12-31" if _hy[5:] == "06-30" else f"{_hy[:4]}-06-30"
+        _REIT_NAVS["508999"] = _nav_file("508999", [[_hy_prev.replace("-", ""), "1.9000", "2.0000"],
+                                                     [_hy_c, "1.9500"]])
+        _net["zones"]["sh508999"] = _zone_json("508999", 1.96, "1.9000", _hy_prev, "2020-01-01",
+                                               "0.0000", 0)
+        _net["profits"]["sh508999"] = '{"code":0,"msg":"ok","data":{}}'
+        _p9 = fd.reit_profile("508999")
+        check("L1", "REIT画像-历史较新但缺累计净值列时如实提示",
+              _p9["nav"]["nav_date"] == _hy and _p9["nav"]["nav"] == 1.95
+              and _p9["nav"]["acc_nav"] == 2.5299 and any("缺累计净值" in n for n in _p9["notes"]),
+              str(_p9["notes"]))
+        _REIT_NAVS["508888"] = _nav_file("508888", [[_hy_c, "2.0500", "2.1000"]])
+        _p10 = fd.reit_profile("508888", force_refresh=True)
+        check("L1", "REIT画像-同日净值两源不一致入notes不静默",
+              _p10["nav"]["nav"] == 2.05 and any("净值不一致" in n for n in _p10["notes"]),
+              str(_p10["notes"]))
+        check("L1", "REIT画像-净值日期缺失文案如实不出现None",
+              _p8["nav"]["nav_date"] is None and _p8["nav"]["nav_kind"] == "unknown"
+              and _p8["premium"]["basis"] == "相对腾讯净值 2.0（无净值日期）", str(_p8["premium"]))
+        _REIT_NAVS["508777"] = _nav_file("508777", [[_hy_c, "2.0000"]])   # 概览无净值日期、历史末行缺累计列
+        _p11 = fd.reit_profile("508777", force_refresh=True)
+        check("L1", "REIT画像-概览缺净值日期且历史缺累计列不崩并说明",
+              _p11["nav"]["nav_date"] == _hy and _p11["nav"]["acc_nav"] == 2.5299
+              and any("概览未给净值日期" in n for n in _p11["notes"]), str(_p11["notes"]))
+
+        # ── K 报告文本（第二段）──
+        _T = "博时招商蛇口产业园封闭式基础设施证券投资基金"
+        _rep_rows = [
+            {"code": "180101", "report_id": "AN202610261830930694", "date": "2026-10-27", "year": 2026,
+             "kind": "Q3", "title": f"{_T}2026年第3季度报告", "short_title": None,
+             "pdf_url": "https://pdf.dfcfw.com/pdf/H2_AN202610261830930694_1.pdf"},
+            {"code": "180101", "report_id": "AN202608261828496132", "date": "2026-08-27", "year": 2026,
+             "kind": "interim", "title": f"{_T}2026年中期报告", "short_title": None,
+             "pdf_url": "https://pdf.dfcfw.com/pdf/H2_AN202608261828496132_1.pdf"},
+            {"code": "180101", "report_id": "AN202603131820546585", "date": "2026-03-14", "year": None,
+             "kind": "other", "title": f"{_T}2025年房地产评估报告", "short_title": None,
+             "pdf_url": "https://pdf.dfcfw.com/pdf/H2_AN202603131820546585_1.pdf"},
+            {"code": "180101", "report_id": "AN202603131820546584", "date": "2026-03-14", "year": None,
+             "kind": "other", "title": f"{_T}2025年审计报告", "short_title": None,
+             "pdf_url": "https://pdf.dfcfw.com/pdf/H2_AN202603131820546584_1.pdf"},
+            {"code": "180101", "report_id": "AN202603131820546580", "date": "2026-03-14", "year": 2025,
+             "kind": "annual", "title": f"{_T}2025年年度报告摘要", "short_title": None,     # 同类里排在年报前
+             "pdf_url": "https://pdf.dfcfw.com/pdf/H2_AN202603131820546580_1.pdf"},
+            {"code": "180101", "report_id": "AN202603131820546581", "date": "2026-03-14", "year": 2025,
+             "kind": "annual", "title": f"{_T}2025年年度报告", "short_title": None,
+             "pdf_url": "https://pdf.dfcfw.com/pdf/H2_AN202603131820546581_1.pdf"},
+        ]
+        _rep_calls, _pdf_calls, _ext_calls = [], [], []
+
+        def _fake_pdf(report, dest_dir=None, force_refresh=False):
+            _pdf_calls.append((report["report_id"], dest_dir, force_refresh))
+            return str(fd.FUND_CACHE_DIR / "reits" / "pdf" / (report["report_id"] + ".pdf"))
+
+        def _fake_extract(path):
+            _ext_calls.append(path)
+            return list(_PAGES5), []
+
+        fd.fund_reports = lambda query, category="periodic", limit=20, force_refresh=False: (
+            _rep_calls.append((query, category, limit, force_refresh)),
+            {"code": "180101", "category": category, "total": 40, "reports": _rep_rows})[1]
+        fd.fund_report_pdf = _fake_pdf
+        fd._reit_pdf_pages = _fake_extract
+        _idx = fd.reit_report_text("sz180101")
+        check("L1", "REIT报告-索引默认取最新季报不含评估与审计报告",
+              _idx["report_id"] == "AN202610261830930694" and _idx["kind"] == "Q3"
+              and _rep_calls[0] == ("180101", "periodic", 100, False)
+              and Path(_pdf_calls[0][1]) == fd.FUND_CACHE_DIR / "reits" / "pdf"
+              and _idx["page_count"] == 5 and _idx["total_chars"] == sum(len(t) for t in _PAGES5)
+              and all(set(pg) == {"page", "chars", "preview"} for pg in _idx["page_index"])
+              and "pages_text" not in _idx and "pages=[...]" in _idx["next"], str(_idx["next"]))
+        check("L1", "REIT报告-关键词只返回页码不返回数值",
+              _idx["keyword_pages"]["可供分配金额"] == [3, 4] and _idx["keyword_pages"]["持有人结构"] == [5]
+              and _idx["toc_pages"] == [3] and len(_idx["reading_tips"]) == 4
+              and "本期收入" not in json.dumps(_idx["keyword_pages"], ensure_ascii=False)
+              and _idx["cross_check"]["available"] is True
+              and _idx["cross_check"]["dividends_by_year"] == _by_year
+              and "nav" not in _idx["cross_check"]                  # 季报不披露份额净值：不给净值对照
+              and any("dividends_by_year[2026]" in h for h in _idx["cross_check"]["hints"]),
+              str(_idx["keyword_pages"]))
+        _txt = fd.reit_report_text("180101", pages=[4, 3])
+        _idx3 = fd.reit_report_text("180101", keywords=["本期收入"])
+        check("L1", "REIT报告-指定页带页码正文且文本缓存复用零重抽",
+              [pg["page"] for pg in _txt["pages_text"]] == [3, 4]
+              and _txt["pages_text"][0]["text"] == _PAGES5[2]
+              and _txt["chars"] == len(_PAGES5[2]) + len(_PAGES5[3])
+              and "page_index" not in _txt and "keyword_pages" not in _txt
+              and _idx3["keyword_pages"]["本期收入"] == [4] and len(_ext_calls) == 1
+              and len(_pdf_calls) == 1,           # 文本缓存命中：后两次调用连 PDF 下载都没走
+              str([pg["page"] for pg in _txt["pages_text"]]))
+        expect_raise("L1", "REIT报告-页码越界拒绝", lambda: fd.reit_report_text("180101", pages=[9]),
+                     "页码超出范围")
+        for _bad, _msg in (({"pages": [3, 4], "max_chars": 10}, "超过上限"),
+                          ({"pages": [9]}, "页码超出范围"), ({"pages": [0]}, "页码"),
+                          ({"pages": 3.5}, "页码"), ({"pages": "4"}, "页码"),
+                          ({"keywords": 7}, "keywords"), ({"kind": 3}, "kind 需为"),
+                          ({"year": 26}, "year"), ({"max_chars": 0}, "max_chars")):
+            # 参数性错误必须是 ValueError（上游异常才是 RuntimeError 族）——文案对、类型错也不行
+            try:
+                fd.reit_report_text("180101", **_bad)
+                check("L1", "REIT报告-参数性错误应抛未抛", False, str(_bad))
+            except ValueError as e:
+                check("L1", "REIT报告-参数性错误一律ValueError",
+                      _msg in str(e), f"{_bad} → {str(e)[:56]}")
+            except Exception as e:
+                check("L1", "REIT报告-参数性错误类型错误", False, f"{_bad} → {type(e).__name__}")
+        expect_raise("L1", "REIT报告-非法页码拒绝",
+                     lambda: fd.reit_report_text("180101", pages=[0]), "页码")
+        expect_raise("L1", "REIT报告-字符串页码拒绝",
+                     lambda: fd.reit_report_text("180101", pages="4"), "页码")
+        expect_raise("L1", "REIT报告-非法kind拒绝",
+                     lambda: fd.reit_report_text("180101", kind="  "), "kind 需为")
+        expect_raise("L1", "REIT报告-非字符串kind拒绝",
+                     lambda: fd.reit_report_text("180101", kind=3), "kind 需为")
+        expect_raise("L1", "REIT报告-非法year拒绝", lambda: fd.reit_report_text("180101", year=26), "year")
+        expect_raise("L1", "REIT报告-无匹配报告列可用项",
+                     lambda: fd.reit_report_text("180101", kind="annual", year=2019), "可用：")
+        expect_raise("L1", "REIT报告-非REIT拒绝", lambda: fd.reit_report_text("180001"), "不是公募 REIT")
+        check("L1", "REIT报告-按类目年份标题词选报",
+              fd.reit_report_text("180101", kind="other")["report_id"].endswith("546585")
+              and fd.reit_report_text("180101", kind="评估")["report_id"].endswith("546585")
+              and fd.reit_report_text("180101", kind="审计")["report_id"].endswith("546584")
+              and fd.reit_report_text("180101", kind="评估", year=2025)["report_id"].endswith("546585")
+              and fd.reit_report_text("180101", kind="annual", year=2025)["report_id"].endswith("546581")
+              and fd.reit_report_text("180101", kind="interim")["report_id"].endswith("496132")
+              and fd.reit_report_text("180101", kind="Q3")["title"].endswith("第3季度报告"))
+        _cc2 = fd.reit_report_text("180101", kind="interim")["cross_check"]
+        check("L1", "REIT报告-中报按报告期取净值点对账",
+              _cc2["nav"] == {"nav": 2.1141, "nav_date": "2026-06-30", "matched_period": True}
+              and "报告里「期末份额净值」↔ nav.nav（腾讯 2026-06-30 的份额净值）" in _cc2["hints"],
+              str(_cc2["hints"]))
+        _cc4 = fd.reit_report_text("180101", kind="annual", year=2025)["cross_check"]
+        check("L1", "REIT报告-历史期无对应净值点如实说明不误导",
+              _cc4["nav"]["matched_period"] is False and _cc4["nav"]["nav_date"] == _hy
+              and any(h.startswith("腾讯净值历史里没有 2025-12-31 的点") for h in _cc4["hints"])
+              and not any("以报告为准）" in h and "净值" in h for h in _cc4["hints"]), str(_cc4["hints"]))
+        _sh_reit.rmtree(fd.FUND_CACHE_DIR / "reits" / "div", ignore_errors=True)
+        _sh_reit.rmtree(fd.FUND_CACHE_DIR / "reits" / "navhist", ignore_errors=True)
+        _net["calls"].clear()
+        _cc3 = fd.reit_report_text("180101", kind="Q3")["cross_check"]
+        check("L1", "REIT报告-无腾讯缓存如实说明且不补发请求",
+              _cc3["available"] is False and "不为此发请求" in _cc3["note"] and _net["calls"] == [])
+        # 真实抽取函数守卫：空白 PDF（无文本）显式报错；缺 pypdf 给安装提示
+        try:
+            import pypdf as _pypdf
+        except ImportError:
+            _pypdf = None
+        if _pypdf is not None:
+            with tempfile.TemporaryDirectory(prefix="fd-reit-blank-") as _d:
+                _w = _pypdf.PdfWriter()
+                _w.add_blank_page(width=200, height=200)
+                _blank = Path(_d) / "blank.pdf"
+                with _blank.open("wb") as _fh:
+                    _w.write(_fh)
+                Path(_pdf_calls[0][1]).mkdir(parents=True, exist_ok=True)   # 真实下载函数会建目录，桩不会
+                _blank_cache = Path(_pdf_calls[0][1]) / "AN202608261828496132.pdf"
+                _blank_cache.write_bytes(_blank.read_bytes())
+                fd._reit_pdf_pages = _saved[6]
+                _texts, _warns = _saved[6](str(_blank_cache))
+                check("L1", "REIT报告-单页抽取失败按空页处理并记警告",
+                      _texts == [""] and len(_warns) == 1 and "第 1 页" in _warns[0]
+                      and "KeyError" in _warns[0], str(_warns))
+                expect_raise("L1", "REIT报告-无文本PDF显式报错不落缓存",
+                             lambda: fd.reit_report_text("180101", kind="interim", force_refresh=True),
+                             "没有可提取的文本")
+                _mod = sys.modules.get("pypdf")
+                sys.modules["pypdf"] = None
+                try:
+                    expect_raise("L1", "REIT报告-缺pypdf显式安装提示",
+                                 lambda: _saved[6](str(_blank_cache)), "pip install pypdf")
+                finally:
+                    sys.modules.pop("pypdf", None)
+                    if _mod is not None:
+                        sys.modules["pypdf"] = _mod
+        # 部分页抽取失败：不炸整份报告，警告随结果返回（零 pypdf 依赖，mock 抽取层）
+        _warn1 = "第 1 页文本抽取失败（KeyError），按空页处理"
+        fd._reit_pdf_pages = lambda path: (["", "§3 主要财务指标\n本期收入 1 元"], [_warn1])
+        _pw = fd.reit_report_text("180101", kind="annual", year=2025, force_refresh=True)
+        check("L1", "REIT报告-抽取警告随结果返回",
+              _pw["extract_warnings"] == [_warn1] and _pw["page_count"] == 2
+              and _pw["keyword_pages"]["主要财务指标"] == [2], str(_pw.get("extract_warnings")))
+        fd._reit_pdf_pages = _fake_extract
+
+        # ── L 配套修改：净值类工具对 REIT 的拒绝与指路 ──
+        fd.tencent_quote, fd.fund_realtime_nav = _no_net, _no_net
+        expect_raise("L1", "REIT配套-qdii_premium拒绝REIT零网络",
+                     lambda: fd.qdii_premium(["180101", "508000"]), "reit_profile")
+        expect_raise("L1", "REIT配套-qdii_premium形态兜底拒绝",
+                     lambda: fd.qdii_premium(["508777"]), "公募 REIT")
+        fd.tencent_quote = lambda codes: {c: {"name": "纳指ETF", "price": 1.0} for c in codes}
+        fd.fund_realtime_nav = lambda codes: [{"code": c, "name": "纳指ETF", "nav": 1.1,
+                                               "nav_date": "2026-11-25"} for c in codes]
+        _qp = fd.qdii_premium(["513100"])
+        check("L1", "REIT配套-普通场内基金溢价不受影响", _qp[0]["premium_pct"] == -9.09, str(_qp[0]))
+        # 零网络纪律：fund_metrics / fund_dca_backtest 属 L5 零网络层，报错分支的 REIT 识别
+        # 不得触发清单加载（清单冷时那是东财 1 发 + 失败时的重试等待）
+        _one = {"_meta": {"code": "180101"}, "nav_history": [{"date": "2026-06-30", "nav": 2.1141}]}
+        _mem_backup, _loads = list(fd._FUND_LIST_MEM), []
+        fd.fund_list = lambda **k: (_loads.append(1), _board_list)[1]
+        try:
+            fd._FUND_LIST_MEM[:] = []                  # 进程内清单未装载
+            try:
+                fd.fund_metrics(_one)
+                check("L1", "REIT配套-清单未装载时应抛未抛", False)
+            except ValueError as e:
+                check("L1", "REIT配套-fund_metrics报错分支零网络零加载",
+                      _loads == [] and "reit_profile" in str(e), str(e)[-60:])
+            fd._FUND_LIST_MEM[:] = [{"code": "180101", "name": "x", "type": "混合型-灵活"},   # 类型串变了
+                                    {"code": "513100", "name": "y", "type": "指数型-海外股票"}]
+            try:
+                fd.fund_dca_backtest(_one)
+                check("L1", "REIT配套-号段命中应抛未抛", False)
+            except ValueError as e:
+                check("L1", "REIT配套-清单类型串变了号段命中仍判REIT并指路",
+                      _loads == [] and "reit_profile" in str(e), str(e)[-50:])
+            _id0 = [fd._is_reit(c, allow_load=False) for c in ("508777", "180001", "513100", "180101")]
+            check("L1", "REIT识别-allow_load=False只看进程内清单不加载",
+                  _id0 == [(True, "code_pattern"), (False, "not_reit"), (False, "fund_list"),
+                           (True, "code_pattern")]      # 180101：清单类型串变了，号段命中仍判 REIT
+                  and _loads == [], str(_id0))
+            check("L1", "REIT识别-allow_load=True才加载清单",
+                  fd._is_reit("180101") == (True, "fund_list") and _loads == [1], str(_loads))
+        finally:
+            fd._FUND_LIST_MEM[:] = _mem_backup
+            fd.fund_list = lambda **k: _board_list
+        try:
+            fd.fund_metrics(_one)
+            check("L1", "REIT配套-fund_metrics对REIT应抛未抛", False)
+        except ValueError as e:
+            check("L1", "REIT配套-fund_metrics报错指路reit_profile",
+                  "净值不足 2 个点" in str(e) and "reit_profile" in str(e) and "公募 REIT" in str(e),
+                  str(e)[:90])
+        try:
+            fd.fund_dca_backtest(_one)
+            check("L1", "REIT配套-DCA对REIT应抛未抛", False)
+        except ValueError as e:
+            check("L1", "REIT配套-DCA报错指路reit_profile", "无法回测" in str(e) and "reit_profile" in str(e),
+                  str(e)[:80])
+        try:
+            fd.fund_metrics({"_meta": {"code": "161725"}, "nav_history": [{"date": "2026-06-30", "nav": 1.0}]})
+            check("L1", "REIT配套-普通基金应抛未抛", False)
+        except ValueError as e:
+            check("L1", "REIT配套-普通基金报错文案不变",
+                  str(e) == "区间内净值不足 2 个点（1），无法计算指标", str(e))
+
+        # ── M 日K fq 参数：不复权取 day 键，默认行为不变 ──
+        _seen_urls = []
+
+        class _Opener:
+            def open(self, req, timeout=None):
+                _seen_urls.append(req.full_url)
+                return _io_reit.BytesIO(json.dumps({"data": {"sz180101": {"day": [
+                    ["2026-11-25", "1.389", "1.392", "1.398", "1.385", "4158.000"]]}}}).encode("utf-8"))
+
+        fd._tencent_raw, fd._tencent_kline_page = _saved[2], _saved[3]
+        fd.urllib.request.build_opener = lambda *a, **k: _Opener()
+        _raw = fd._tencent_kline_page("sz180101", bars=30, fq="")
+        fd._tencent_kline_page("sz180101", bars=30)
+        check("L1", "REIT日K-fq空取不复权且默认行为不变",
+              _raw == [{"date": "2026-11-25", "close": 1.392}]
+              and _seen_urls[0].endswith(",day,,,30,") and _seen_urls[1].endswith(",day,,,30,qfq"),
+              str(_seen_urls))
+        expect_raise("L1", "REIT日K-非法fq拒绝", lambda: fd._tencent_kline_page("sz180101", fq="hfq"), "fq")
+    finally:
+        (fd.fund_list, fd._tencent_fund_get, fd._tencent_raw, fd._tencent_kline_page, fd.fund_reports,
+         fd.fund_report_pdf, fd._reit_pdf_pages, fd.tencent_quote, fd.fund_realtime_nav,
+         fd.treasury_yield_daily, fd.time.sleep, fd._REIT_FANOUT_INTERVAL) = _saved
+        fd.urllib.request.build_opener = _orig_bo
+        fd.TENCENT_REQUEST_COUNT[0] = _tx0_all
+        _fresh_coordination()
+        # mock 数据不入真缓存（V0.8.1 教训：同进程在线层会读沙箱缓存）
+        _sh_reit.rmtree(fd.FUND_CACHE_DIR / "reits", ignore_errors=True)
+        (fd.FUND_CACHE_DIR / "macro" / "tsy_5.json").unlink(missing_ok=True)
+
+
+def test_reit_online():
+    """REITs 层在线锚（预算：腾讯 1+4 发；东财清单 0~1 + 报告 2~3 发；不触发逐只补齐的 103 发）。"""
+    import shutil as _sh_reit_on
+    try:
+        board = fd.reit_board()                                       # 腾讯 1 发
+        codes = {x["code"] for x in board}
+        listed = [x for x in board if x["price"]]
+        check("L2", "REIT行情板-全市场一次批量(103只锚)",
+              len(board) >= 100 and {"180101", "508000"} <= codes and len(listed) >= 100
+              and all(x["nav_kind"] == "unknown" for x in board), f"{len(board)} 只，有行情 {len(listed)}")
+        b101 = next(x for x in board if x["code"] == "180101")
+        check("L2", "REIT行情板-行情串自带净值与折溢价",
+              b101["nav"] is not None and 1.5 < b101["nav"] < 3.5 and b101["premium_pct"] is not None
+              and abs(b101["premium_pct"] - round((b101["price"] / b101["nav"] - 1) * 100, 2)) <= 0.05
+              and sum(1 for x in listed if x["nav"] and x["premium_pct"] is not None) >= 100,
+              f"180101 价 {b101['price']} 净值 {b101['nav']} 折溢价 {b101['premium_pct']}%")
+        fl = fd.fund_list()
+        n_reits = sum(1 for f in fl if f["type"] == "Reits")
+        check("L2", "REIT识别-真实清单全中且零误判",
+              n_reits == len(board) and all(fd._is_reit(c) == (True, "fund_list") for c in codes)
+              and n_reits == sum(1 for f in fl if fd._REIT_CODE_RE.fullmatch(f["code"])),
+              f"清单 Reits {n_reits} 只，形态命中同数")
+        p = fd.reit_profile("180101")                                  # 腾讯 4 发
+        hist = p["nav"]["history"]
+        check("L2", "REIT画像-净值历史半年频锚(2021-06-07发行价2.31起)",
+              len(hist) >= 11 and hist[0] == {"date": "2021-06-07", "nav": 2.31, "acc_nav": 2.31}
+              and p["nav"]["nav_kind"] == "report" and p["nav"]["nav_date"] == hist[-1]["date"]
+              and p["nav"]["nav_date"][5:] in ("06-30", "12-31") and p["nav"]["nav_date"] <= fd.datetime.now(
+                  fd._BJ_TZ).date().isoformat() and p["nav"]["nav"] == hist[-1]["nav"],
+              f"{len(hist)} 点 {hist[0]['date']}→{hist[-1]['date']}")
+        ttm = p["dividends"]["ttm"]
+        _hist = p["dividends"]["history"]
+        check("L2", "REIT画像-分红史固定锚(东财分红表逐条核对过的13笔合计0.452)",
+              {"ex_date": "2026-09-17", "per_unit": 0.0362} in _hist
+              and abs(sum(d["per_unit"] for d in _hist if d["ex_date"] <= "2026-09-17") - 0.452) < 1e-9
+              and len([d for d in _hist if d["ex_date"] <= "2026-09-17"]) == 13,
+              f"前 13 笔合计 {sum(d['per_unit'] for d in _hist if d['ex_date'] <= '2026-09-17')}")
+        check("L2", "REIT画像-分红史与画像预算",
+              p["dividends"]["count"] >= 13 and p["dividends"]["total_per_unit"] >= 0.452
+              and ttm["count"] >= 1 and abs(ttm["per_unit"] - sum(
+                  d["per_unit"] for d in p["dividends"]["history"]
+                  if ttm["window"][0] <= d["ex_date"] <= ttm["window"][1])) < 1e-9
+              and p["returns"]["ret_1y_pct"] is not None
+              and (p["returns"]["ytd_pct"] is not None)          # 新年首个交易日之前今年还没有完成 bar，None 属正常
+              == (p["returns"]["as_of"] >= f"{fd.datetime.now(fd._BJ_TZ).date().year}-01-01")
+              and p["requests"] == {"tencent": 4, "eastmoney": 0},
+              f"分红 {p['dividends']['count']} 次，近12个月每份 {ttm['per_unit']}，"
+              f"YTD {p['returns']['ytd_pct']}% 近一年 {p['returns']['ret_1y_pct']}%")
+        if p["spread"] and p["spread"]["cn_10y_pct"] is not None:
+            check("L2", "REIT画像-利差与派息率自洽",
+                  abs(p["spread"]["spread_bp"] - round((p["spread"]["ttm_yield_pct"]
+                                                        - p["spread"]["cn_10y_pct"]) * 100, 1)) < 0.11)
+        idx = fd.reit_report_text("180101", kind="Q3", year=2026)      # 东财 2~3 发
+        check("L2", "REIT报告-季报索引与关键词页码",
+              idx["page_count"] >= 15 and 20000 < idx["total_chars"] < 80000
+              and 8 in idx["keyword_pages"]["可供分配金额"]
+              and 8 in idx["keyword_pages"]["主要财务指标"] and idx["cross_check"]["available"] is True,
+              f"{idx['page_count']} 页 {idx['total_chars']} 字符，可供分配金额命中 "
+              f"{idx['keyword_pages']['可供分配金额']}")
+        _tt_n = fd.TT_REQUEST_COUNT[0]
+        txt = fd.reit_report_text("180101", kind="Q3", year=2026, pages=[8])
+        check("L2", "REIT报告-指定页正文零追加请求",
+              fd.TT_REQUEST_COUNT[0] == _tt_n and "主要财务指标" in txt["pages_text"][0]["text"]
+              and "现金流分派率" in txt["pages_text"][0]["text"], f"第 8 页 {len(txt['pages_text'][0]['text'])} 字符")
+    finally:
+        _sh_reit_on.rmtree(fd.FUND_CACHE_DIR / "reits", ignore_errors=True)
+
+
 # ════════════════════ L2 端点 smoke（真数据结构断言）════════════════════
 def test_l2_smoke():
     # 在线首测强制真实抓取：覆盖沙箱里的离线密闭性合成种子（E1 端点真验证）
@@ -5011,13 +5958,14 @@ def main():
     test_l1_offline()
     test_csindex_offline()
     test_sws_offline()
+    test_reit_offline()
     test_sprint2_integration_offline()
     test_sprint3_integration_offline()
     if not OFFLINE_ONLY:
         # 逐函数隔离（冷跑教训：单函数 transient 逃逸曾连带跳过 L3/L4/L5/F 全部信号）；
         # 栈全文走 stdout（print_exc 走 stderr 会与 check 的 stdout 在管道下错序截断）
-        for fn in (test_l2_smoke, test_csindex_online, test_sws_online, test_bench_spot_online,
-                   test_l3_cross, test_l4_budget,
+        for fn in (test_l2_smoke, test_csindex_online, test_sws_online, test_reit_online,
+                   test_bench_spot_online, test_l3_cross, test_l4_budget,
                    test_l5_degrade, test_f_guard_band, test_f_cache_band):
             try:
                 fn()

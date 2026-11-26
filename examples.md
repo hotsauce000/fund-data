@@ -1,6 +1,6 @@
-# fund-data 复制即用示例（examples.md · 按需读取层）V0.8.3
+# fund-data 复制即用示例（examples.md · 按需读取层）V0.8.4
 
-本文件解决两个问题：**「具体怎么调用」**（15 个高频场景菜谱，复制即跑）与
+本文件解决两个问题：**「具体怎么调用」**（16 个高频场景菜谱，复制即跑）与
 **「出问题了怎么办」**（FAQ 按现象直达解法）。每条菜谱 = 意图 + 完整代码 +
 预期输出形态 + 一行坑提醒。实现细节/坑区全档 → `reference.md`；
 场景路由总表 → `SKILL.md`。
@@ -14,7 +14,8 @@ import fund_data
 ```
 
 依赖：`pip install requests`；系统 `curl`（仅中债曲线族需要）；系统 `node`
-（仅巨潮抱团度/行业配置需要）；pandas 可选。以下示例均假设已执行本块。
+（仅巨潮抱团度/行业配置与报告 PDF 下载需要）；pandas 可选；`pypdf` 可选（仅场景 16
+读 REIT 报告需要）。以下示例均假设已执行本块。
 防封铁律（请求预算）见 SKILL.md——**任何场景都不要 `for fund in 全量: fund_snapshot(fund)`**。
 
 ---
@@ -290,6 +291,45 @@ print(len(c), "只，前十权重和",
 `verify=False`）；估值当日盘后未发布走 `pending_today` 豁免不报错；pe 为 None
 是亏损期官方口径，不是缺数。→ P34
 
+## 场景 16 · 公募 REITs：行情板 / 单只画像 / 读定期报告（两段式）
+
+**意图**：REIT 不按日披露净值，东财净值停在发行价——`fund_snapshot` /
+`qdii_premium` 对它算出的折溢价是假的（P36）。走 REIT 专用入口：先用腾讯拉
+基础数据，**问过用户再读报告**。
+
+```python
+import fund_data as fd
+
+# ① 全市场行情板：腾讯 1 请求（现价/涨跌/换手/市值 + 净值 + 折溢价）
+board = fd.reit_board()                            # 默认不逐只补净值日期
+for r in sorted(board, key=lambda x: -(x["mcap_yi"] or 0))[:10]:
+    print(r["code"], r["name"], r["price"], f"折溢价 {r['premium_pct']}%")
+# 要净值日期：fd.reit_board(with_nav_date=True)   # 逐只补，103 只约 2 分钟，当日缓存
+
+# ② 单只画像：腾讯 4 请求（当日缓存后 0~1）
+p = fd.reit_profile("180101")
+print(p["nav"]["nav_date"], p["nav"]["nav_kind"], p["premium"]["basis"])
+print("近12个月每份分红", p["dividends"]["ttm"]["per_unit"],
+      "派息率", p["dividends"]["ttm"]["yield_pct"])
+print("近一年", p["returns"]["ret_1y_pct"], "利差(bp)", (p["spread"] or {}).get("spread_bp"))
+print(p["detail_prompt"])                          # ③ 把画像交给用户，照这句问
+
+# ④ 用户确认后才读报告：先取页码索引（东财 2~3 发），再按页取正文
+idx = fd.reit_report_text("180101")                 # 最新一份季报/中期/年报
+print(idx["keyword_pages"].get("可供分配金额", []), idx["page_count"])      # 零命中时是 []
+txt = fd.reit_report_text("180101", pages=idx["keyword_pages"].get("可供分配金额", [])[:2])
+for pg in txt["pages_text"]:
+    print(f"===== 第 {pg['page']} 页 =====\n{pg['text']}")   # AI 直接读，库里不抽值
+```
+
+输出形态：行情板 `list[dict]`（每行含 `nav / nav_date / nav_kind / premium_pct /
+premium_basis`）；画像 `{basic, quote, nav, premium, dividends, returns, spread,
+notes, detail_prompt}`；报告索引 `{page_index, keyword_pages, cross_check,
+reading_tips}`，指定页调用返回 `pages_text`。
+坑提醒：**净值是半年频**——折溢价必须连同 `nav_date` 一起说；`nav_kind="issue_price"`
+表示新上市、净值还是发行价。报告里的收入/现金流分派率/出租率等由你读原文
+（表格列多，本期/上年同期别串列），读完用 `cross_check` 对账。→ P36
+
 
 ---
 
@@ -369,3 +409,8 @@ pdf.dfcfw.com 前有腾讯 EdgeOne 反爬（200+伪装成 pdf 的 988B 脚本挑
 跨币种比较排序——精确额度看 `limit_raw` 原文；`kind=limited` 但
 `limit_cny=None` 是「限大额但金额形态未识别」（上游改版预警），不是无限额。
 → P31
+
+**Q19 `qdii_premium` / `fund_metrics` 对 REIT 报错，让我用 `reit_profile`？**
+公募 REIT 不按日披露净值，东财净值停在发行价，净值类工具对它失效。改用
+`reit_profile(code)`（腾讯半年频净值 + 分红史）；要经营指标就读报告：
+`reit_report_text(code)`。→ P36
