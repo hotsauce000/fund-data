@@ -7,7 +7,7 @@
 
 # fund-data 基金底层数据工具包 V0.8.4 模块全档
 
-天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层 + 申万行业指数层 + 公募REITs层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复 + V0.8.2 申万行业指数 + V0.8.3 诊断修复 + V0.8.4 公募REITs：549/549 离线断言通过**（L1 单元 513 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 97 条。在线全量须显式 `--online`），覆盖 34 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
+天天基金主源 + 蛋卷跨域备胎 + 本地计算层 + 跨域穿透层 + 宏观利率层 + **全市场数据层 + 中证官方全收益指数层 + 申万行业指数层 + 公募REITs层**。**Sprint 1 错误语义加固 + Sprint 2/3 协调与缓存核心接入 + V0.8.0 全收益指数 + V0.8.1 审查修复 + V0.8.2 申万行业指数 + V0.8.3 诊断修复 + V0.8.4 公募REITs：551/551 离线断言通过**（L1 单元 515 · S2 协调器集成 21 · S3 缓存集成 15；另 `fund_data_core` 独立测试 97 条。在线全量须显式 `--online`），覆盖 34 个上游接口。同目录 `fund_data.py`、`fund_data_core/`、`examples.md` 与 `test_fund_data.py`；`fund_data.py` 与本文件内嵌代码逐字节一致。
 
 **V0.8.4 公募REITs层（腾讯基础数据 → 询问 → AI 直读报告，两段式）：**
 - 🟢 **`reit_board()`**：全市场行情板——腾讯行情串一次批量（103 只实测单请求）取回现价/涨跌/开高低/量额/换手/总市值 + **单位净值 + 折溢价率**；默认只发 1 请求、不逐只补净值日期，`with_nav_date=True` 才逐只补（1 请求/只）
@@ -16,7 +16,7 @@
 - 🔴 **P36 东财净值对 REIT 停在发行价**：公募 REIT 不按日披露份额净值（半年频），E2/E6 净值恒为发行价（180101 实测 2.31@2021）——`qdii_premium` 据此算出约 -40% 的假溢价，现拒绝 REIT 并指路；`fund_metrics` / `fund_dca_backtest` 的报错分支对 REIT 追加指路文案（普通基金文案不变）
 - 🔴 **防封优先**：逐只补齐按 ≥1 发/秒慢节拍串行（叠在协调器 0.2s 腾讯地板之上）、连续 2 次取数失败即中止、已取到的留当日缓存断点续跑；403/429/熔断/配额背压立即上抛不继续打；实时概览 5 分钟微缓存防同会话连打；国债默认只读缓存
 - 🟡 腾讯前复权是减法复权（除息前 qfq = 不复权 − 分红），分红再投资用不复权收盘自算，`_tencent_kline_page` 增 `fq` 参数（默认行为不变）；`finance.qq.com` 归腾讯线白名单；单页抽取失败按空页记警告（真实报告常夹空白页）；资产类型判定与经营指标结构化不在本版（AI 读报告）
-- 🟠 **独立审查修复**：逐只补齐对熔断闸门拒绝（`CircuitOpenError`，与 `RiskControlError` 平级而非父子）即时上抛；`fund_metrics`/`fund_dca_backtest` 的 REIT 指路只看进程内清单（`_is_reit(allow_load=False)`），L5 零网络层不触发加载；`nav_stale` 改按披露截止判定（年报截止 3 月末、中报截止 8 月末各留 10 天；固定 212 天阈值在每年年报季与 8 月误报）；画像 `requests` 含清单冷加载；离线夹具日期全部相对今天，23 个边界日期时间旅行回归通过。审查建议项同批落地：报告文本缓存先查后下载（带抽取方式标记，PDF 被清也不多花东财请求）；REIT 识别号段命中即判（清单类型串改名不失效）；逐只补齐 `force_refresh` 生效、中止后余下行先用缓存、连接层残包异常归类不炸穿；日线空返回不缓存；交叉核对按报告期取净值点；年报优先非摘要版。
+- 🟠 **独立审查修复**：逐只补齐对熔断闸门拒绝（`CircuitOpenError`，与 `RiskControlError` 平级而非父子）即时上抛；`fund_metrics`/`fund_dca_backtest` 的 REIT 指路只看进程内清单（`_is_reit(allow_load=False)`），L5 零网络层不触发加载；`nav_stale` 改按披露截止判定（年报截止 3 月末、中报截止 8 月末各留 10 天；固定 212 天阈值在每年年报季与 8 月误报）；画像 `requests` 含清单冷加载；离线夹具日期全部相对今天，23 个边界日期时间旅行回归通过。审查建议项同批落地：报告文本缓存先查后下载（带抽取方式标记，PDF 被清也不多花东财请求）；REIT 识别号段命中即判（清单类型串改名不失效）；逐只补齐 `force_refresh` 生效、中止后余下行先用缓存、连接层残包异常归类不炸穿；日线空返回不缓存；交叉核对按报告期取净值点；年报优先非摘要版。实读 508068 中报时又抓到一例：PDF 文字层里的求和号是孤立代理项（非法 Unicode，UTF-8 编不了），文本缓存写入失败——现于落缓存前替换为占位符并随结果告警。
 
 **V0.8.3 全项目诊断修复：**
 - 🔴 **投资结论可信**：`penetrate` 新增 `degraded`，板块取数全失败不再谎称“持仓分散”；`qdii_premium` 强制场内代码白名单（含 52 号段），杜绝同名股票行情制造假溢价；`nav_divergence` 重仓收益按覆盖度归一，低覆盖度/低股票仓位只给参考数值；`_div_from_unit_money` 兼容 E3 裸数值分红（000001 除息日实锚）
@@ -6949,6 +6949,18 @@ def _reit_pdf_pages(pdf_path: str) -> tuple[list[str], list[str]]:
     return texts, warnings
 
 
+def _reit_clean_text(text: str) -> tuple[str, int]:
+    """把 PDF 文字层里的孤立代理项换成 U+FFFD → (清理后文本, 替换个数)（纯函数）。
+
+    孤立代理项（U+D800~U+DFFF 单独出现）不是合法字符，UTF-8 编不了——不清理，文本缓存
+    一写就 UnicodeEncodeError，整份报告取不到。真实样本：508068 中报第 14~19 页「剩余
+    租期」公式里的求和号，字体把它映射成数学字母符号，文字层只剩代理对的前一半。"""
+    bad = [ch for ch in text if 0xD800 <= ord(ch) <= 0xDFFF]
+    if not bad:
+        return text, 0
+    return "".join("\ufffd" if 0xD800 <= ord(ch) <= 0xDFFF else ch for ch in text), len(bad)
+
+
 def _reit_cross_check(code: str, report: dict) -> dict:
     """报告阅读的交叉核对值：只读当日腾讯缓存，零请求；缓存不存在就如实说没有。"""
     divs = _cache_read(f"reits/div/{code}.json", max_age_hours=_REIT_DIV_TTL_HOURS)
@@ -7066,6 +7078,14 @@ def reit_report_text(code, kind=None, year=None, pages=None, keywords=None,
         pdf_path = fund_report_pdf(report, dest_dir=FUND_CACHE_DIR / "reits" / "pdf",
                                    force_refresh=force_refresh)
         texts, extract_warnings = _reit_pdf_pages(pdf_path)
+        cleaned = []
+        for i, t in enumerate(texts, start=1):         # 落缓存前的边界：文字层非法字符在这里清掉
+            t, n_bad = _reit_clean_text(t)
+            cleaned.append(t)
+            if n_bad:
+                extract_warnings.append(f"第 {i} 页文字层含 {n_bad} 个无法编码的字符（孤立代理项），"
+                                        "已替换为占位符")
+        texts = cleaned
         if not any(t.strip() for t in texts):
             raise RuntimeError(f"报告 PDF 没有可提取的文本（{Path(pdf_path).name}）——疑似扫描件；"
                                + ("；".join(extract_warnings) or "无逐页警告"))

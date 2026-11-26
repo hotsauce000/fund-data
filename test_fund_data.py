@@ -4829,6 +4829,20 @@ def test_reit_offline():
               _pw["extract_warnings"] == [_warn1] and _pw["page_count"] == 2
               and _pw["keyword_pages"]["主要财务指标"] == [2], str(_pw.get("extract_warnings")))
         fd._reit_pdf_pages = _fake_extract
+        # 文字层孤立代理项（真实样本：508068 中报第 14~19 页的求和号）——UTF-8 编不了，
+        # 落缓存前必须替换并告警，否则整份报告取不到
+        check("L1", "REIT报告-孤立代理项清理纯函数",
+              fd._reit_clean_text("a\ud835b\udfff") == ("a\ufffdb\ufffd", 2)
+              and fd._reit_clean_text("正常文本") == ("正常文本", 0))
+        fd._reit_pdf_pages = lambda path: (["正文\ud835求和号\ud835\ud835", "第二页"], [])
+        _pc = fd.reit_report_text("180101", kind="other", force_refresh=True)
+        _pc2 = fd.reit_report_text("180101", kind="other", pages=[1])       # 缓存往返
+        check("L1", "REIT报告-孤立代理项替换后可落缓存并告警",
+              _pc["page_count"] == 2 and len(_pc["extract_warnings"]) == 1
+              and "第 1 页" in _pc["extract_warnings"][0] and "3 个" in _pc["extract_warnings"][0]
+              and _pc2["pages_text"][0]["text"] == "正文\ufffd求和号\ufffd\ufffd",
+              str(_pc.get("extract_warnings")))
+        fd._reit_pdf_pages = _fake_extract
 
         # ── L 配套修改：净值类工具对 REIT 的拒绝与指路 ──
         fd.tencent_quote, fd.fund_realtime_nav = _no_net, _no_net

@@ -6657,6 +6657,18 @@ def _reit_pdf_pages(pdf_path: str) -> tuple[list[str], list[str]]:
     return texts, warnings
 
 
+def _reit_clean_text(text: str) -> tuple[str, int]:
+    """把 PDF 文字层里的孤立代理项换成 U+FFFD → (清理后文本, 替换个数)（纯函数）。
+
+    孤立代理项（U+D800~U+DFFF 单独出现）不是合法字符，UTF-8 编不了——不清理，文本缓存
+    一写就 UnicodeEncodeError，整份报告取不到。真实样本：508068 中报第 14~19 页「剩余
+    租期」公式里的求和号，字体把它映射成数学字母符号，文字层只剩代理对的前一半。"""
+    bad = [ch for ch in text if 0xD800 <= ord(ch) <= 0xDFFF]
+    if not bad:
+        return text, 0
+    return "".join("\ufffd" if 0xD800 <= ord(ch) <= 0xDFFF else ch for ch in text), len(bad)
+
+
 def _reit_cross_check(code: str, report: dict) -> dict:
     """报告阅读的交叉核对值：只读当日腾讯缓存，零请求；缓存不存在就如实说没有。"""
     divs = _cache_read(f"reits/div/{code}.json", max_age_hours=_REIT_DIV_TTL_HOURS)
@@ -6774,6 +6786,14 @@ def reit_report_text(code, kind=None, year=None, pages=None, keywords=None,
         pdf_path = fund_report_pdf(report, dest_dir=FUND_CACHE_DIR / "reits" / "pdf",
                                    force_refresh=force_refresh)
         texts, extract_warnings = _reit_pdf_pages(pdf_path)
+        cleaned = []
+        for i, t in enumerate(texts, start=1):         # 落缓存前的边界：文字层非法字符在这里清掉
+            t, n_bad = _reit_clean_text(t)
+            cleaned.append(t)
+            if n_bad:
+                extract_warnings.append(f"第 {i} 页文字层含 {n_bad} 个无法编码的字符（孤立代理项），"
+                                        "已替换为占位符")
+        texts = cleaned
         if not any(t.strip() for t in texts):
             raise RuntimeError(f"报告 PDF 没有可提取的文本（{Path(pdf_path).name}）——疑似扫描件；"
                                + ("；".join(extract_warnings) or "无逐页警告"))
