@@ -1,0 +1,8 @@
+<a href="{{ config.repo_url }}" target="_blank" rel="noopener" class="fd-gh" aria-label="GitHub 仓库">
+  {#- 图标取自主题自带的打包图标集（Font Awesome Free，CC BY 4.0，许可注释随文件内联），
+      随构建打包，无外部请求。不挂 data-md-component=source：主题默认会向 GitHub API
+      拉 star/fork 数，这里只要一个干净的仓库入口。 -#}
+  {%- set icon = config.theme.icon.repo or "fontawesome/brands/github" -%}
+  {%- include ".icons/" ~ icon ~ ".svg" -%}
+  <span>GitHub</span>
+</a>

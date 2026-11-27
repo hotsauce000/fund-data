@@ -1,0 +1,6 @@
+{#- 页脚版权行：版本号取 mkdocs.yml 的 extra.version（由 build_docs.py 从源码 __version__ 写入），
+    缺值时整段不渲染，不留孤立的「v」。许可证与仓库 LICENSE 一致。 -#}
+<div class="md-copyright">
+  <a href="{{ config.repo_url }}" target="_blank" rel="noopener">fund-data</a>
+  {% if config.extra.version %}<span>v{{ config.extra.version }}</span> <span>·</span> {% endif %}<span>MIT License</span>
+</div>

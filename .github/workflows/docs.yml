@@ -1,0 +1,54 @@
+# 文档站：build_docs.py 从仓库现成产物（README / examples / SKILL / fund_data.py）
+# 生成 mkdocs 工程（零手抄副本），严格构建后由 GitHub Pages 部署。
+# 线上地址：https://hotsauce000.github.io/fund-data/
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - build_docs.py
+      - site_assets/**
+      - README.md
+      - examples.md
+      - SKILL.md
+      - fund_data.py
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # 版本与本机验证过的组合一致（显式 pin mkdocs，防未来大版本漂移破坏 strict 构建）
+      - run: pip install mkdocs==1.6.1 mkdocs-material==9.8.2 pymdown-extensions==13.1.2 jieba==0.42.1
+      # 生成器只写 --out；输出目录必须在仓库之外，故放 workspace 外一级
+      - run: python3 build_docs.py --repo . --out ../site_build
+      # 产物放回 workspace 内（upload-pages-artifact 不收 workspace 外路径）
+      - run: python3 -m mkdocs build --strict -f ../site_build/mkdocs.yml -d "$GITHUB_WORKSPACE/site"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
