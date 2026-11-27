@@ -1,6 +1,7 @@
 # fund-data
 
 > 📦 项目主页：https://github.com/hotsauce000/fund-data — 更新、反馈、支持作者
+> 📚 文档站：[hotsauce000.github.io/fund-data](https://hotsauce000.github.io/fund-data/) — API 参考 · 使用菜谱 · 防封设计 · 实测坑区
 >
 > A 股域有 [a-stock-data](https://github.com/simonlin1212/a-stock-data)，**基金域有 fund-data**——形态对标、纪律同源。
 

@@ -128,7 +128,7 @@ TOKENS = (ICON_TOKEN, *STAR_TOKENS.values())
 PLACEHOLDER = re.compile(r"\x02\d+\x03")              # Linker.html 的片段占位符（见 CONTROL）
 # README 特性一览的装饰性项目符号：纯装饰，删除。其余 emoji 一律报错——含义标记不许被静默吞掉
 DECOR_EMOJI = frozenset("\U0001f310\U0001f4e6\U0001f3d7\U0001f9ed\U0001fa7a\U0001f4b0\U0001f50d"
-                        "\U0001f507\U0001f4c9\U0001f4c8\U0001f3e6\U0001f3e2\U0001f9fe")
+                        "\U0001f507\U0001f4c9\U0001f4c8\U0001f3e6\U0001f3e2\U0001f9fe\U0001f4da")
 # 线性警示图标（原创几何：描边三角 + 感叹号），全站替代 ⚠️ emoji
 ICON = ('<svg class="fd-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">'
         '<path d="M12 3.5 22 20H2z" /><path d="M12 10v4.6" /><path d="M12 17.2v.3" /></svg>')
